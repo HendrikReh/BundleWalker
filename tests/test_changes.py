@@ -162,6 +162,55 @@ def test_validation_rejects_normalized_duplicate_paths(tmp_path: Path) -> None:
         validate_change_set(_valid_ingest(source, first, second), context)
 
 
+def test_validation_canonicalizes_alias_before_create_over_existing_check(
+    tmp_path: Path,
+) -> None:
+    workspace, source, context = _ingest_context(tmp_path)
+    _write_concept(workspace, "topics/existing")
+
+    with pytest.raises(ChangeSetError, match="already exists"):
+        validate_change_set(
+            _valid_ingest(source, _draft(path="topics//existing")),
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    ("first_path", "second_path", "message"),
+    [
+        ("topics/agents", "topics//agents", "duplicate"),
+        ("topics/Agents", "topics/agents", "case-fold"),
+    ],
+)
+def test_validation_rejects_prospective_target_aliases_before_operations(
+    tmp_path: Path,
+    first_path: str,
+    second_path: str,
+    message: str,
+) -> None:
+    _, source, context = _ingest_context(tmp_path)
+
+    with pytest.raises(ChangeSetError, match=message):
+        validate_change_set(
+            _valid_ingest(
+                source,
+                _draft(path=first_path),
+                _draft(path=second_path, title="Other agents"),
+            ),
+            context,
+        )
+
+
+def test_validation_rejects_bare_category_path(tmp_path: Path) -> None:
+    _, source, context = _ingest_context(tmp_path)
+
+    with pytest.raises(ChangeSetError, match="concept name"):
+        validate_change_set(
+            _valid_ingest(source, _draft(path="topics")),
+            context,
+        )
+
+
 def test_validation_enforces_create_replace_and_base_digest_rules(tmp_path: Path) -> None:
     workspace, source, context = _ingest_context(tmp_path)
     _write_concept(workspace, "topics/existing")
@@ -343,6 +392,27 @@ def test_synthesis_rejects_unread_citations(tmp_path: Path) -> None:
         validate_change_set(ChangeSet(summary="Saved answer.", drafts=[synthesis]), context)
 
 
+def test_synthesis_rejects_self_citation_even_if_future_id_is_marked_readable(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    synthesis_id = "syntheses/answer"
+    context = ChangeValidationContext(
+        mode="synthesis",
+        repository=OkfRepository(workspace.wiki_dir),
+        readable_concepts=frozenset({synthesis_id}),
+    )
+    synthesis = _draft(
+        path=synthesis_id,
+        type=ConceptType.SYNTHESIS,
+        body="# Answer\n\nA circular conclusion [1].\n",
+        citations=[Citation(number=1, concept_id=synthesis_id)],
+    )
+
+    with pytest.raises(ChangeSetError, match="live concept"):
+        validate_change_set(ChangeSet(summary="Saved answer.", drafts=[synthesis]), context)
+
+
 @pytest.mark.parametrize(("start", "end"), [(1, 4), (4, 4)])
 def test_validation_rejects_source_spans_outside_raw_line_count(
     tmp_path: Path,
@@ -492,3 +562,84 @@ def test_build_prospective_wiki_refuses_deterministic_lint_errors(
             tmp_path / "prospective",
             NOW,
         )
+
+
+def test_build_prospective_wiki_never_writes_through_a_copied_live_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace, source, _ = _ingest_context(tmp_path)
+    (workspace.root / source.stored_relative_path).write_bytes(source.content)
+    _write_concept(workspace, "topics/live-target", title="Live target")
+    live_target = workspace.wiki_dir / "topics/live-target.md"
+    linked_concept = workspace.wiki_dir / "topics/linked.md"
+    linked_concept.symlink_to(live_target.resolve())
+    regenerate_indexes(workspace.wiki_dir)
+    repository = OkfRepository(workspace.wiki_dir)
+    context = ChangeValidationContext(
+        mode="ingest",
+        repository=repository,
+        readable_concepts=frozenset(),
+        source=source,
+    )
+    replacement = _draft(
+        operation=ChangeOperation.REPLACE,
+        path="topics/linked",
+        title="Prospective replacement",
+        base_digest=repository.get("topics/linked").digest,
+    )
+    live_bytes = live_target.read_bytes()
+    destination = tmp_path / "prospective"
+
+    build_prospective_wiki(
+        workspace,
+        _valid_ingest(source, replacement),
+        context,
+        destination,
+        NOW,
+    )
+
+    assert live_target.read_bytes() == live_bytes
+    assert (destination / "topics/linked.md").is_file()
+    assert not (destination / "topics/linked.md").is_symlink()
+
+
+def test_build_prospective_wiki_rejects_a_live_symlink_that_escapes_the_wiki(
+    tmp_path: Path,
+) -> None:
+    workspace, source, context = _ingest_context(tmp_path)
+    (workspace.root / source.stored_relative_path).write_bytes(source.content)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("outside data\n", encoding="utf-8")
+    (workspace.wiki_dir / "topics/external").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(ChangeSetError, match="symlink escapes"):
+        build_prospective_wiki(
+            workspace,
+            _valid_ingest(source),
+            context,
+            tmp_path / "prospective",
+            NOW,
+        )
+
+
+def test_build_prospective_wiki_rejects_destination_inside_live_wiki(
+    tmp_path: Path,
+) -> None:
+    workspace, source, context = _ingest_context(tmp_path)
+    (workspace.root / source.stored_relative_path).write_bytes(source.content)
+    destination = workspace.wiki_dir / "prospective"
+
+    with pytest.raises(ChangeSetError, match="outside the live wiki"):
+        build_prospective_wiki(
+            workspace,
+            _valid_ingest(source),
+            context,
+            destination,
+            NOW,
+        )
+
+    assert not destination.exists()

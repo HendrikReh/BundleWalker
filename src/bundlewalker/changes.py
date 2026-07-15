@@ -55,11 +55,20 @@ def validate_change_set(
         raise ChangeSetError(f"cannot validate against the current wiki: {exc}") from exc
 
     normalized_drafts: dict[str, DraftConcept] = {}
+    folded_drafts: dict[str, str] = {}
     for draft in change_set.drafts:
         concept_id = _normalized_draft_path(draft.path)
         if concept_id in normalized_drafts:
             raise ChangeSetError(f"change set contains duplicate path: {concept_id}")
+        folded_id = concept_id.casefold()
+        if previous := folded_drafts.get(folded_id):
+            raise ChangeSetError(
+                f"change set contains a case-fold path collision: {previous} and {concept_id}"
+            )
         normalized_drafts[concept_id] = draft
+        folded_drafts[folded_id] = concept_id
+
+    for concept_id, draft in normalized_drafts.items():
         _validate_category(concept_id, draft.type)
         _validate_operation(concept_id, draft, live_documents)
 
@@ -130,13 +139,15 @@ def build_prospective_wiki(
 ) -> None:
     """Build and lint the complete wiki tree that a proposal would produce."""
     validate_change_set(change_set, context)
+    _validate_destination_location(workspace.wiki_dir, destination)
     _require_empty_destination(destination)
+    _validate_copy_symlinks(workspace.wiki_dir)
     try:
         shutil.copytree(
             workspace.wiki_dir,
             destination,
             dirs_exist_ok=destination.exists(),
-            symlinks=True,
+            symlinks=False,
         )
         for draft in change_set.drafts:
             target = concept_path(destination, _normalized_draft_path(draft.path))
@@ -162,9 +173,10 @@ def build_prospective_wiki(
 
 
 def _normalized_draft_path(value: str) -> str:
-    concept_id = value[:-3] if value.endswith(".md") else value
-    if not concept_id or concept_id.endswith("/"):
+    unnormalized = value[:-3] if value.endswith(".md") else value
+    if not unnormalized:
         raise ChangeSetError(f"unsafe concept path: {value}")
+    concept_id = PurePosixPath(unnormalized).as_posix()
     try:
         concept_path(Path("/bundle"), concept_id)
     except OkfError as exc:
@@ -178,6 +190,10 @@ def _validate_category(concept_id: str, concept_type: ConceptType) -> None:
     if not parts or parts[0] != expected:
         raise ChangeSetError(
             f"{concept_type.value} path must be in the {expected} category: {concept_id}"
+        )
+    if len(parts) < 2:
+        raise ChangeSetError(
+            f"{concept_type.value} path must include a concept name below {expected}: {concept_id}"
         )
 
 
@@ -267,15 +283,22 @@ def _validate_citations(
             )
 
         for citation in draft.citations:
-            target_type = prospective_types.get(citation.concept_id) or live_types.get(
-                citation.concept_id
-            )
+            live_type = live_types.get(citation.concept_id)
+            if context.mode == "synthesis":
+                if live_type is None:
+                    raise ChangeSetError(
+                        "synthesis citation must target an existing live concept: "
+                        f"{citation.concept_id}"
+                    )
+                if citation.concept_id not in context.readable_concepts:
+                    raise ChangeSetError(
+                        f"synthesis citation target was not read: {citation.concept_id}"
+                    )
+                target_type = live_type
+            else:
+                target_type = prospective_types.get(citation.concept_id) or live_type
             if target_type is None:
                 raise ChangeSetError(f"citation target does not exist: {citation.concept_id}")
-            if context.mode == "synthesis" and citation.concept_id not in context.readable_concepts:
-                raise ChangeSetError(
-                    f"synthesis citation target was not read: {citation.concept_id}"
-                )
             if citation.start_line is None:
                 continue
             if target_type != ConceptType.SOURCE.value:
@@ -331,3 +354,29 @@ def _require_empty_destination(destination: Path) -> None:
             raise ChangeSetError(
                 f"could not inspect prospective destination: {destination}"
             ) from exc
+
+
+def _validate_destination_location(live_wiki: Path, destination: Path) -> None:
+    resolved_live = live_wiki.resolve(strict=False)
+    resolved_destination = destination.resolve(strict=False)
+    if resolved_destination.is_relative_to(resolved_live):
+        raise ChangeSetError(
+            f"prospective destination must be outside the live wiki: {destination}"
+        )
+
+
+def _validate_copy_symlinks(root: Path) -> None:
+    resolved_root = root.resolve(strict=False)
+    try:
+        paths = root.rglob("*")
+        for path in paths:
+            if not path.is_symlink():
+                continue
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ChangeSetError(f"wiki contains an unsafe symlink: {path}") from exc
+            if not target.is_relative_to(resolved_root):
+                raise ChangeSetError(f"wiki symlink escapes the bundle: {path}")
+    except OSError as exc:
+        raise ChangeSetError(f"could not inspect wiki links: {root}") from exc
