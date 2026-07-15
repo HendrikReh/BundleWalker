@@ -9,12 +9,15 @@ from pydantic_ai.models import KnownModelName, Model
 
 from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
 from bundlewalker.domain import CitedAnswer
-from bundlewalker.errors import AgentRunError, OkfError, UsageError
+from bundlewalker.errors import AgentRunError, UsageError
 from bundlewalker.okf.repository import OkfRepository
 
 type AgentModel = Model | KnownModelName | str
 
 _CITATION_MARKER = re.compile(r"\[(\d+)]")
+_MAX_CITATION_NUMBER = 100
+_MAX_CITATION_DIGITS = len(str(_MAX_CITATION_NUMBER))
+_MAX_CITATION_MARKERS = 1_000
 
 
 def create_query_agent(model: AgentModel) -> Agent[AgentDependencies, CitedAnswer]:
@@ -78,29 +81,70 @@ def validate_cited_answer(
     read_ids: frozenset[str],
 ) -> None:
     """Reject malformed, nonexistent, or unread concept citations."""
+    error_message: str | None = None
+    try:
+        _validate_cited_answer(answer, repository, read_ids)
+    except AgentRunError as exc:
+        error_message = str(exc)
+    except Exception:
+        error_message = "query citations could not be checked"
+    if error_message is not None:
+        raise AgentRunError(error_message) from None
+
+
+def _validate_cited_answer(
+    answer: CitedAnswer,
+    repository: OkfRepository,
+    read_ids: frozenset[str],
+) -> None:
     if not answer.title.strip():
         raise AgentRunError("query answer title must not be empty")
     if not answer.body.strip():
         raise AgentRunError("query answer body must not be empty")
 
-    markers = [int(value) for value in _CITATION_MARKER.findall(answer.body)]
-    marker_order = list(dict.fromkeys(markers))
-    citation_numbers = [citation.number for citation in answer.citations]
-    all_numbers = sorted(set(markers) | set(citation_numbers))
-    expected = list(range(1, max(all_numbers) + 1)) if all_numbers else []
-    if not all_numbers:
+    marker_numbers = _bounded_marker_numbers(answer.body)
+    if not marker_numbers and not answer.citations:
         raise AgentRunError("query answer must include at least one citation")
-    if all_numbers != expected or marker_order != expected:
-        raise AgentRunError("query citation numbers must be contiguous starting at 1")
-    if set(markers) != set(citation_numbers) or len(citation_numbers) != len(set(citation_numbers)):
+    if len(answer.citations) > _MAX_CITATION_NUMBER:
+        raise AgentRunError("query answer contains too many structured citations")
+
+    citation_numbers: set[int] = set()
+    for citation in answer.citations:
+        if citation.number > _MAX_CITATION_NUMBER:
+            raise AgentRunError("query citation number exceeds the supported limit")
+        if citation.number in citation_numbers:
+            raise AgentRunError("query citation markers do not match structured citations")
+        citation_numbers.add(citation.number)
+    if marker_numbers != citation_numbers:
         raise AgentRunError("query citation markers do not match structured citations")
 
-    try:
-        documents = repository.scan()
-    except OkfError:
-        raise AgentRunError("query citations could not be checked") from None
+    documents = repository.scan()
     for citation in answer.citations:
         if citation.concept_id not in documents:
             raise AgentRunError(f"query citation target does not exist: {citation.concept_id}")
         if citation.concept_id not in read_ids:
             raise AgentRunError(f"query citation target was not read: {citation.concept_id}")
+
+
+def _bounded_marker_numbers(body: str) -> set[int]:
+    marker_numbers: set[int] = set()
+    expected_new_number = 1
+    marker_count = 0
+    for match in _CITATION_MARKER.finditer(body):
+        marker_count += 1
+        if marker_count > _MAX_CITATION_MARKERS:
+            raise AgentRunError("query answer contains too many citation markers")
+
+        digits = match.group(1)
+        if len(digits) > _MAX_CITATION_DIGITS:
+            raise AgentRunError("query citation number exceeds the supported digit limit")
+        number = int(digits)
+        if number > _MAX_CITATION_NUMBER:
+            raise AgentRunError("query citation number exceeds the supported value limit")
+        if number in marker_numbers:
+            continue
+        if number != expected_new_number:
+            raise AgentRunError("query citation numbers must be contiguous starting at 1")
+        marker_numbers.add(number)
+        expected_new_number += 1
+    return marker_numbers
