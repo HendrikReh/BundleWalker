@@ -194,6 +194,7 @@ def test_complete_offline_review_first_workflow_and_recovery(
     assert ingestion_calls == ["test:model", "test:model"]
 
     query_calls: list[str] = []
+    pending_recovery: PreparedTransaction | None = None
 
     async def fake_query_runner(
         model: QueryModel,
@@ -201,6 +202,9 @@ def test_complete_offline_review_first_workflow_and_recovery(
         question: str,
     ) -> tuple[CitedAnswer, frozenset[str]]:
         query_calls.append(f"{model}:{question}")
+        if pending_recovery is not None:
+            assert (root / "wiki").is_dir()
+            assert not pending_recovery.transaction_dir.exists()
         read_result = read_concept(
             RunContext(deps=dependencies, model=TestModel(), usage=RunUsage()),
             "topics/review-first-knowledge",
@@ -219,6 +223,7 @@ def test_complete_offline_review_first_workflow_and_recovery(
     assert asked.exit_code == 0, asked.output
     assert "inspectable [1]" in asked.output
     assert "[1] [Review-first knowledge](/topics/review-first-knowledge.md)" in asked.output
+    assert len(query_calls) == 1
     assert _knowledge_bytes(root) == before_ask
 
     before_save_decline = _knowledge_bytes(root)
@@ -230,9 +235,9 @@ def test_complete_offline_review_first_workflow_and_recovery(
     )
     assert declined_save.exit_code == 0, declined_save.output
     assert "Saved synthesis: Why review knowledge changes?" in declined_save.output
+    assert len(query_calls) == 2
     assert _knowledge_bytes(root) == before_save_decline
 
-    calls_before_accept = len(query_calls)
     accepted_save = runner.invoke(
         app,
         ["ask", "Why review knowledge changes?", "--model", "test:model", "--save"],
@@ -240,7 +245,7 @@ def test_complete_offline_review_first_workflow_and_recovery(
         catch_exceptions=False,
     )
     assert accepted_save.exit_code == 0, accepted_save.output
-    assert len(query_calls) == calls_before_accept + 1
+    assert len(query_calls) == 3
     assert (root / "wiki" / "syntheses" / "why-review-knowledge-changes.md").is_file()
 
     semantic_calls: list[str] = []
@@ -296,16 +301,18 @@ def test_complete_offline_review_first_workflow_and_recovery(
     )
     live_before_interruption = _knowledge_bytes(root)
     _set_swapping(interrupted)
+    pending_recovery = interrupted
     assert not workspace.wiki_dir.exists()
     assert interrupted.backup_wiki.is_dir()
 
-    recovered_then_deduplicated = runner.invoke(
+    recovered_then_asked = runner.invoke(
         app,
-        ["ingest", str(source_path)],
+        ["ask", "Why review knowledge changes?", "--model", "test:model"],
         catch_exceptions=False,
     )
-    assert recovered_then_deduplicated.exit_code == 0, recovered_then_deduplicated.output
-    assert "already ingested" in recovered_then_deduplicated.output
+    assert recovered_then_asked.exit_code == 0, recovered_then_asked.output
+    assert "inspectable [1]" in recovered_then_asked.output
+    assert len(query_calls) == 4
     assert ingestion_calls == ["test:model", "test:model"]
     assert _knowledge_bytes(root) == live_before_interruption
     assert not interrupted.transaction_dir.exists()

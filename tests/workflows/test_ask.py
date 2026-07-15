@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from bundlewalker.domain import Citation, CitedAnswer, OkfMetadata
 from bundlewalker.errors import AgentRunError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
-from bundlewalker.transactions import discard_transaction
+from bundlewalker.transactions import PreparedTransaction, discard_transaction
 from bundlewalker.workflows.ask import AnsweredQuestion, answer_question, prepare_synthesis
 from bundlewalker.workspace import Workspace, initialize_workspace
 
@@ -54,11 +55,19 @@ def _answer(title: str = "Résumé of Agent Design") -> CitedAnswer:
     )
 
 
-async def test_plain_answer_is_read_only_including_transaction_recovery(tmp_path: Path) -> None:
+def _set_swapping_after_old(prepared: PreparedTransaction) -> None:
+    manifest_path = prepared.transaction_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["phase"] = "swapping"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+
+
+async def test_plain_answer_without_pending_transaction_is_read_only(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
-    unfinished = workspace.root / ".bundlewalker" / "transactions" / "unfinished"
-    unfinished.mkdir(parents=True)
-    (unfinished / "sentinel").write_bytes(b"must remain")
     before = _tree_bytes(workspace.root)
     calls = 0
 
@@ -89,6 +98,45 @@ async def test_plain_answer_is_read_only_including_transaction_recovery(tmp_path
     )
     assert calls == 1
     assert _tree_bytes(workspace.root) == before
+
+
+async def test_answer_recovers_authenticated_swap_before_query_runner(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    prepared = prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=_answer("Interrupted synthesis"),
+            read_ids=frozenset({"topics/agents"}),
+        ),
+        occurred_at=NOW,
+    )
+    expected_wiki = _tree_bytes(workspace.wiki_dir)
+    _set_swapping_after_old(prepared)
+    assert not workspace.wiki_dir.exists()
+    assert prepared.backup_wiki.is_dir()
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        assert workspace.wiki_dir.is_dir()
+        assert not prepared.transaction_dir.exists()
+        dependencies.read_ids.add("topics/agents")
+        return _answer(), frozenset({"topics/agents"})
+
+    result = await answer_question(
+        workspace,
+        "How do agents use tools?",
+        explicit_model="test:model",
+        environment={},
+        runner=runner,
+    )
+
+    assert result.answer == _answer()
+    assert result.read_ids == frozenset({"topics/agents"})
+    assert _tree_bytes(workspace.wiki_dir) == expected_wiki
+    assert not prepared.transaction_dir.exists()
 
 
 async def test_answer_workflow_revalidates_injected_runner_output(tmp_path: Path) -> None:

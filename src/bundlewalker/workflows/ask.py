@@ -55,7 +55,8 @@ async def answer_question(
     environment: Mapping[str, str] | None = None,
     runner: QueryRunner | None = None,
 ) -> AnsweredQuestion:
-    """Run and validate one cited query without writing or recovering transactions."""
+    """Recover interrupted persistence, then run and validate one cited query."""
+    recover_transactions(workspace)
     if not question.strip():
         raise UsageError("question must not be empty")
 
