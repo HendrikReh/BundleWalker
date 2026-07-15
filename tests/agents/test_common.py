@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic_ai import RunContext
@@ -196,6 +200,9 @@ def test_read_concept_converts_nested_binary_metadata_to_url_safe_base64(
         "extension:\n"
         "  payloads:\n"
         "    - !!binary /w==\n"
+        "  mapping:\n"
+        "    ? !!binary /w==\n"
+        "    : binary-key\n"
         "---\n"
         "# Binary metadata\n",
         encoding="utf-8",
@@ -211,18 +218,103 @@ def test_read_concept_converts_nested_binary_metadata_to_url_safe_base64(
     result = read_concept(_context(dependencies), "topics/binary")
 
     assert "error" not in result
-    assert result["metadata"]["extension"] == {"payloads": ["_w=="]}
+    assert result["metadata"]["extension"] == {
+        "payloads": ["_w=="],
+        "mapping": {"_w==": "binary-key"},
+    }
     json.dumps(result, allow_nan=False)
     assert dependencies.read_ids == {"topics/binary"}
+
+
+def test_read_concept_converts_nested_non_finite_floats_to_stable_strings(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    path = root / "topics" / "non-finite.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Non-finite metadata\n"
+        "description: Exercises permissive numeric extensions.\n"
+        "extension:\n"
+        "  values: [.nan, .inf, -.inf]\n"
+        "---\n"
+        "# Non-finite metadata\n",
+        encoding="utf-8",
+    )
+    repository = OkfRepository(root)
+    dependencies = AgentDependencies(
+        repository=repository,
+        retriever=LexicalRetriever(repository),
+        conventions="# Conventions",
+        root_index="# Knowledge Index",
+    )
+
+    result = read_concept(_context(dependencies), "topics/non-finite")
+
+    assert "error" not in result
+    assert result["metadata"]["extension"] == {"values": ["NaN", "Infinity", "-Infinity"]}
+    json.dumps(result, allow_nan=False)
+    assert dependencies.read_ids == {"topics/non-finite"}
+
+
+def test_read_concept_sorts_nested_sets_by_canonical_json_across_hash_seeds(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    path = root / "topics" / "set.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Set metadata\n"
+        "description: Exercises permissive unordered extensions.\n"
+        "extension:\n"
+        "  labels: !!set {zeta: null, alpha: null, middle: null}\n"
+        "---\n"
+        "# Set metadata\n",
+        encoding="utf-8",
+    )
+    script = """
+import json
+import sys
+from pathlib import Path
+
+from pydantic_ai import RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
+
+from bundlewalker.agents.common import AgentDependencies, read_concept
+from bundlewalker.okf.repository import OkfRepository
+from bundlewalker.retrieval import LexicalRetriever
+
+repository = OkfRepository(Path(sys.argv[1]))
+dependencies = AgentDependencies(repository, LexicalRetriever(repository), "", "")
+context = RunContext(deps=dependencies, model=TestModel(), usage=RunUsage())
+result = read_concept(context, "topics/set")
+print(json.dumps(result["metadata"]["extension"]["labels"]))
+"""
+
+    results: list[list[str]] = []
+    for seed in ("1", "2", "3", "4", "5"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        results.append(cast(list[str], json.loads(completed.stdout)))
+
+    assert results == [["alpha", "middle", "zeta"]] * 5
 
 
 def test_read_concept_serialization_failure_is_safe_and_not_recorded() -> None:
     document = OkfDocument(
         concept_id="topics/unserializable",
         path=Path("topics/unserializable.md"),
-        metadata=OkfMetadata.model_validate(
-            {"type": "Topic", "extension": object()}
-        ),
+        metadata=OkfMetadata.model_validate({"type": "Topic", "extension": object()}),
         body="# Unserializable\n",
         digest="a" * 64,
     )
@@ -252,7 +344,5 @@ def test_read_tools_register_exactly_the_three_read_only_functions() -> None:
 
     assert names == {"list_concepts", "search_concepts", "read_concept"}
     assert all(
-        forbidden not in name
-        for forbidden in ("write", "delete", "rename")
-        for name in names
+        forbidden not in name for forbidden in ("write", "delete", "rename") for name in names
     )

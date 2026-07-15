@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import math
+from base64 import urlsafe_b64encode
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -125,7 +127,8 @@ def read_concept(
 ) -> ConceptReadResult:
     """Read one safe wiki concept, capped at 64,000 body characters.
 
-    Binary values in permissive metadata extras become URL-safe Base64 text.
+    Binary values in permissive metadata extras become URL-safe Base64 text. Non-finite
+    floats become stable strings, and unordered sets become canonically sorted arrays.
 
     Args:
         ctx: The current agent run context.
@@ -169,15 +172,58 @@ def _summary_entry(summary: ConceptSummary) -> ConceptEntry:
 
 
 def _metadata_for_tool(metadata: OkfMetadata) -> dict[str, Any]:
-    """Convert nested bytes to deterministic URL-safe Base64 JSON strings."""
-    value = to_jsonable_python(
-        metadata.model_dump(mode="python"),
-        bytes_mode="base64",
-        inf_nan_mode="strings",
-    )
+    """Recursively normalize permissive metadata into deterministic JSON values."""
+    value = _normalize_json_value(metadata.model_dump(mode="python"))
     if not isinstance(value, dict):
         raise TypeError("metadata serialization must produce an object")
     return cast(dict[str, Any], value)
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        return value
+    if isinstance(value, bytes):
+        return urlsafe_b64encode(value).decode("ascii")
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[Any, Any], value)
+        return {
+            _normalize_json_key(key): _normalize_json_value(item) for key, item in mapping.items()
+        }
+    if isinstance(value, (set, frozenset)):
+        unordered = cast(set[Any] | frozenset[Any], value)
+        items = [_normalize_json_value(item) for item in unordered]
+        return sorted(items, key=_canonical_json)
+    if isinstance(value, (list, tuple)):
+        sequence = cast(list[Any] | tuple[Any, ...], value)
+        return [_normalize_json_value(item) for item in sequence]
+
+    converted = to_jsonable_python(value, bytes_mode="base64", inf_nan_mode="strings")
+    if converted is value:
+        raise TypeError(f"unsupported metadata value: {type(value).__name__}")
+    return _normalize_json_value(converted)
+
+
+def _normalize_json_key(value: Any) -> str | int | float | bool | None:
+    normalized = _normalize_json_value(value)
+    if normalized is None or isinstance(normalized, (str, bool, int, float)):
+        return normalized
+    return _canonical_json(normalized)
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _child_directories(repository: OkfRepository, directory: str) -> list[str]:
