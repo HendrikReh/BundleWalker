@@ -4,6 +4,7 @@ import difflib
 import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from bundlewalker.domain import OkfDocument
 from bundlewalker.okf.repository import OkfRepository
@@ -36,6 +37,7 @@ def regenerate_indexes(root: Path) -> None:
         ]
         (directory / "index.md").write_text(
             _render_index(
+                directory,
                 relative_directory,
                 child_directories,
                 child_documents,
@@ -83,8 +85,8 @@ def tree_diff(old: Path, new: Path) -> str:
         new_name = f"wiki/{relative_path.as_posix()}" if new_text is not None else "/dev/null"
         chunks.extend(
             difflib.unified_diff(
-                [] if old_text is None else old_text.splitlines(keepends=True),
-                [] if new_text is None else new_text.splitlines(keepends=True),
+                [] if old_text is None else _diff_lines(old_text),
+                [] if new_text is None else _diff_lines(new_text),
                 fromfile=old_name,
                 tofile=new_name,
                 lineterm="\n",
@@ -93,7 +95,12 @@ def tree_diff(old: Path, new: Path) -> str:
     return "".join(chunks)
 
 
+def _diff_lines(text: str) -> list[str]:
+    return [f"{line}\n" for line in text.splitlines()]
+
+
 def _render_index(
+    directory: Path,
     relative_directory: Path,
     child_directories: list[Path],
     child_documents: list[OkfDocument],
@@ -107,7 +114,7 @@ def _render_index(
     if child_directories:
         directory_lines = [
             (
-                f"* [{_directory_title(path.name)}]({path.name}/index.md) - "
+                f"* {_markdown_link(_directory_title(path.name), f'{path.name}/index.md')} - "
                 f"Browse {_directory_title(path.name)} concepts."
             )
             for path in child_directories
@@ -116,16 +123,21 @@ def _render_index(
     if child_documents:
         concept_lines: list[str] = []
         for item in child_documents:
-            target = f"{PurePosixPath(item.concept_id).name}.md"
+            target = item.path.relative_to(directory).as_posix()
             title = item.metadata.title or _directory_title(PurePosixPath(item.concept_id).name)
             description = item.metadata.description or ""
-            concept_lines.append(f"* [{title}]({target}) - {description}")
+            concept_lines.append(f"* {_markdown_link(title, target)} - {description}")
         sections.append("## Concepts\n\n" + "\n".join(concept_lines))
     return "\n\n".join(sections) + "\n"
 
 
 def _directory_title(name: str) -> str:
     return name.replace("-", " ").title()
+
+
+def _markdown_link(label: str, target: str) -> str:
+    escaped_label = label.replace("\\", "\\\\").replace("[", r"\[").replace("]", r"\]")
+    return f"[{escaped_label}]({quote(target, safe='/')})"
 
 
 def _one_line(value: str) -> str:

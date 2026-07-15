@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 from bundlewalker.okf.derived import (
     prepend_log_entry,
     regenerate_indexes,
     tree_diff,
 )
+from bundlewalker.okf.documents import extract_links
 
 
 def _write_concept(
@@ -16,8 +18,9 @@ def _write_concept(
     *,
     title: str,
     description: str,
+    suffix: str = ".md",
 ) -> None:
-    path = root / f"{concept_id}.md"
+    path = root / f"{concept_id}{suffix}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\ntype: Topic\ntitle: {title}\ndescription: {description}\ntags: []\n---\n\n# Notes\n",
@@ -77,6 +80,42 @@ def test_regenerate_indexes_creates_stable_okf_navigation(tmp_path: Path) -> Non
     )
     assert (root / "entities" / "index.md").read_text(encoding="utf-8") == ("# Entities\n")
     assert "---" not in (root / "index.md").read_text(encoding="utf-8")
+
+
+def test_regenerate_indexes_preserves_and_encodes_real_targets(tmp_path: Path) -> None:
+    root = tmp_path / "wiki"
+    _write_concept(
+        root,
+        "topics/Case File",
+        title=r"Case [Name] \ Guide",
+        description="A mixed-case suffix.",
+        suffix=".MD",
+    )
+    _write_concept(
+        root,
+        "topics/More [Notes]/Deep File",
+        title="Deep File",
+        description="A nested mixed-case suffix.",
+        suffix=".Md",
+    )
+
+    regenerate_indexes(root)
+
+    topics_index_path = root / "topics" / "index.md"
+    topics_index = topics_index_path.read_text(encoding="utf-8")
+    topics_targets = extract_links(topics_index)
+    assert topics_targets == (
+        "More%20%5BNotes%5D/index.md",
+        "Case%20File.MD",
+    )
+    assert r"[Case \[Name\] \\ Guide](Case%20File.MD)" in topics_index
+    for target in topics_targets:
+        assert (topics_index_path.parent / unquote(target)).exists()
+
+    nested_index_path = root / "topics" / "More [Notes]" / "index.md"
+    nested_targets = extract_links(nested_index_path.read_text(encoding="utf-8"))
+    assert nested_targets == ("Deep%20File.Md",)
+    assert (nested_index_path.parent / unquote(nested_targets[0])).exists()
 
 
 def test_prepend_log_entry_creates_newest_date_first(tmp_path: Path) -> None:
@@ -151,3 +190,19 @@ def test_tree_diff_ignores_unchanged_files(tmp_path: Path) -> None:
     (new / "same.md").write_text("same\n", encoding="utf-8")
 
     assert tree_diff(old, new) == ""
+
+
+def test_tree_diff_separates_replacement_lines_without_final_newlines(
+    tmp_path: Path,
+) -> None:
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / "changed.md").write_text("before", encoding="utf-8")
+    (new / "changed.md").write_text("after", encoding="utf-8")
+
+    diff = tree_diff(old, new)
+
+    assert "-before\n+after\n" in diff
+    assert "-before+after" not in diff
