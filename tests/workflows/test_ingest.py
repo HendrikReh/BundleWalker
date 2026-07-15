@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,6 +135,57 @@ async def test_duplicate_digest_is_a_typed_noop_before_model_resolution_or_runne
         nonlocal calls
         calls += 1
         raise AssertionError("duplicate ingestion invoked the model")
+
+    duplicate = await prepare_ingestion(
+        workspace,
+        input_path,
+        explicit_model=None,
+        environment={},
+        runner=must_not_run,
+        occurred_at=NOW,
+    )
+
+    assert duplicate == DuplicateIngestion()
+    assert calls == 0
+
+
+@pytest.mark.parametrize("invalid_context", ["missing-conventions", "linked-root-index"])
+async def test_duplicate_ignores_unused_invalid_protected_context(
+    tmp_path: Path,
+    invalid_context: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("first\nsecond\n", encoding="utf-8")
+    first = await prepare_ingestion(
+        workspace,
+        input_path,
+        explicit_model="test:model",
+        environment={},
+        runner=_valid_runner,
+        occurred_at=NOW,
+    )
+    assert isinstance(first, PreparedIngestion)
+    commit_transaction(first.transaction)
+
+    if invalid_context == "missing-conventions":
+        workspace.conventions_file.unlink()
+    else:
+        outside = tmp_path / "outside-index.md"
+        outside.write_text("outside-secret", encoding="utf-8")
+        root_index = workspace.wiki_dir / "index.md"
+        root_index.unlink()
+        root_index.symlink_to(outside)
+    calls = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _source: RawSource,
+    ) -> tuple[ChangeSet, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("duplicate ingestion invoked the model runner")
 
     duplicate = await prepare_ingestion(
         workspace,
@@ -325,3 +379,57 @@ async def test_ingestion_accepts_legitimate_nested_configured_paths(tmp_path: Pa
 
     assert isinstance(outcome, PreparedIngestion)
     discard_transaction(outcome.transaction)
+
+
+def test_fifo_context_is_rejected_promptly_without_invoking_the_runner(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    workspace.conventions_file.unlink()
+    os.mkfifo(workspace.conventions_file)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("first\nsecond\n", encoding="utf-8")
+    marker = tmp_path / "runner-called"
+    script = """
+import asyncio
+import sys
+from pathlib import Path
+
+from bundlewalker.errors import WorkspaceError
+from bundlewalker.workflows.ingest import prepare_ingestion
+from bundlewalker.workspace import discover_workspace
+
+root, source, marker = map(Path, sys.argv[1:])
+
+async def runner(*_args):
+    marker.write_text("called", encoding="utf-8")
+    raise AssertionError("FIFO context reached the runner")
+
+try:
+    asyncio.run(
+        prepare_ingestion(
+            discover_workspace(root),
+            source,
+            explicit_model="test:model",
+            environment={},
+            runner=runner,
+        )
+    )
+except WorkspaceError as exc:
+    print(exc)
+else:
+    raise SystemExit("FIFO context was accepted")
+
+if marker.exists():
+    raise SystemExit("runner was invoked")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(workspace.root), str(input_path), str(marker)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "regular file" in result.stdout
+    assert not marker.exists()

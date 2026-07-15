@@ -50,26 +50,28 @@ async def prepare_ingestion(
 ) -> IngestionOutcome:
     """Prepare a validated ingestion transaction without changing live knowledge."""
     recover_transactions(workspace)
-    _validate_ingestion_paths(workspace)
+    _validate_repository_path(workspace)
     source = load_raw_source(source_path, workspace)
     repository = OkfRepository(workspace.wiki_dir)
     if _contains_source_digest(repository, source.sha256):
         return DuplicateIngestion()
 
+    conventions = _read_context(
+        workspace,
+        workspace.config.conventions_file,
+        "workspace conventions",
+    )
+    root_index = _read_context(
+        workspace,
+        (PurePosixPath(workspace.config.wiki_dir) / "index.md").as_posix(),
+        "root index",
+    )
     model = resolve_model(explicit_model, environment if environment is not None else os.environ)
     dependencies = AgentDependencies(
         repository=repository,
         retriever=LexicalRetriever(repository),
-        conventions=_read_context(
-            workspace,
-            workspace.config.conventions_file,
-            "workspace conventions",
-        ),
-        root_index=_read_context(
-            workspace,
-            (PurePosixPath(workspace.config.wiki_dir) / "index.md").as_posix(),
-            "root index",
-        ),
+        conventions=conventions,
+        root_index=root_index,
     )
     selected_runner = runner if runner is not None else run_ingestion_agent
     change_set, read_ids = await selected_runner(model, dependencies, source)
@@ -99,21 +101,9 @@ def _contains_source_digest(repository: OkfRepository, digest: str) -> bool:
     return False
 
 
-def _validate_ingestion_paths(workspace: Workspace) -> None:
+def _validate_repository_path(workspace: Workspace) -> None:
     wiki_parts = _safe_configured_parts(workspace.config.wiki_dir, "configured wiki path")
     with _open_workspace_directory(workspace, wiki_parts, "configured wiki path"):
-        pass
-    with _open_workspace_file(
-        workspace,
-        _safe_configured_parts(workspace.config.conventions_file, "workspace conventions"),
-        "workspace conventions",
-    ):
-        pass
-    with _open_workspace_file(
-        workspace,
-        (*wiki_parts, "index.md"),
-        "root index",
-    ):
         pass
 
 
@@ -169,7 +159,7 @@ def _open_workspace_file(
     description: str,
 ) -> Generator[int]:
     with _open_workspace_directory(workspace, parts[:-1], description) as parent:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor: int | None = None
         try:
             descriptor = os.open(parts[-1], flags, dir_fd=parent)
