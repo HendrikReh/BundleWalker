@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import stat
+import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -22,10 +24,10 @@ from bundlewalker.workspace import RawSource, Workspace
 _SCHEMA_VERSION = 1
 _TRANSACTIONS_PATH = PurePosixPath(".bundlewalker/transactions")
 _MANIFEST_NAME = "manifest.json"
+_IDENTITY_NAME = "identity.json"
 _PROSPECTIVE_NAME = "prospective-wiki"
 _BACKUP_NAME = "backup-wiki"
 _VALIDATION_WORKSPACE_NAME = "validation-workspace"
-_BASE_CHECK_NAME = "base-wiki-check"
 _RAW_PAYLOAD_NAME = "raw-source"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _Phase = Literal["prepared", "raw-persisted", "swapping", "new-live"]
@@ -38,9 +40,12 @@ class PreparedTransaction:
     transaction_dir: Path
     prospective_wiki: Path
     backup_wiki: Path
+    change_set: ChangeSet
     raw_source: RawSource | None
     summary: str
     diff: str
+    prospective_digest: str
+    base_wiki_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +70,17 @@ class _Manifest:
     base_wiki_digest: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _Identity:
+    base_wiki_digest: str
+    prospective_digest: str
+
+
 class _IncompleteManifestError(Exception):
+    pass
+
+
+class _ConcurrentLiveEditError(Exception):
     pass
 
 
@@ -84,9 +99,12 @@ def prepare_transaction(
     prospective_wiki = transaction_dir / _PROSPECTIVE_NAME
     backup_wiki = transaction_dir / _BACKUP_NAME
     validation_root = transaction_dir / _VALIDATION_WORKSPACE_NAME
+    owns_transaction_dir = False
 
     try:
         transaction_dir.mkdir()
+        owns_transaction_dir = True
+        _sync_directory(transactions_root)
         validation_workspace = Workspace(root=validation_root, config=workspace.config)
         _stage_validation_workspace(workspace, validation_workspace, raw_source)
         build_prospective_wiki(
@@ -97,6 +115,8 @@ def prepare_transaction(
             occurred_at,
         )
         diff = tree_diff(workspace.wiki_dir, prospective_wiki)
+        prospective_digest = _tree_digest(prospective_wiki)
+        base_wiki_digest = _tree_digest(validation_workspace.wiki_dir)
         manifest = _Manifest(
             schema_version=_SCHEMA_VERSION,
             transaction_id=transaction_id,
@@ -118,17 +138,26 @@ def prepare_transaction(
                 )
                 for draft in change_set.drafts
             ),
-            prospective_digest=_tree_digest(prospective_wiki),
-            base_wiki_digest=_tree_digest(validation_workspace.wiki_dir),
+            prospective_digest=prospective_digest,
+            base_wiki_digest=base_wiki_digest,
         )
         _write_raw_payload(transaction_dir, raw_source)
         _remove_tree(validation_root)
+        _write_identity(
+            transaction_dir,
+            _Identity(
+                base_wiki_digest=base_wiki_digest,
+                prospective_digest=prospective_digest,
+            ),
+        )
         _write_manifest(transaction_dir, manifest)
     except OSError as exc:
-        _remove_tree_if_safe(transaction_dir)
+        if owns_transaction_dir:
+            _remove_tree_if_safe(transaction_dir)
         raise TransactionError("could not prepare transaction staging") from exc
     except BaseException:
-        _remove_tree_if_safe(transaction_dir)
+        if owns_transaction_dir:
+            _remove_tree_if_safe(transaction_dir)
         raise
 
     return PreparedTransaction(
@@ -137,9 +166,12 @@ def prepare_transaction(
         transaction_dir=transaction_dir,
         prospective_wiki=prospective_wiki,
         backup_wiki=backup_wiki,
+        change_set=change_set,
         raw_source=raw_source,
         summary=change_set.summary,
         diff=diff,
+        prospective_digest=prospective_digest,
+        base_wiki_digest=base_wiki_digest,
     )
 
 
@@ -152,7 +184,12 @@ def commit_transaction(prepared: PreparedTransaction) -> None:
     if manifest.phase != "prepared":
         raise TransactionError(f"transaction is not prepared: {manifest.phase}")
 
-    _verify_prospective(prospective, workspace, manifest, lint=False)
+    _verify_prospective(
+        prospective,
+        workspace,
+        prepared.prospective_digest,
+        lint=False,
+    )
     _revalidate_operations(workspace, manifest.drafts)
     _verify_live_base(workspace, prepared.transaction_dir, manifest)
     if backup.exists() or backup.is_symlink():
@@ -167,7 +204,13 @@ def commit_transaction(prepared: PreparedTransaction) -> None:
     )
     manifest = replace(manifest, phase="raw-persisted")
     _write_manifest(prepared.transaction_dir, manifest)
-    _verify_prospective(prospective, workspace, manifest, lint=True)
+    _verify_prospective(
+        prospective,
+        workspace,
+        prepared.prospective_digest,
+        lint=True,
+    )
+    _sync_tree(prospective)
 
     manifest = replace(manifest, phase="swapping")
     _write_manifest(prepared.transaction_dir, manifest)
@@ -175,15 +218,33 @@ def commit_transaction(prepared: PreparedTransaction) -> None:
         workspace.wiki_dir.rename(backup)
         _sync_directory(workspace.root)
         _sync_directory(prepared.transaction_dir)
+        _sync_tree(backup)
+        actual_base = _materialized_tree_digest(backup, prepared.transaction_dir)
+        if actual_base != prepared.base_wiki_digest:
+            _restore_concurrent_backup(workspace, prepared.transaction_dir, backup)
+            raise _ConcurrentLiveEditError("live wiki changed during swap")
         prospective.rename(workspace.wiki_dir)
         _sync_directory(workspace.root)
         _sync_directory(prepared.transaction_dir)
+        _sync_tree(workspace.wiki_dir)
         manifest = replace(manifest, phase="new-live")
         _write_manifest(prepared.transaction_dir, manifest)
-        _verify_prospective(workspace.wiki_dir, workspace, manifest, lint=True)
-        _remove_tree(prepared.transaction_dir)
-    except OSError as exc:
-        _recover_after_commit_error(workspace, prepared.transaction_dir, exc)
+        _verify_prospective(
+            workspace.wiki_dir,
+            workspace,
+            prepared.prospective_digest,
+            lint=True,
+        )
+        _sync_tree(backup)
+        final_base = _materialized_tree_digest(backup, prepared.transaction_dir)
+        if final_base != prepared.base_wiki_digest:
+            _restore_concurrent_backup(workspace, prepared.transaction_dir, backup)
+            raise _ConcurrentLiveEditError("live wiki changed during swap")
+        _cleanup_transaction(workspace, prepared.transaction_dir)
+    except _ConcurrentLiveEditError as exc:
+        raise TransactionError(str(exc)) from exc
+    except (OSError, TransactionError) as exc:
+        _recover_after_commit_error(workspace, prepared, exc)
 
 
 def discard_transaction(prepared: PreparedTransaction) -> None:
@@ -227,123 +288,183 @@ def recover_transactions(workspace: Workspace) -> None:
             ) from exc
 
 
-def _recover_transaction(workspace: Workspace, transaction_dir: Path) -> None:
+def _recover_transaction(
+    workspace: Workspace,
+    transaction_dir: Path,
+    expected_identity: _Identity | None = None,
+) -> None:
+    try:
+        identity = _load_identity(transaction_dir)
+    except _IncompleteManifestError:
+        if expected_identity is None:
+            _recover_without_identity(workspace, transaction_dir)
+            return
+        identity = expected_identity
+    if expected_identity is not None and identity != expected_identity:
+        raise TransactionError("transaction identity does not match the prepared review")
+
     try:
         manifest = _load_manifest(workspace, transaction_dir)
     except _IncompleteManifestError:
-        _recover_incomplete_transaction(workspace, transaction_dir)
+        _recover_known_topology(
+            workspace,
+            transaction_dir,
+            None,
+            transaction_dir / _PROSPECTIVE_NAME,
+            transaction_dir / _BACKUP_NAME,
+            identity,
+        )
         return
 
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
-    if manifest.phase in {"prepared", "raw-persisted"}:
-        _remove_tree(transaction_dir)
-        return
-    if manifest.phase == "swapping":
-        _recover_swapping(workspace, transaction_dir, manifest, prospective, backup)
-        return
-    _recover_new_live(workspace, transaction_dir, manifest, prospective, backup)
-
-
-def _recover_swapping(
-    workspace: Workspace,
-    transaction_dir: Path,
-    manifest: _Manifest,
-    prospective: Path,
-    backup: Path,
-) -> None:
-    live_exists = _directory_exists(workspace.wiki_dir, "live wiki")
-    backup_exists = _directory_exists(backup, "transaction backup")
-    prospective_exists = _directory_exists(prospective, "prospective wiki")
-
-    if live_exists and not backup_exists:
-        _remove_tree(transaction_dir)
-        return
-    if not live_exists and backup_exists:
-        backup.rename(workspace.wiki_dir)
-        _sync_directory(workspace.root)
-        _remove_tree(transaction_dir)
-        return
-    if live_exists and backup_exists:
-        if _is_valid_prospective(workspace.wiki_dir, workspace, manifest):
-            _remove_tree(transaction_dir)
-        else:
-            _restore_backup(workspace, transaction_dir, manifest, backup)
-        return
-    if prospective_exists and _is_valid_prospective(prospective, workspace, manifest):
-        prospective.rename(workspace.wiki_dir)
-        _sync_directory(workspace.root)
-        _remove_tree(transaction_dir)
-        return
-    raise TransactionError(f"transaction {manifest.transaction_id} has no recoverable wiki tree")
-
-
-def _recover_new_live(
-    workspace: Workspace,
-    transaction_dir: Path,
-    manifest: _Manifest,
-    prospective: Path,
-    backup: Path,
-) -> None:
-    live_exists = _directory_exists(workspace.wiki_dir, "live wiki")
-    backup_exists = _directory_exists(backup, "transaction backup")
-    prospective_exists = _directory_exists(prospective, "prospective wiki")
-
-    if live_exists and _is_valid_prospective(workspace.wiki_dir, workspace, manifest):
-        _remove_tree(transaction_dir)
-        return
-    if backup_exists:
-        _restore_backup(workspace, transaction_dir, manifest, backup)
-        return
     if (
-        not live_exists
-        and prospective_exists
-        and _is_valid_prospective(
-            prospective,
-            workspace,
-            manifest,
-        )
+        manifest.base_wiki_digest != identity.base_wiki_digest
+        or manifest.prospective_digest != identity.prospective_digest
     ):
-        prospective.rename(workspace.wiki_dir)
-        _sync_directory(workspace.root)
-        _remove_tree(transaction_dir)
-        return
-    raise TransactionError(
-        f"transaction {manifest.transaction_id} has no valid live or backup wiki"
+        raise TransactionError("manifest identities do not match transaction identity")
+    _recover_known_topology(
+        workspace,
+        transaction_dir,
+        manifest.phase,
+        prospective,
+        backup,
+        identity,
     )
 
 
-def _recover_incomplete_transaction(workspace: Workspace, transaction_dir: Path) -> None:
+def _recover_known_topology(
+    workspace: Workspace,
+    transaction_dir: Path,
+    phase: _Phase | None,
+    prospective: Path,
+    backup: Path,
+    identity: _Identity,
+) -> None:
+    live_exists = _directory_exists(workspace.wiki_dir, "live wiki")
+    backup_exists = _directory_exists(backup, "transaction backup")
+    prospective_exists = _directory_exists(prospective, "prospective wiki")
+    live_identity = (
+        _classify_tree(workspace.wiki_dir, transaction_dir, identity) if live_exists else None
+    )
+    backup_identity = _classify_tree(backup, transaction_dir, identity) if backup_exists else None
+    prospective_identity = (
+        _classify_tree(prospective, transaction_dir, identity) if prospective_exists else None
+    )
+
+    if backup_exists:
+        if backup_identity != "base":
+            raise TransactionError("transaction backup wiki identity does not match reviewed base")
+        if not live_exists:
+            _restore_exact_backup(workspace, transaction_dir, backup, identity)
+            return
+        if live_identity == "new" and _new_tree_lints(workspace.wiki_dir, workspace):
+            _cleanup_transaction(workspace, transaction_dir)
+            return
+        if live_identity == "base":
+            _cleanup_transaction(workspace, transaction_dir)
+            return
+        _restore_exact_backup(workspace, transaction_dir, backup, identity)
+        return
+
+    if live_exists:
+        if live_identity == "base":
+            _cleanup_transaction(workspace, transaction_dir)
+            return
+        if live_identity == "new" and _new_tree_lints(workspace.wiki_dir, workspace):
+            _cleanup_transaction(workspace, transaction_dir)
+            return
+        raise TransactionError("live wiki identity matches neither reviewed base nor new tree")
+
+    if (
+        phase in {"swapping", "new-live"}
+        and prospective_identity == "new"
+        and _new_tree_lints(prospective, workspace)
+    ):
+        _sync_tree(prospective)
+        prospective.rename(workspace.wiki_dir)
+        _sync_directory(workspace.root)
+        _sync_directory(transaction_dir)
+        _sync_tree(workspace.wiki_dir)
+        _cleanup_transaction(workspace, transaction_dir)
+        return
+    raise TransactionError("transaction has no authenticated recoverable wiki tree")
+
+
+def _recover_without_identity(workspace: Workspace, transaction_dir: Path) -> None:
     backup = transaction_dir / _BACKUP_NAME
     live_exists = _directory_exists(workspace.wiki_dir, "live wiki")
     backup_exists = _directory_exists(backup, "transaction backup")
     if backup_exists:
-        if live_exists:
-            _remove_tree(workspace.wiki_dir)
-        backup.rename(workspace.wiki_dir)
-        _sync_directory(workspace.root)
-    elif not live_exists:
-        raise TransactionError(
-            f"incomplete transaction {transaction_dir.name} has no recoverable wiki"
-        )
-    _remove_tree(transaction_dir)
+        raise TransactionError("incomplete transaction backup identity is unavailable")
+    if not live_exists:
+        raise TransactionError("incomplete transaction has no live wiki or authenticated backup")
+    _cleanup_transaction(workspace, transaction_dir)
 
 
-def _restore_backup(
+def _classify_tree(
+    path: Path,
+    transaction_dir: Path,
+    identity: _Identity,
+) -> Literal["base", "new", "unknown"]:
+    try:
+        digest = _materialized_tree_digest(path, transaction_dir)
+    except TransactionError:
+        return "unknown"
+    if digest == identity.base_wiki_digest:
+        return "base"
+    if digest == identity.prospective_digest:
+        return "new"
+    return "unknown"
+
+
+def _new_tree_lints(path: Path, workspace: Workspace) -> bool:
+    return not has_errors(lint_bundle(path, workspace.root))
+
+
+def _restore_exact_backup(
     workspace: Workspace,
     transaction_dir: Path,
-    manifest: _Manifest,
+    backup: Path,
+    identity: _Identity,
+) -> None:
+    if not _tree_matches_identity(backup, identity.base_wiki_digest, transaction_dir):
+        raise TransactionError("transaction backup wiki identity does not match reviewed base")
+    _sync_tree(backup)
+    if workspace.wiki_dir.exists():
+        _remove_tree(workspace.wiki_dir)
+        _sync_directory(workspace.root)
+    backup.rename(workspace.wiki_dir)
+    _sync_directory(workspace.root)
+    _sync_directory(transaction_dir)
+    _sync_tree(workspace.wiki_dir)
+    _cleanup_transaction(workspace, transaction_dir)
+
+
+def _restore_concurrent_backup(
+    workspace: Workspace,
+    transaction_dir: Path,
     backup: Path,
 ) -> None:
-    if has_errors(lint_bundle(backup, workspace.root)):
-        raise TransactionError(
-            f"transaction {manifest.transaction_id} backup wiki failed deterministic lint"
-        )
-    _write_manifest(transaction_dir, replace(manifest, phase="swapping"))
+    _sync_tree(backup)
     if workspace.wiki_dir.exists():
         _remove_tree(workspace.wiki_dir)
     backup.rename(workspace.wiki_dir)
     _sync_directory(workspace.root)
-    _remove_tree(transaction_dir)
+    _sync_directory(transaction_dir)
+    _sync_tree(workspace.wiki_dir)
+    _cleanup_transaction(workspace, transaction_dir)
+
+
+def _cleanup_transaction(workspace: Workspace, transaction_dir: Path) -> None:
+    if workspace.wiki_dir.is_dir() and not workspace.wiki_dir.is_symlink():
+        _sync_tree(workspace.wiki_dir)
+    backup = transaction_dir / _BACKUP_NAME
+    if backup.is_dir() and not backup.is_symlink():
+        _sync_tree(backup)
+    if transaction_dir.is_dir() and not transaction_dir.is_symlink():
+        _sync_directory(transaction_dir)
+        _remove_tree(transaction_dir)
+    _sync_directory(transaction_dir.parent)
 
 
 def _stage_validation_workspace(
@@ -428,29 +549,55 @@ def _persist_raw_source(
         raise TransactionError("transaction raw payload is missing")
     if _file_digest(payload) != raw_source.sha256:
         raise TransactionError("transaction raw payload has a different digest")
-    destination = _resolve_workspace_relative(workspace, manifest.raw_path)
+    destination = _safe_raw_destination(workspace, manifest.raw_path)
+    parent_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        parent_descriptor = os.open(destination.parent, parent_flags)
     except OSError as exc:
-        raise TransactionError(f"could not create raw directory: {manifest.raw_path}") from exc
+        message = f"could not open raw destination parent: {manifest.raw_path}"
+        raise TransactionError(message) from exc
     try:
-        os.link(payload, destination, follow_symlinks=False)
-    except FileExistsError:
-        if destination.is_symlink() or not destination.is_file():
-            raise TransactionError(f"raw destination is occupied: {manifest.raw_path}") from None
-        if _file_digest(destination) != raw_source.sha256:
+        try:
+            os.link(
+                payload,
+                destination.name,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            metadata = os.stat(
+                destination.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(metadata.st_mode):
+                raise TransactionError(
+                    f"raw destination is occupied: {manifest.raw_path}"
+                ) from None
+            if _file_digest_at(parent_descriptor, destination.name) != raw_source.sha256:
+                raise TransactionError(
+                    f"raw destination has a different digest: {manifest.raw_path}"
+                ) from None
+        if _file_digest_at(parent_descriptor, destination.name) != raw_source.sha256:
             raise TransactionError(
-                f"raw destination has a different digest: {manifest.raw_path}"
-            ) from None
-        return
+                f"persisted raw source failed digest verification: {manifest.raw_path}"
+            )
+        os.fsync(parent_descriptor)
     except OSError as exc:
         raise TransactionError(f"could not create raw source: {manifest.raw_path}") from exc
+    finally:
+        os.close(parent_descriptor)
+    _safe_raw_destination(workspace, manifest.raw_path)
 
-    _sync_directory(destination.parent)
-    if _file_digest(destination) != raw_source.sha256:
-        raise TransactionError(
-            f"persisted raw source failed digest verification: {manifest.raw_path}"
-        )
+
+def _file_digest_at(directory_descriptor: int, name: str) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+        with os.fdopen(descriptor, "rb") as source_file:
+            return hashlib.sha256(source_file.read()).hexdigest()
+    except OSError as exc:
+        raise TransactionError(f"could not verify raw file descriptor: {name}") from exc
 
 
 def _write_raw_payload(
@@ -497,12 +644,7 @@ def _verify_live_base(
 ) -> None:
     if manifest.base_wiki_digest is None:
         raise TransactionError("transaction manifest is missing its base wiki digest")
-    staged_base = transaction_dir / _BASE_CHECK_NAME
-    try:
-        _copy_tree_materialized(workspace.wiki_dir, staged_base)
-        current_digest = _tree_digest(staged_base)
-    finally:
-        _remove_tree_if_safe(staged_base)
+    current_digest = _materialized_tree_digest(workspace.wiki_dir, transaction_dir)
     if current_digest != manifest.base_wiki_digest:
         raise TransactionError("live wiki changed since preparation")
 
@@ -510,30 +652,17 @@ def _verify_live_base(
 def _verify_prospective(
     path: Path,
     workspace: Workspace,
-    manifest: _Manifest,
+    expected_digest: str,
     *,
     lint: bool,
 ) -> None:
     if path.is_symlink() or not path.is_dir():
         raise TransactionError(f"prospective wiki is missing: {path}")
-    if manifest.prospective_digest is not None:
-        actual = _tree_digest(path)
-        if actual != manifest.prospective_digest:
-            raise TransactionError("prospective wiki no longer matches the reviewed tree")
+    actual = _tree_digest(path)
+    if actual != expected_digest:
+        raise TransactionError("prospective wiki no longer matches the reviewed tree")
     if lint and has_errors(lint_bundle(path, workspace.root)):
         raise TransactionError("prospective wiki failed deterministic lint")
-
-
-def _is_valid_prospective(
-    path: Path,
-    workspace: Workspace,
-    manifest: _Manifest,
-) -> bool:
-    try:
-        _verify_prospective(path, workspace, manifest, lint=True)
-    except TransactionError:
-        return False
-    return True
 
 
 def _validate_prepared_handle(
@@ -554,6 +683,22 @@ def _validate_prepared_handle(
         raise TransactionError("prepared backup path does not match its manifest")
     if prepared.summary != manifest.summary:
         raise TransactionError("prepared summary does not match its manifest")
+    if prepared.change_set.summary != prepared.summary:
+        raise TransactionError("prepared change set summary does not match")
+    expected_drafts = tuple(
+        _DraftRecord(
+            path=_canonical_concept_id(draft.path),
+            operation=draft.operation,
+            base_digest=draft.base_digest,
+        )
+        for draft in prepared.change_set.drafts
+    )
+    if manifest.drafts != expected_drafts:
+        raise TransactionError("prepared change set does not match its manifest")
+    if manifest.prospective_digest != prepared.prospective_digest:
+        raise TransactionError("manifest does not match the reviewed prospective identity")
+    if manifest.base_wiki_digest != prepared.base_wiki_digest:
+        raise TransactionError("manifest does not match the reviewed base identity")
     if prepared.raw_source is None:
         if manifest.raw_path is not None or manifest.raw_sha256 is not None:
             raise TransactionError("prepared transaction unexpectedly contains a raw path")
@@ -571,12 +716,22 @@ def _validate_prepared_handle(
 
 def _ensure_transactions_root(workspace: Workspace) -> Path:
     root = workspace.root.resolve(strict=False)
+    bundlewalker_root = workspace.root / ".bundlewalker"
     transactions_root = workspace.root.joinpath(*_TRANSACTIONS_PATH.parts)
-    for existing in (workspace.root / ".bundlewalker", transactions_root):
+    for existing in (bundlewalker_root, transactions_root):
         if existing.is_symlink():
             raise TransactionError(f"transaction path is a symlink: {existing}")
     try:
-        transactions_root.mkdir(parents=True, exist_ok=True)
+        if not bundlewalker_root.exists():
+            bundlewalker_root.mkdir()
+            _sync_directory(workspace.root)
+        elif not bundlewalker_root.is_dir():
+            raise TransactionError("transaction parent is not a regular directory")
+        if not transactions_root.exists():
+            transactions_root.mkdir()
+            _sync_directory(bundlewalker_root)
+        elif not transactions_root.is_dir():
+            raise TransactionError("transaction storage is not a regular directory")
     except OSError as exc:
         raise TransactionError("could not create transaction storage") from exc
     if not transactions_root.resolve(strict=False).is_relative_to(root):
@@ -690,7 +845,6 @@ def _load_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
 
 def _write_manifest(transaction_dir: Path, manifest: _Manifest) -> None:
     path = transaction_dir / _MANIFEST_NAME
-    temporary = transaction_dir / f"{_MANIFEST_NAME}.tmp"
     values: dict[str, object] = {
         "schema_version": manifest.schema_version,
         "transaction_id": manifest.transaction_id,
@@ -712,16 +866,71 @@ def _write_manifest(transaction_dir: Path, manifest: _Manifest) -> None:
         "base_wiki_digest": manifest.base_wiki_digest,
     }
     content = (json.dumps(values, indent=2, sort_keys=True) + "\n").encode()
+    temporary: Path | None = None
     try:
-        with temporary.open("wb") as manifest_file:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".manifest-",
+            dir=transaction_dir,
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as manifest_file:
             manifest_file.write(content)
             manifest_file.flush()
             os.fsync(manifest_file.fileno())
         os.replace(temporary, path)
+        temporary = None
         _sync_directory(transaction_dir)
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
         raise TransactionError("could not persist transaction manifest") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_identity(transaction_dir: Path, identity: _Identity) -> None:
+    path = transaction_dir / _IDENTITY_NAME
+    content = (
+        json.dumps(
+            {
+                "base_wiki_digest": identity.base_wiki_digest,
+                "prospective_digest": identity.prospective_digest,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as identity_file:
+            identity_file.write(content)
+            identity_file.flush()
+            os.fsync(identity_file.fileno())
+        _sync_directory(transaction_dir)
+    except OSError as exc:
+        raise TransactionError("could not persist transaction identity") from exc
+
+
+def _load_identity(transaction_dir: Path) -> _Identity:
+    path = transaction_dir / _IDENTITY_NAME
+    try:
+        parsed: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _IncompleteManifestError from exc
+    if not isinstance(parsed, dict):
+        raise _IncompleteManifestError
+    values = cast(dict[object, object], parsed)
+    base = values.get("base_wiki_digest")
+    prospective = values.get("prospective_digest")
+    if (
+        not isinstance(base, str)
+        or _SHA256.fullmatch(base) is None
+        or not isinstance(prospective, str)
+        or _SHA256.fullmatch(prospective) is None
+    ):
+        raise _IncompleteManifestError
+    return _Identity(base_wiki_digest=base, prospective_digest=prospective)
 
 
 def _required_string(values: dict[str, object], key: str) -> str:
@@ -768,10 +977,53 @@ def _validated_raw_relative(workspace: Workspace, value: Path) -> str:
         or relative == configured_raw
     ):
         raise TransactionError("raw path is not a safe workspace-relative path")
-    resolved = workspace.root.joinpath(*relative.parts).resolve(strict=False)
-    if not resolved.is_relative_to(workspace.root.resolve(strict=False)):
-        raise TransactionError("raw path is not a safe workspace-relative path")
+    _configured_raw_root(workspace)
     return relative.as_posix()
+
+
+def _configured_raw_root(workspace: Workspace) -> Path:
+    configured = PurePosixPath(workspace.config.raw_dir)
+    current = workspace.root
+    for part in configured.parts:
+        current /= part
+        if current.is_symlink():
+            raise TransactionError(f"configured raw path contains a symlink: {current}")
+        if not current.is_dir():
+            raise TransactionError(f"configured raw path is not a directory: {current}")
+    resolved_workspace = workspace.root.resolve(strict=False)
+    resolved_raw = current.resolve(strict=False)
+    if not resolved_raw.is_relative_to(resolved_workspace):
+        raise TransactionError("configured raw path escapes workspace")
+    return current
+
+
+def _safe_raw_destination(workspace: Workspace, value: str) -> Path:
+    relative_value = _validated_raw_relative(workspace, Path(value))
+    relative = PurePosixPath(relative_value)
+    configured = PurePosixPath(workspace.config.raw_dir)
+    raw_root = _configured_raw_root(workspace)
+    tail = relative.parts[len(configured.parts) :]
+    current = raw_root
+    try:
+        for part in tail[:-1]:
+            current /= part
+            if current.is_symlink():
+                raise TransactionError(f"raw destination parent is a symlink: {current}")
+            if current.exists():
+                if not current.is_dir():
+                    raise TransactionError(f"raw destination parent is not a directory: {current}")
+            else:
+                current.mkdir()
+                _sync_directory(current.parent)
+    except OSError as exc:
+        raise TransactionError(f"could not create raw directory: {value}") from exc
+    destination = current / tail[-1]
+    resolved_parent = destination.parent.resolve(strict=False)
+    if not resolved_parent.is_relative_to(raw_root.resolve(strict=True)):
+        raise TransactionError("raw destination escapes the configured raw directory")
+    if destination.is_symlink():
+        raise TransactionError(f"raw destination is a symlink: {value}")
+    return destination
 
 
 def _workspace_relative(workspace: Workspace, path: Path) -> str:
@@ -825,6 +1077,72 @@ def _tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _materialized_tree_digest(source: Path, transaction_dir: Path) -> str:
+    scratch_parent = transaction_dir if transaction_dir.is_dir() else transaction_dir.parent
+    try:
+        scratch = Path(
+            tempfile.mkdtemp(
+                prefix=".tree-check-",
+                dir=scratch_parent,
+            )
+        )
+    except OSError as exc:
+        raise TransactionError("could not create tree identity staging") from exc
+    try:
+        materialized = scratch / "tree"
+        _copy_tree_materialized(source, materialized)
+        return _tree_digest(materialized)
+    finally:
+        _remove_tree_if_safe(scratch)
+
+
+def _tree_matches_identity(
+    path: Path,
+    expected: str,
+    transaction_dir: Path,
+) -> bool:
+    if path.is_symlink() or not path.is_dir():
+        return False
+    try:
+        return _materialized_tree_digest(path, transaction_dir) == expected
+    except TransactionError:
+        return False
+
+
+def _sync_tree(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise TransactionError(f"cannot sync non-directory tree: {root}")
+    resolved_root = root.resolve(strict=False)
+    directories = [root]
+    try:
+        entries = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+        for path in entries:
+            if path.is_symlink():
+                target = path.resolve(strict=True)
+                if not target.is_relative_to(resolved_root):
+                    raise TransactionError(f"tree symlink escapes during sync: {path}")
+                continue
+            if path.is_dir():
+                directories.append(path)
+                continue
+            if not path.is_file():
+                raise TransactionError(f"tree contains a special file during sync: {path}")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        for directory in sorted(
+            directories,
+            key=lambda path: len(path.relative_to(root).parts),
+            reverse=True,
+        ):
+            _sync_directory(directory)
+    except OSError as exc:
+        raise TransactionError(f"could not recursively sync tree: {root}") from exc
+
+
 def _file_digest(path: Path) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -867,13 +1185,23 @@ def _sync_directory(path: Path) -> None:
 
 def _recover_after_commit_error(
     workspace: Workspace,
-    transaction_dir: Path,
-    cause: OSError,
+    prepared: PreparedTransaction,
+    cause: OSError | TransactionError,
 ) -> None:
+    identity = _Identity(
+        base_wiki_digest=prepared.base_wiki_digest,
+        prospective_digest=prepared.prospective_digest,
+    )
     try:
-        _recover_transaction(workspace, transaction_dir)
-    except TransactionError as recovery_error:
-        raise TransactionError("transaction commit failed and recovery was unsuccessful") from (
-            recovery_error
+        _recover_transaction(
+            workspace,
+            prepared.transaction_dir,
+            expected_identity=identity,
         )
-    raise TransactionError("transaction commit failed; filesystem state was recovered") from cause
+    except TransactionError as recovery_error:
+        raise TransactionError(
+            f"transaction commit failed ({cause}) and recovery was unsuccessful: {recovery_error}"
+        ) from cause
+    raise TransactionError(
+        f"transaction commit failed and filesystem state was recovered: {cause}"
+    ) from cause

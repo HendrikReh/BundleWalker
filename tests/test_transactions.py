@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import bundlewalker.transactions as transactions
 from bundlewalker.changes import ChangeValidationContext
 from bundlewalker.domain import (
     ChangeOperation,
@@ -39,6 +41,24 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file() and not path.is_symlink()
     }
+
+
+def _transaction_tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode()
+        if path.is_dir():
+            digest.update(b"D")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+        elif path.is_file() and not path.is_symlink():
+            content = path.read_bytes()
+            digest.update(b"F")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    return digest.hexdigest()
 
 
 def _draft(
@@ -156,6 +176,7 @@ def test_prepare_stages_a_complete_review_without_live_writes(tmp_path: Path) ->
     assert f"+++ wiki/{source.concept_id}.md" in prepared.diff
     assert "+# Knowledge Update Log" not in prepared.diff
     assert prepared.raw_source is source
+    assert prepared.change_set is change_set
     assert prepared.summary == change_set.summary
 
     values = _manifest(prepared)
@@ -437,3 +458,329 @@ def test_commit_rejects_an_existing_raw_file_with_different_bytes(tmp_path: Path
 
     assert destination.read_bytes() == b"different bytes\n"
     assert hashlib.sha256(destination.read_bytes()).hexdigest() != source.sha256
+
+
+def test_manifest_update_does_not_follow_a_planted_fixed_temp_symlink(
+    tmp_path: Path,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    sentinel = tmp_path / "outside-sentinel.txt"
+    sentinel.write_text("outside stays unchanged\n", encoding="utf-8")
+    planted_temp = prepared.transaction_dir / "manifest.json.tmp"
+    planted_temp.symlink_to(sentinel)
+
+    commit_transaction(prepared)
+
+    assert sentinel.read_text(encoding="utf-8") == "outside stays unchanged\n"
+
+
+@pytest.mark.parametrize("phase", ["prepared", "raw-persisted"])
+def test_early_phase_recovery_restores_the_only_wiki_copy(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    old_tree = _tree_bytes(prepared.workspace.wiki_dir)
+    if phase == "raw-persisted":
+        _persist_raw(prepared, source)
+    _set_phase(prepared, phase)
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+
+    recover_transactions(prepared.workspace)
+
+    assert _tree_bytes(prepared.workspace.wiki_dir) == old_tree
+    assert not prepared.transaction_dir.exists()
+
+
+def test_prepare_fsyncs_the_transactions_parent_after_directory_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, source, change_set, context = _ingestion(tmp_path)
+    transactions_root = workspace.root / ".bundlewalker" / "transactions"
+    observations: list[bool] = []
+    original_sync = transactions._sync_directory  # pyright: ignore[reportPrivateUsage]
+
+    def recording_sync(path: Path) -> None:
+        if path == transactions_root:
+            observations.append(any(path.iterdir()))
+        original_sync(path)
+
+    monkeypatch.setattr(transactions, "_sync_directory", recording_sync)
+
+    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+
+    assert prepared.transaction_dir.is_dir()
+    assert True in observations
+
+
+def test_commit_recursively_syncs_trees_before_each_swap_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    events: list[tuple[str, Path]] = []
+    original_rename = Path.rename
+
+    def recording_sync_tree(path: Path) -> None:
+        events.append(("sync-tree", path))
+
+    def recording_rename(path: Path, target: Path) -> Path:
+        events.append(("rename", path))
+        return original_rename(path, target)
+
+    monkeypatch.setattr(transactions, "_sync_tree", recording_sync_tree, raising=False)
+    monkeypatch.setattr(Path, "rename", recording_rename)
+
+    commit_transaction(prepared)
+
+    prospective_sync = events.index(("sync-tree", prepared.prospective_wiki))
+    old_rename = events.index(("rename", prepared.workspace.wiki_dir))
+    backup_sync = events.index(("sync-tree", prepared.backup_wiki))
+    new_rename = events.index(("rename", prepared.prospective_wiki))
+    live_sync = events.index(("sync-tree", prepared.workspace.wiki_dir))
+    assert prospective_sync < old_rename < backup_sync < new_rename < live_sync
+
+
+def test_commit_rejects_joint_manifest_and_prospective_tree_tampering(
+    tmp_path: Path,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    reviewed_digest = prepared.prospective_digest
+    source_concept = next(prepared.prospective_wiki.glob("sources/*.md"))
+    source_concept.write_text(
+        source_concept.read_text(encoding="utf-8") + "\nTampered after review.\n",
+        encoding="utf-8",
+    )
+    values = _manifest(prepared)
+    values["prospective_digest"] = _transaction_tree_digest(prepared.prospective_wiki)
+    (prepared.transaction_dir / "manifest.json").write_text(
+        json.dumps(values),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TransactionError, match="reviewed prospective"):
+        commit_transaction(prepared)
+
+    assert prepared.prospective_digest == reviewed_digest
+    assert prepared.raw_source is not None
+    assert not (prepared.workspace.wiki_dir / f"{prepared.raw_source.concept_id}.md").exists()
+
+
+@pytest.mark.parametrize("manifest_present", [True, False])
+def test_recovery_refuses_a_lint_valid_backup_with_the_wrong_identity(
+    tmp_path: Path,
+    manifest_present: bool,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    _persist_raw(prepared, source)
+    _set_phase(prepared, "new-live")
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+    prepared.prospective_wiki.rename(prepared.workspace.wiki_dir)
+    (prepared.workspace.wiki_dir / "index.md").write_text("corrupt\n", encoding="utf-8")
+    tampered = prepared.backup_wiki / "topics/tampered-backup.md"
+    tampered.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Tampered backup\n"
+        "description: Lint-valid but not the reviewed base.\n"
+        "tags: []\n"
+        "---\n\n"
+        "# Tampered backup\n",
+        encoding="utf-8",
+    )
+    regenerate_indexes(prepared.backup_wiki)
+    if not manifest_present:
+        (prepared.transaction_dir / "manifest.json").unlink()
+
+    with pytest.raises(TransactionError, match=r"backup.*identity"):
+        recover_transactions(prepared.workspace)
+
+    assert prepared.backup_wiki.is_dir()
+    assert tampered.is_file()
+
+
+def test_concurrent_edit_after_live_rename_is_restored_and_commit_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    original_rename = Path.rename
+    injected = False
+
+    def rename_with_concurrent_edit(path: Path, target: Path) -> Path:
+        nonlocal injected
+        result = original_rename(path, target)
+        if path == prepared.workspace.wiki_dir and target == prepared.backup_wiki and not injected:
+            injected = True
+            concurrent = prepared.backup_wiki / "topics/concurrent.md"
+            concurrent.write_text(
+                "---\n"
+                "type: Topic\n"
+                "title: Concurrent\n"
+                "description: A concurrent live edit.\n"
+                "tags: []\n"
+                "---\n\n"
+                "# Concurrent\n",
+                encoding="utf-8",
+            )
+            regenerate_indexes(prepared.backup_wiki)
+        return result
+
+    monkeypatch.setattr(Path, "rename", rename_with_concurrent_edit)
+
+    with pytest.raises(TransactionError, match="changed during swap"):
+        commit_transaction(prepared)
+
+    assert (prepared.workspace.wiki_dir / "topics/concurrent.md").is_file()
+    assert not prepared.transaction_dir.exists()
+
+
+def test_concurrent_edit_before_backup_deletion_is_restored_and_commit_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    original_rename = Path.rename
+    injected = False
+
+    def rename_with_late_concurrent_edit(path: Path, target: Path) -> Path:
+        nonlocal injected
+        result = original_rename(path, target)
+        if path == prepared.prospective_wiki and target == prepared.workspace.wiki_dir:
+            injected = True
+            concurrent = prepared.backup_wiki / "topics/late-concurrent.md"
+            concurrent.write_text(
+                "---\n"
+                "type: Topic\n"
+                "title: Late concurrent\n"
+                "description: An edit during the final swap window.\n"
+                "tags: []\n"
+                "---\n\n"
+                "# Late concurrent\n",
+                encoding="utf-8",
+            )
+            regenerate_indexes(prepared.backup_wiki)
+        return result
+
+    monkeypatch.setattr(Path, "rename", rename_with_late_concurrent_edit)
+
+    with pytest.raises(TransactionError, match="changed during swap"):
+        commit_transaction(prepared)
+
+    assert injected
+    assert (prepared.workspace.wiki_dir / "topics/late-concurrent.md").is_file()
+    assert not prepared.transaction_dir.exists()
+
+
+def test_transaction_error_during_swap_recovers_a_valid_live_wiki(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    old_tree = _tree_bytes(prepared.workspace.wiki_dir)
+    original_sync = transactions._sync_directory  # pyright: ignore[reportPrivateUsage]
+    failed = False
+
+    def fail_once_after_old_rename(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and prepared.backup_wiki.is_dir()
+            and not prepared.workspace.wiki_dir.exists()
+        ):
+            failed = True
+            raise TransactionError("injected directory fsync failure")
+        original_sync(path)
+
+    monkeypatch.setattr(transactions, "_sync_directory", fail_once_after_old_rename)
+
+    with pytest.raises(TransactionError, match="injected directory fsync failure"):
+        commit_transaction(prepared)
+
+    assert _tree_bytes(prepared.workspace.wiki_dir) == old_tree
+    assert not prepared.transaction_dir.exists()
+
+
+def test_parent_fsync_failure_after_cleanup_recognizes_the_valid_live_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    new_tree = _tree_bytes(prepared.prospective_wiki)
+    original_sync = transactions._sync_directory  # pyright: ignore[reportPrivateUsage]
+    failed = False
+
+    def fail_once_after_cleanup(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == prepared.transaction_dir.parent
+            and not prepared.transaction_dir.exists()
+        ):
+            failed = True
+            raise TransactionError("injected parent fsync failure")
+        original_sync(path)
+
+    monkeypatch.setattr(transactions, "_sync_directory", fail_once_after_cleanup)
+
+    with pytest.raises(TransactionError, match="filesystem state was recovered"):
+        commit_transaction(prepared)
+
+    assert failed
+    assert _tree_bytes(prepared.workspace.wiki_dir) == new_tree
+    assert not prepared.transaction_dir.exists()
+
+
+def test_corrupt_prospective_staging_does_not_block_exact_backup_recovery(
+    tmp_path: Path,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    old_tree = _tree_bytes(prepared.workspace.wiki_dir)
+    _set_phase(prepared, "swapping")
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    (prepared.prospective_wiki / "unsafe-link").symlink_to(outside)
+
+    recover_transactions(prepared.workspace)
+
+    assert _tree_bytes(prepared.workspace.wiki_dir) == old_tree
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_commit_rejects_a_configured_raw_directory_symlink_inside_workspace(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    redirect = prepared.workspace.root / "redirect"
+    redirect.mkdir()
+    prepared.workspace.raw_dir.rmdir()
+    prepared.workspace.raw_dir.symlink_to(redirect, target_is_directory=True)
+
+    with pytest.raises(TransactionError, match=r"raw.*symlink"):
+        commit_transaction(prepared)
+
+    assert not (redirect / source.stored_relative_path.name).exists()
+
+
+def test_uuid_collision_does_not_delete_an_unowned_transaction_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, source, change_set, context = _ingestion(tmp_path)
+    fixed_uuid = uuid.UUID(int=1)
+    collision = workspace.root / ".bundlewalker" / "transactions" / fixed_uuid.hex
+    collision.mkdir(parents=True)
+    sentinel = collision / "sentinel.txt"
+    sentinel.write_text("pre-existing\n", encoding="utf-8")
+
+    def return_fixed_uuid() -> uuid.UUID:
+        return fixed_uuid
+
+    monkeypatch.setattr(transactions.uuid, "uuid4", return_fixed_uuid)
+
+    with pytest.raises(TransactionError, match="prepare transaction"):
+        prepare_transaction(workspace, change_set, context, source, NOW)
+
+    assert sentinel.read_text(encoding="utf-8") == "pre-existing\n"
