@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from bundlewalker.workflows.ingest import (
     PreparedIngestion,
     prepare_ingestion,
 )
-from bundlewalker.workspace import RawSource, initialize_workspace
+from bundlewalker.workspace import RawSource, Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
 
@@ -52,6 +54,18 @@ def _valid_change_set(source: RawSource, *, summary: str = "Integrated notes.") 
                 ],
             )
         ],
+    )
+
+
+def _write_config(workspace: Workspace) -> None:
+    config = workspace.config
+    (workspace.root / "bundlewalker.toml").write_text(
+        "version = 1\n"
+        f'wiki_dir = "{config.wiki_dir}"\n'
+        f'raw_dir = "{config.raw_dir}"\n'
+        f'conventions_file = "{config.conventions_file}"\n'
+        f"max_source_characters = {config.max_source_characters}\n",
+        encoding="utf-8",
     )
 
 
@@ -199,3 +213,115 @@ async def test_ingestion_rejects_symlinked_protected_context_before_the_runner(
         )
 
     assert calls == 0
+
+
+async def test_ingestion_rejects_a_linked_conventions_ancestor_before_the_runner(
+    tmp_path: Path,
+) -> None:
+    initialized = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    outside = tmp_path / "outside-settings"
+    outside.mkdir()
+    secret = "outside-conventions-secret"
+    (outside / "conventions.md").write_text(secret, encoding="utf-8")
+    (initialized.root / "settings").symlink_to(outside, target_is_directory=True)
+    workspace = Workspace(
+        root=initialized.root,
+        config=replace(initialized.config, conventions_file="settings/conventions.md"),
+    )
+    _write_config(workspace)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("first\nsecond\n", encoding="utf-8")
+    captured: list[str] = []
+
+    async def capture_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _source: RawSource,
+    ) -> tuple[ChangeSet, frozenset[str]]:
+        captured.append(dependencies.conventions)
+        raise AssertionError("linked conventions reached the runner")
+
+    with pytest.raises(WorkspaceError, match=r"symlink|non-directory"):
+        await prepare_ingestion(
+            workspace,
+            input_path,
+            explicit_model="test:model",
+            environment={},
+            runner=capture_runner,
+            occurred_at=NOW,
+        )
+
+    assert captured == []
+    assert all(secret not in value for value in captured)
+
+
+async def test_ingestion_rejects_a_linked_wiki_ancestor_before_the_runner(
+    tmp_path: Path,
+) -> None:
+    initialized = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    outside = tmp_path / "outside-store"
+    outside.mkdir()
+    shutil.copytree(initialized.wiki_dir, outside / "wiki")
+    secret = "outside-index-secret"
+    (outside / "wiki" / "index.md").write_text(secret, encoding="utf-8")
+    (initialized.root / "store").symlink_to(outside, target_is_directory=True)
+    workspace = Workspace(
+        root=initialized.root,
+        config=replace(initialized.config, wiki_dir="store/wiki"),
+    )
+    _write_config(workspace)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("first\nsecond\n", encoding="utf-8")
+    captured: list[str] = []
+
+    async def capture_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _source: RawSource,
+    ) -> tuple[ChangeSet, frozenset[str]]:
+        captured.append(dependencies.root_index)
+        raise AssertionError("linked wiki reached the runner")
+
+    with pytest.raises(WorkspaceError, match=r"symlink|non-directory"):
+        await prepare_ingestion(
+            workspace,
+            input_path,
+            explicit_model="test:model",
+            environment={},
+            runner=capture_runner,
+            occurred_at=NOW,
+        )
+
+    assert captured == []
+    assert all(secret not in value for value in captured)
+
+
+async def test_ingestion_accepts_legitimate_nested_configured_paths(tmp_path: Path) -> None:
+    initialized = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    configured = initialized.root / "configured"
+    (configured / "settings").mkdir(parents=True)
+    initialized.wiki_dir.rename(configured / "wiki")
+    initialized.conventions_file.rename(configured / "settings" / "conventions.md")
+    workspace = Workspace(
+        root=initialized.root,
+        config=replace(
+            initialized.config,
+            wiki_dir="configured/wiki",
+            conventions_file="configured/settings/conventions.md",
+        ),
+    )
+    _write_config(workspace)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("first\nsecond\n", encoding="utf-8")
+
+    outcome = await prepare_ingestion(
+        workspace,
+        input_path,
+        explicit_model="test:model",
+        environment={},
+        runner=_valid_runner,
+        occurred_at=NOW,
+    )
+
+    assert isinstance(outcome, PreparedIngestion)
+    discard_transaction(outcome.transaction)

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable, Mapping
+import stat
+from collections.abc import Awaitable, Callable, Generator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from bundlewalker.agents.common import AgentDependencies, resolve_model
@@ -48,6 +50,7 @@ async def prepare_ingestion(
 ) -> IngestionOutcome:
     """Prepare a validated ingestion transaction without changing live knowledge."""
     recover_transactions(workspace)
+    _validate_ingestion_paths(workspace)
     source = load_raw_source(source_path, workspace)
     repository = OkfRepository(workspace.wiki_dir)
     if _contains_source_digest(repository, source.sha256):
@@ -57,8 +60,16 @@ async def prepare_ingestion(
     dependencies = AgentDependencies(
         repository=repository,
         retriever=LexicalRetriever(repository),
-        conventions=_read_context(workspace.conventions_file, "workspace conventions"),
-        root_index=_read_context(workspace.wiki_dir / "index.md", "root index"),
+        conventions=_read_context(
+            workspace,
+            workspace.config.conventions_file,
+            "workspace conventions",
+        ),
+        root_index=_read_context(
+            workspace,
+            (PurePosixPath(workspace.config.wiki_dir) / "index.md").as_posix(),
+            "root index",
+        ),
     )
     selected_runner = runner if runner is not None else run_ingestion_agent
     change_set, read_ids = await selected_runner(model, dependencies, source)
@@ -88,10 +99,107 @@ def _contains_source_digest(repository: OkfRepository, digest: str) -> bool:
     return False
 
 
-def _read_context(path: Path, description: str) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise WorkspaceError(f"{description} must be a regular file: {path}")
+def _validate_ingestion_paths(workspace: Workspace) -> None:
+    wiki_parts = _safe_configured_parts(workspace.config.wiki_dir, "configured wiki path")
+    with _open_workspace_directory(workspace, wiki_parts, "configured wiki path"):
+        pass
+    with _open_workspace_file(
+        workspace,
+        _safe_configured_parts(workspace.config.conventions_file, "workspace conventions"),
+        "workspace conventions",
+    ):
+        pass
+    with _open_workspace_file(
+        workspace,
+        (*wiki_parts, "index.md"),
+        "root index",
+    ):
+        pass
+
+
+def _safe_configured_parts(value: str, description: str) -> tuple[str, ...]:
+    relative = PurePosixPath(value)
+    if (
+        not value
+        or relative.is_absolute()
+        or relative == PurePosixPath(".")
+        or relative.as_posix() != value
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise WorkspaceError(f"{description} is not a safe workspace-relative path")
+    return relative.parts
+
+
+@contextmanager
+def _open_workspace_directory(
+    workspace: Workspace,
+    parts: tuple[str, ...],
+    description: str,
+) -> Generator[int]:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    traversed: list[str] = []
     try:
-        return path.read_text(encoding="utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise WorkspaceError(f"could not read {description}: {path}") from exc
+        current = os.open(workspace.root, flags)
+        descriptors.append(current)
+        for part in parts:
+            traversed.append(part)
+            current = os.open(part, flags, dir_fd=current)
+            descriptors.append(current)
+    except OSError as exc:
+        for descriptor in reversed(descriptors):
+            with suppress(OSError):
+                os.close(descriptor)
+        location = "/".join(traversed) or "."
+        raise WorkspaceError(
+            f"{description} contains a symlink or non-directory: {location}"
+        ) from exc
+    try:
+        yield current
+    finally:
+        for descriptor in reversed(descriptors):
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+@contextmanager
+def _open_workspace_file(
+    workspace: Workspace,
+    parts: tuple[str, ...],
+    description: str,
+) -> Generator[int]:
+    with _open_workspace_directory(workspace, parts[:-1], description) as parent:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(parts[-1], flags, dir_fd=parent)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise OSError("not a regular file")
+        except OSError as exc:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+            raise WorkspaceError(
+                f"{description} contains a symlink or is not a regular file"
+            ) from exc
+        try:
+            yield descriptor
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _read_context(workspace: Workspace, relative_path: str, description: str) -> str:
+    parts = _safe_configured_parts(relative_path, description)
+    with _open_workspace_file(workspace, parts, description) as descriptor:
+        try:
+            chunks: list[bytes] = []
+            while chunk := os.read(descriptor, 65_536):
+                chunks.append(chunk)
+        except OSError as exc:
+            raise WorkspaceError(f"could not read {description}") from exc
+    try:
+        return b"".join(chunks).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise WorkspaceError(f"could not decode {description} as UTF-8") from exc

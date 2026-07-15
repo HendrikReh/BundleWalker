@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from importlib import resources
+from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, Model
@@ -39,20 +41,37 @@ async def run_ingestion_agent(
     numbered_source = "\n".join(
         f"{number:06d} | {line}" for number, line in enumerate(source.text.splitlines(), start=1)
     )
-    prompt = (
-        '<workspace-conventions trust="untrusted-data">\n'
-        f"{dependencies.conventions}\n"
-        "</workspace-conventions>\n\n"
-        '<root-index trust="untrusted-data">\n'
-        f"{dependencies.root_index}\n"
-        "</root-index>\n\n"
-        f'<numbered-source trust="untrusted-data" '
-        f'source-id="{source.concept_id}" sha256="{source.sha256}">\n'
-        f"{numbered_source}\n"
-        "</numbered-source>"
-    )
+    payload: dict[str, Any] = {
+        "workspace_conventions": {
+            "character_count": len(dependencies.conventions),
+            "content": dependencies.conventions,
+        },
+        "root_index": {
+            "character_count": len(dependencies.root_index),
+            "content": dependencies.root_index,
+        },
+        "numbered_source": {
+            "character_count": len(numbered_source),
+            "concept_id": source.concept_id,
+            "content": numbered_source,
+            "sha256": source.sha256,
+        },
+    }
+    prompt = f"UNTRUSTED_DATA_JSON_V1\n{_escaped_json(payload)}"
     try:
         result = await create_ingestion_agent(model).run(prompt, deps=dependencies)
-    except Exception as exc:
-        raise AgentRunError("ingestion agent could not produce a proposal") from exc
-    return result.output, frozenset(dependencies.read_ids)
+    except Exception:
+        pass
+    else:
+        return result.output, frozenset(dependencies.read_ids)
+    raise AgentRunError("ingestion agent could not produce a proposal") from None
+
+
+def _escaped_json(value: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return serialized.replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")
