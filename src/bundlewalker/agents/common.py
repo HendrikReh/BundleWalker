@@ -191,10 +191,7 @@ def _normalize_json_value(value: Any) -> Any:
     if isinstance(value, bytes):
         return urlsafe_b64encode(value).decode("ascii")
     if isinstance(value, Mapping):
-        mapping = cast(Mapping[Any, Any], value)
-        return {
-            _normalize_json_key(key): _normalize_json_value(item) for key, item in mapping.items()
-        }
+        return _normalize_json_mapping(cast(Mapping[Any, Any], value))
     if isinstance(value, (set, frozenset)):
         unordered = cast(set[Any] | frozenset[Any], value)
         items = [_normalize_json_value(item) for item in unordered]
@@ -214,6 +211,29 @@ def _normalize_json_key(value: Any) -> str | int | float | bool | None:
     if normalized is None or isinstance(normalized, (str, bool, int, float)):
         return normalized
     return _canonical_json(normalized)
+
+
+def _normalize_json_mapping(mapping: Mapping[Any, Any]) -> dict[Any, Any]:
+    result: dict[Any, Any] = {}
+    member_names: set[str] = set()
+    for raw_key, raw_value in mapping.items():
+        key = _normalize_json_key(raw_key)
+        member_name = _json_member_name(key)
+        if key in result or member_name in member_names:
+            raise ValueError(f"duplicate canonical JSON metadata key: {member_name}")
+        member_names.add(member_name)
+        result[key] = _normalize_json_value(raw_value)
+    return result
+
+
+def _json_member_name(value: str | int | float | bool | None) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return json.dumps(value, allow_nan=False, ensure_ascii=True, separators=(",", ":"))
 
 
 def _canonical_json(value: Any) -> str:

@@ -310,6 +310,48 @@ print(json.dumps(result["metadata"]["extension"]["labels"]))
     assert results == [["alpha", "middle", "zeta"]] * 5
 
 
+@pytest.mark.parametrize(
+    "mapping_yaml",
+    [
+        "    ? !!binary /w==\n    : binary-value\n    _w==: text-value\n",
+        '    1: numeric-value\n    "1": text-value\n',
+    ],
+    ids=["binary-and-base64-text", "integer-and-numeric-text"],
+)
+def test_read_concept_rejects_colliding_canonical_json_mapping_keys(
+    tmp_path: Path,
+    mapping_yaml: str,
+) -> None:
+    root = tmp_path / "wiki"
+    path = root / "topics" / "collision.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Colliding metadata\n"
+        "description: Two extension keys normalize to one JSON member name.\n"
+        "extension:\n"
+        "  mapping:\n"
+        f"{mapping_yaml}"
+        "---\n"
+        "# Colliding metadata\n",
+        encoding="utf-8",
+    )
+    repository = OkfRepository(root)
+    dependencies = AgentDependencies(
+        repository=repository,
+        retriever=LexicalRetriever(repository),
+        conventions="# Conventions",
+        root_index="# Knowledge Index",
+    )
+
+    result = read_concept(_context(dependencies), "topics/collision")
+
+    assert result == {"error": "concept could not be serialized: topics/collision"}
+    json.dumps(result, allow_nan=False)
+    assert dependencies.read_ids == set()
+
+
 def test_read_concept_serialization_failure_is_safe_and_not_recorded() -> None:
     document = OkfDocument(
         concept_id="topics/unserializable",
