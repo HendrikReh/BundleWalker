@@ -17,6 +17,7 @@ from bundlewalker.agents.common import (
     resolve_model,
     search_concepts,
 )
+from bundlewalker.domain import OkfDocument, OkfMetadata
 from bundlewalker.errors import ConfigurationError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
@@ -178,6 +179,71 @@ def test_read_concept_rejects_traversal_without_recording_it(
 
     assert "error" in result
     assert "unsafe" in result["error"]
+    assert dependencies.read_ids == set()
+
+
+def test_read_concept_converts_nested_binary_metadata_to_url_safe_base64(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    path = root / "topics" / "binary.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Binary metadata\n"
+        "description: Exercises permissive OKF extensions.\n"
+        "extension:\n"
+        "  payloads:\n"
+        "    - !!binary /w==\n"
+        "---\n"
+        "# Binary metadata\n",
+        encoding="utf-8",
+    )
+    repository = OkfRepository(root)
+    dependencies = AgentDependencies(
+        repository=repository,
+        retriever=LexicalRetriever(repository),
+        conventions="# Conventions",
+        root_index="# Knowledge Index",
+    )
+
+    result = read_concept(_context(dependencies), "topics/binary")
+
+    assert "error" not in result
+    assert result["metadata"]["extension"] == {"payloads": ["_w=="]}
+    json.dumps(result, allow_nan=False)
+    assert dependencies.read_ids == {"topics/binary"}
+
+
+def test_read_concept_serialization_failure_is_safe_and_not_recorded() -> None:
+    document = OkfDocument(
+        concept_id="topics/unserializable",
+        path=Path("topics/unserializable.md"),
+        metadata=OkfMetadata.model_validate(
+            {"type": "Topic", "extension": object()}
+        ),
+        body="# Unserializable\n",
+        digest="a" * 64,
+    )
+
+    class StaticRepository(OkfRepository):
+        def get(self, concept_id: str) -> OkfDocument:
+            assert concept_id == document.concept_id
+            return document
+
+    repository = StaticRepository(Path("wiki"))
+    dependencies = AgentDependencies(
+        repository=repository,
+        retriever=LexicalRetriever(repository),
+        conventions="# Conventions",
+        root_index="# Knowledge Index",
+    )
+
+    result = read_concept(_context(dependencies), document.concept_id)
+
+    assert result == {"error": "concept could not be serialized: topics/unserializable"}
+    json.dumps(result, allow_nan=False)
     assert dependencies.read_ids == set()
 
 

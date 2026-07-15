@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 from pydantic_ai import RunContext
+from pydantic_core import to_jsonable_python
 
+from bundlewalker.domain import OkfMetadata
 from bundlewalker.errors import ConfigurationError, OkfError, UsageError
 from bundlewalker.okf.repository import ConceptSummary, OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
@@ -122,6 +125,8 @@ def read_concept(
 ) -> ConceptReadResult:
     """Read one safe wiki concept, capped at 64,000 body characters.
 
+    Binary values in permissive metadata extras become URL-safe Base64 text.
+
     Args:
         ctx: The current agent run context.
         concept_id: A wiki-relative concept ID without ``.md``, absolute paths, or traversal.
@@ -131,16 +136,22 @@ def read_concept(
     except OkfError as exc:
         return _tool_error(exc)
 
-    body = document.body[:_MAX_BODY_CHARACTERS]
+    try:
+        body = document.body[:_MAX_BODY_CHARACTERS]
+        result = ReadResult(
+            concept_id=document.concept_id,
+            metadata=_metadata_for_tool(document.metadata),
+            body=body,
+            links=list(document.links),
+            digest=document.digest,
+            truncated=len(document.body) > len(body),
+        )
+        json.dumps(result, ensure_ascii=True, allow_nan=False)
+    except Exception:
+        return ToolError(error=f"concept could not be serialized: {concept_id}")
+
     ctx.deps.read_ids.add(document.concept_id)
-    return ReadResult(
-        concept_id=document.concept_id,
-        metadata=document.metadata.model_dump(mode="json"),
-        body=body,
-        links=list(document.links),
-        digest=document.digest,
-        truncated=len(document.body) > len(body),
-    )
+    return result
 
 
 read_tools = (list_concepts, search_concepts, read_concept)
@@ -155,6 +166,18 @@ def _summary_entry(summary: ConceptSummary) -> ConceptEntry:
         description=summary.description,
         tags=list(summary.tags),
     )
+
+
+def _metadata_for_tool(metadata: OkfMetadata) -> dict[str, Any]:
+    """Convert nested bytes to deterministic URL-safe Base64 JSON strings."""
+    value = to_jsonable_python(
+        metadata.model_dump(mode="python"),
+        bytes_mode="base64",
+        inf_nan_mode="strings",
+    )
+    if not isinstance(value, dict):
+        raise TypeError("metadata serialization must produce an object")
+    return cast(dict[str, Any], value)
 
 
 def _child_directories(repository: OkfRepository, directory: str) -> list[str]:
