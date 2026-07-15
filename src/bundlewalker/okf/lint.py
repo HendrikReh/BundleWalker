@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
@@ -327,6 +328,7 @@ def _lint_sources(
     sources: dict[str, _RawSource] = {}
     findings: list[LintFinding] = []
     resolved_workspace = workspace_root.resolve(strict=False)
+    configured_raw_directory = _configured_raw_directory(workspace_root)
 
     for document in documents:
         if document.metadata.type != "Source":
@@ -380,12 +382,15 @@ def _lint_sources(
                 )
             )
             continue
-        if raw_relative.parts[0] != "raw":
+        if not raw_relative.is_relative_to(configured_raw_directory):
             findings.append(
                 _finding(
                     Severity.ERROR,
                     "SOURCE001",
-                    "raw_path must be below raw/",
+                    (
+                        "raw_path must be below "
+                        f"{configured_raw_directory.as_posix()}/"
+                    ),
                     relative_document,
                 )
             )
@@ -632,6 +637,16 @@ def _workspace_relative_path(value: object) -> PurePosixPath | None:
     ):
         return None
     return relative
+
+
+def _configured_raw_directory(workspace_root: Path) -> PurePosixPath:
+    try:
+        with (workspace_root / "bundlewalker.toml").open("rb") as config_file:
+            values = tomllib.load(config_file)
+    except (OSError, tomllib.TOMLDecodeError):
+        return PurePosixPath("raw")
+    configured = _workspace_relative_path(values.get("raw_dir"))
+    return configured or PurePosixPath("raw")
 
 
 def _finding(

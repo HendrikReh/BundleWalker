@@ -48,7 +48,7 @@ def confirm_changes(prompt: str = "Apply these changes?") -> bool:
     """Confirm a reviewed proposal, treating interruption as an unchanged outcome."""
     try:
         return typer.confirm(prompt)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, typer.Abort):
         typer.echo("No changes applied.")
         raise typer.Exit(code=0) from None
 

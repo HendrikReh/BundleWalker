@@ -68,17 +68,15 @@ def test_failed_init_removes_only_command_created_paths(
     assert sibling.read_text(encoding="utf-8") == "keep"
 
 
-def test_confirmation_interruption_is_a_clean_unchanged_exit(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    def interrupt(_prompt: str) -> bool:
-        raise KeyboardInterrupt
+def test_confirmation_framework_abort_is_a_clean_unchanged_exit() -> None:
+    review_app = typer.Typer()
 
-    monkeypatch.setattr(typer, "confirm", interrupt)
-
-    with pytest.raises(typer.Exit) as raised:
+    def review() -> None:
         confirm_changes()
 
-    assert raised.value.exit_code == 0
-    assert capsys.readouterr().out == "No changes applied.\n"
+    review_app.command()(review)
+    result = runner.invoke(review_app, [], input="")
+
+    assert result.exit_code == 0
+    assert "No changes applied." in result.output
+    assert "Aborted" not in result.output

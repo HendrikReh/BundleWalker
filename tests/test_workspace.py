@@ -7,6 +7,7 @@ import pytest
 
 from bundlewalker.errors import WorkspaceError
 from bundlewalker.okf.derived import regenerate_indexes
+from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.workspace import (
     DEFAULT_CONFIG_TEXT,
     discover_workspace,
@@ -176,3 +177,57 @@ def test_stable_source_paths_lengthens_colliding_digest_prefix(tmp_path: Path) -
 
     assert stored_path == Path("raw/0123456789ab0-incoming.md")
     assert concept_id == "sources/0123456789ab0-incoming"
+
+
+def test_stable_source_paths_avoids_an_occupied_custom_concept_id(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge")
+    digest = "abcdef1234560" + "a" * 51
+    occupied = workspace.wiki_dir / f"sources/{digest[:12]}-incoming.md"
+    occupied.write_text(
+        "---\n"
+        "type: Experimental\n"
+        "title: Existing custom concept\n"
+        "description: A permissive OKF type already owns this concept ID.\n"
+        "---\n\n"
+        "# Existing custom concept\n",
+        encoding="utf-8",
+    )
+    regenerate_indexes(workspace.wiki_dir)
+
+    stored_path, concept_id = stable_source_paths(
+        workspace,
+        digest,
+        "incoming",
+        ".md",
+    )
+
+    assert stored_path == Path(f"raw/{digest[:13]}-incoming.md")
+    assert concept_id == f"sources/{digest[:13]}-incoming"
+
+
+def test_lint_uses_the_workspace_configured_raw_directory(tmp_path: Path) -> None:
+    initialized = initialize_workspace(tmp_path / "knowledge")
+    config_path = initialized.root / "bundlewalker.toml"
+    config_path.write_text(
+        DEFAULT_CONFIG_TEXT.replace('raw_dir = "raw"', 'raw_dir = "archive"'),
+        encoding="utf-8",
+    )
+    initialized.raw_dir.rename(initialized.root / "archive")
+    workspace = discover_workspace(initialized.root)
+    content = b"configured source\n"
+    digest = hashlib.sha256(content).hexdigest()
+    raw_path = workspace.raw_dir / f"{digest[:12]}-configured.txt"
+    raw_path.write_bytes(content)
+    _write_source_concept(
+        workspace.root,
+        concept_id=f"sources/{digest[:12]}-configured",
+        digest=digest,
+        raw_path=raw_path.relative_to(workspace.root).as_posix(),
+    )
+
+    findings = lint_bundle(workspace.wiki_dir, workspace.root)
+
+    assert not has_errors(findings)
+    assert not any(finding.code == "SOURCE001" for finding in findings)
