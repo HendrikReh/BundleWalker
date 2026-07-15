@@ -18,7 +18,13 @@ from pydantic_ai.models.test import TestModel
 
 from bundlewalker.agents.common import AgentDependencies, read_tools
 from bundlewalker.agents.ingest import create_ingestion_agent, run_ingestion_agent
-from bundlewalker.domain import ChangeOperation, ChangeSet, ConceptType, DraftConcept
+from bundlewalker.domain import (
+    MAX_TITLE_CHARACTERS,
+    ChangeOperation,
+    ChangeSet,
+    ConceptType,
+    DraftConcept,
+)
 from bundlewalker.errors import AgentRunError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
@@ -202,3 +208,36 @@ async def test_ingestion_runner_drops_sensitive_provider_exception_chains(
     assert error.__context__ is None
     assert secret not in formatted
     assert "provider echoed" not in formatted
+
+
+async def test_ingestion_runner_rejects_oversized_model_output(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("evidence", encoding="utf-8")
+    source = load_raw_source(input_path, discover_workspace(dependencies.repository.root))
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args={
+                        "summary": "Oversized title.",
+                        "source_sha256": source.sha256,
+                        "drafts": [
+                            {
+                                "operation": "create",
+                                "path": source.concept_id,
+                                "type": "Source",
+                                "title": "x" * (MAX_TITLE_CHARACTERS + 1),
+                                "description": "Description.",
+                                "body": "# Notes\n",
+                            }
+                        ],
+                    },
+                )
+            ]
+        )
+
+    with pytest.raises(AgentRunError, match="could not produce a proposal"):
+        await run_ingestion_agent(FunctionModel(respond), dependencies, source)

@@ -230,6 +230,44 @@ async def test_query_runner_rejects_invalid_citation_output(
         await run_query_agent(FunctionModel(respond), dependencies, "Question?")
 
 
+async def test_query_runner_rejects_raw_line_spans_with_sanitized_error(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+    calls = 0
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name="read_concept", args={"concept_id": "topics/agents"})]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args={
+                        "title": "Unsafe spans",
+                        "body": "Agents use tools [1].",
+                        "citations": [
+                            {
+                                "number": 1,
+                                "concept_id": "topics/agents",
+                                "start_line": 1,
+                                "end_line": 2,
+                            }
+                        ],
+                    },
+                )
+            ]
+        )
+
+    with pytest.raises(AgentRunError, match="could not produce an answer") as caught:
+        await run_query_agent(FunctionModel(respond), dependencies, "Question?")
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
 @pytest.mark.parametrize(
     "marker",
     ["9" * 5_000, "1000000000"],

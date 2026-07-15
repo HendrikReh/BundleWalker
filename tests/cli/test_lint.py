@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,10 +14,18 @@ import bundlewalker.workflows.lint as lint_workflow
 from bundlewalker.agents.common import AgentDependencies, read_concept
 from bundlewalker.agents.semantic_lint import AgentModel
 from bundlewalker.cli import app
-from bundlewalker.domain import FindingOrigin, LintFinding, OkfMetadata, Severity
+from bundlewalker.domain import (
+    Citation,
+    CitedAnswer,
+    FindingOrigin,
+    LintFinding,
+    OkfMetadata,
+    Severity,
+)
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
-from bundlewalker.workspace import initialize_workspace
+from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
+from bundlewalker.workspace import discover_workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
 runner = CliRunner()
@@ -71,6 +80,41 @@ def test_plain_lint_reports_sorted_findings_and_exits_on_deterministic_errors(
     assert result.output.index("INDEX001") < result.output.index("ORPHAN001")
     assert "deterministic" in result.output
     assert _tree_bytes(root) == before
+
+
+def test_lint_cli_recovers_authenticated_swap_before_reporting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path, monkeypatch, regenerate=True)
+    discovered = discover_workspace(root)
+    prepared = prepare_synthesis(
+        discovered,
+        AnsweredQuestion(
+            answer=CitedAnswer(
+                title="Interrupted lint fixture",
+                body="Agents use tools [1].",
+                citations=[Citation(number=1, concept_id="topics/agents")],
+            ),
+            read_ids=frozenset({"topics/agents"}),
+        ),
+        occurred_at=NOW,
+    )
+    expected_wiki = _tree_bytes(discovered.wiki_dir)
+    manifest_path = prepared.transaction_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["phase"] = "swapping"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    discovered.wiki_dir.rename(prepared.backup_wiki)
+
+    result = runner.invoke(app, ["lint"])
+
+    assert result.exit_code == 0, result.output
+    assert discovered.wiki_dir.is_dir()
+    assert _tree_bytes(discovered.wiki_dir) == expected_wiki
+    assert not prepared.transaction_dir.exists()
 
 
 def test_semantic_lint_requires_a_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

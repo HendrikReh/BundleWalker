@@ -9,7 +9,10 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import quote
 
+from pydantic import ValidationError
+
 from bundlewalker.domain import (
+    MAX_CITATIONS,
     ChangeOperation,
     ChangeSet,
     Citation,
@@ -34,6 +37,11 @@ _CATEGORY_BY_TYPE = {
     ConceptType.SYNTHESIS: "syntheses",
 }
 _SOURCE_EXTENSION_FIELDS = frozenset({"source_sha256", "raw_path"})
+_CANONICAL_DRAFT_PATH = re.compile(
+    r"^(?:sources|topics|entities|syntheses)/[a-z0-9]+(?:-[a-z0-9]+)*$"
+)
+_MAX_CITATION_DIGITS = len(str(MAX_CITATIONS))
+_MAX_CITATION_MARKERS = 1_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +57,10 @@ def validate_change_set(
     context: ChangeValidationContext,
 ) -> None:
     """Validate a model-produced proposal against live and prospective concepts."""
+    try:
+        change_set = ChangeSet.model_validate(change_set.model_dump(mode="python"))
+    except ValidationError as exc:
+        raise ChangeSetError("change set exceeds producer limits or has invalid fields") from exc
     try:
         live_documents = context.repository.scan()
     except OkfError as exc:
@@ -173,17 +185,15 @@ def build_prospective_wiki(
 
 
 def _normalized_draft_path(value: str) -> str:
-    unnormalized = value[:-3] if value.endswith(".md") else value
-    if not unnormalized:
-        raise ChangeSetError(f"unsafe concept path: {value}")
-    if any(segment in {".", ".."} for segment in unnormalized.split("/")):
-        raise ChangeSetError(f"concept path contains a dot path segment: {value}")
-    concept_id = PurePosixPath(unnormalized).as_posix()
+    if _CANONICAL_DRAFT_PATH.fullmatch(value) is None:
+        raise ChangeSetError(
+            f"concept path must be canonical <category>/<lowercase-ascii-slug>: {value}"
+        )
     try:
-        concept_path(Path("/bundle"), concept_id)
+        concept_path(Path("/bundle"), value)
     except OkfError as exc:
         raise ChangeSetError(str(exc)) from exc
-    return concept_id
+    return value
 
 
 def _validate_category(concept_id: str, concept_type: ConceptType) -> None:
@@ -270,7 +280,7 @@ def _validate_citations(
 
     for concept_id, draft in normalized_drafts.items():
         claims = _claims_body(draft.body)
-        markers = [int(value) for value in _CITATION_MARKER.findall(claims)]
+        markers = _bounded_marker_numbers(claims, concept_id)
         marker_order = list(dict.fromkeys(markers))
         citation_numbers = [citation.number for citation in draft.citations]
         all_numbers = sorted(set(markers) | set(citation_numbers))
@@ -320,6 +330,21 @@ def _validate_citations(
 def _claims_body(body: str) -> str:
     heading = _CITATION_HEADING.search(body)
     return body if heading is None else body[: heading.start()]
+
+
+def _bounded_marker_numbers(body: str, concept_id: str) -> list[int]:
+    numbers: list[int] = []
+    for count, match in enumerate(_CITATION_MARKER.finditer(body), start=1):
+        if count > _MAX_CITATION_MARKERS:
+            raise ChangeSetError(f"too many citation markers: {concept_id}")
+        digits = match.group(1)
+        if len(digits) > _MAX_CITATION_DIGITS:
+            raise ChangeSetError(f"citation number exceeds supported limits: {concept_id}")
+        number = int(digits)
+        if number < 1 or number > MAX_CITATIONS:
+            raise ChangeSetError(f"citation number exceeds supported limits: {concept_id}")
+        numbers.append(number)
+    return numbers
 
 
 def _render_citation(

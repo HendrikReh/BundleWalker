@@ -8,14 +8,19 @@ from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, Model
 
 from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
-from bundlewalker.domain import CitedAnswer
+from bundlewalker.domain import (
+    MAX_ANSWER_BODY_CHARACTERS,
+    MAX_CITATIONS,
+    MAX_TITLE_CHARACTERS,
+    CitedAnswer,
+)
 from bundlewalker.errors import AgentRunError, UsageError
 from bundlewalker.okf.repository import OkfRepository
 
 type AgentModel = Model | KnownModelName | str
 
 _CITATION_MARKER = re.compile(r"\[(\d+)]")
-_MAX_CITATION_NUMBER = 100
+_MAX_CITATION_NUMBER = MAX_CITATIONS
 _MAX_CITATION_DIGITS = len(str(_MAX_CITATION_NUMBER))
 _MAX_CITATION_MARKERS = 1_000
 
@@ -97,6 +102,10 @@ def _validate_cited_answer(
     repository: OkfRepository,
     read_ids: frozenset[str],
 ) -> None:
+    if len(answer.title) > MAX_TITLE_CHARACTERS or len(answer.body) > MAX_ANSWER_BODY_CHARACTERS:
+        raise AgentRunError("query answer exceeds the supported output size")
+    if len(answer.citations) > MAX_CITATIONS:
+        raise AgentRunError("query answer contains too many structured citations")
     if not answer.title.strip():
         raise AgentRunError("query answer title must not be empty")
     if not answer.body.strip():
@@ -110,6 +119,8 @@ def _validate_cited_answer(
 
     citation_numbers: set[int] = set()
     for citation in answer.citations:
+        if citation.start_line is not None or citation.end_line is not None:
+            raise AgentRunError("query answer citations cannot include raw line spans")
         if citation.number > _MAX_CITATION_NUMBER:
             raise AgentRunError("query citation number exceeds the supported limit")
         if citation.number in citation_numbers:

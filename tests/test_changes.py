@@ -148,7 +148,7 @@ def test_validation_rejects_wrong_categories_and_reserved_paths(
     assert workspace.wiki_dir.is_dir()
 
 
-def test_validation_normalizes_optional_markdown_suffixes(tmp_path: Path) -> None:
+def test_validation_rejects_optional_markdown_suffix_aliases(tmp_path: Path) -> None:
     _, source, context = _ingest_context(tmp_path)
     change_set = ChangeSet(
         summary="Integrated an incoming source.",
@@ -156,15 +156,16 @@ def test_validation_normalizes_optional_markdown_suffixes(tmp_path: Path) -> Non
         drafts=[_valid_source_draft(source, suffix=".md")],
     )
 
-    validate_change_set(change_set, context)
+    with pytest.raises(ChangeSetError, match="canonical"):
+        validate_change_set(change_set, context)
 
 
-def test_validation_rejects_normalized_duplicate_paths(tmp_path: Path) -> None:
+def test_validation_rejects_markdown_suffix_alias_before_duplicate_check(tmp_path: Path) -> None:
     _, source, context = _ingest_context(tmp_path)
     first = _draft(path="topics/agents")
     second = _draft(path="topics/agents.md", title="Other agents")
 
-    with pytest.raises(ChangeSetError, match="duplicate"):
+    with pytest.raises(ChangeSetError, match="canonical"):
         validate_change_set(_valid_ingest(source, first, second), context)
 
 
@@ -174,7 +175,7 @@ def test_validation_canonicalizes_alias_before_create_over_existing_check(
     workspace, source, context = _ingest_context(tmp_path)
     _write_concept(workspace, "topics/existing")
 
-    with pytest.raises(ChangeSetError, match="already exists"):
+    with pytest.raises(ChangeSetError, match="canonical"):
         validate_change_set(
             _valid_ingest(source, _draft(path="topics//existing")),
             context,
@@ -182,10 +183,53 @@ def test_validation_canonicalizes_alias_before_create_over_existing_check(
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "topics/Agents",
+        "topics/café",
+        "topics/two words",
+        "topics/two.words",
+        "topics/",
+        "topics/nested/agents",
+        "topics//agents",
+        "topics/agents.md",
+    ],
+)
+@pytest.mark.parametrize("operation", [ChangeOperation.CREATE, ChangeOperation.REPLACE])
+def test_validation_rejects_noncanonical_create_and_replace_paths(
+    tmp_path: Path,
+    path: str,
+    operation: ChangeOperation,
+) -> None:
+    workspace, source, context = _ingest_context(tmp_path)
+    if operation is ChangeOperation.REPLACE:
+        _write_concept(workspace, "topics/agents")
+    item = _draft(
+        operation=operation,
+        path=path,
+        base_digest=(
+            context.repository.get("topics/agents").digest
+            if operation is ChangeOperation.REPLACE
+            else None
+        ),
+    )
+
+    with pytest.raises(ChangeSetError, match="canonical"):
+        validate_change_set(_valid_ingest(source, item), context)
+
+
+@pytest.mark.parametrize("slug", ["a", "agents-2", "123", "a1-b2-c3"])
+def test_validation_accepts_normalized_ascii_slugs(tmp_path: Path, slug: str) -> None:
+    _, source, context = _ingest_context(tmp_path)
+
+    validate_change_set(_valid_ingest(source, _draft(path=f"topics/{slug}")), context)
+
+
+@pytest.mark.parametrize(
     ("first_path", "second_path", "message"),
     [
-        ("topics/agents", "topics//agents", "duplicate"),
-        ("topics/Agents", "topics/agents", "case-fold"),
+        ("topics/agents", "topics//agents", "canonical"),
+        ("topics/Agents", "topics/agents", "canonical"),
     ],
 )
 def test_validation_rejects_prospective_target_aliases_before_operations(
@@ -210,7 +254,7 @@ def test_validation_rejects_prospective_target_aliases_before_operations(
 def test_validation_rejects_bare_category_path(tmp_path: Path) -> None:
     _, source, context = _ingest_context(tmp_path)
 
-    with pytest.raises(ChangeSetError, match="concept name"):
+    with pytest.raises(ChangeSetError, match="canonical"):
         validate_change_set(
             _valid_ingest(source, _draft(path="topics")),
             context,
@@ -232,7 +276,7 @@ def test_validation_rejects_dot_segments_before_adding_markdown_suffix(
 ) -> None:
     _, source, context = _ingest_context(tmp_path)
 
-    with pytest.raises(ChangeSetError, match="dot path segment"):
+    with pytest.raises(ChangeSetError, match="canonical"):
         validate_change_set(
             _valid_ingest(source, _draft(path=path)),
             context,
@@ -276,7 +320,7 @@ def test_validation_enforces_create_replace_and_base_digest_rules(tmp_path: Path
 
     valid_replacement = _draft(
         operation=ChangeOperation.REPLACE,
-        path="topics/existing.md",
+        path="topics/existing",
         base_digest=existing.digest,
     )
     validate_change_set(_valid_ingest(source, valid_replacement), context)
@@ -509,7 +553,7 @@ def test_render_draft_preserves_unknown_metadata_and_normalizes_citations(
     )
     replacement = _draft(
         operation=ChangeOperation.REPLACE,
-        path="topics/agents.md",
+        path="topics/agents",
         title="New title",
         body="# New title\n\nEvidence [1].\n\n# Citations\n\n[99] stale\n",
         citations=[Citation(number=1, concept_id=source_id, start_line=1, end_line=1)],

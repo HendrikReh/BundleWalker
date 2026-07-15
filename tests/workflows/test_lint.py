@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,10 +11,18 @@ from pydantic_ai.usage import RunUsage
 
 from bundlewalker.agents.common import AgentDependencies, read_concept
 from bundlewalker.agents.semantic_lint import AgentModel
-from bundlewalker.domain import FindingOrigin, LintFinding, OkfMetadata, Severity
+from bundlewalker.domain import (
+    Citation,
+    CitedAnswer,
+    FindingOrigin,
+    LintFinding,
+    OkfMetadata,
+    Severity,
+)
 from bundlewalker.errors import AgentRunError, WorkspaceError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
+from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
 from bundlewalker.workflows.lint import LintRun, run_lint
 from bundlewalker.workspace import Workspace, initialize_workspace
 
@@ -55,14 +64,11 @@ def _read(dependencies: AgentDependencies, concept_id: str) -> None:
     assert "error" not in result
 
 
-async def test_plain_lint_is_sorted_offline_and_does_not_recover_or_write(
+async def test_plain_lint_without_pending_transaction_is_sorted_offline_and_read_only(
     tmp_path: Path,
 ) -> None:
     workspace = _workspace(tmp_path, regenerate=False)
     workspace.conventions_file.unlink()
-    unfinished = workspace.root / ".bundlewalker" / "transactions" / "unfinished"
-    unfinished.mkdir(parents=True)
-    (unfinished / "sentinel").write_bytes(b"must remain")
     before = _tree_bytes(workspace.root)
 
     result = await run_lint(
@@ -80,6 +86,42 @@ async def test_plain_lint_is_sorted_offline_and_does_not_recover_or_write(
     ]
     assert all(finding.origin is FindingOrigin.DETERMINISTIC for finding in result.findings)
     assert _tree_bytes(workspace.root) == before
+
+
+async def test_plain_lint_recovers_authenticated_swap_before_scanning(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path, regenerate=True)
+    prepared = prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=CitedAnswer(
+                title="Interrupted lint fixture",
+                body="Agents use tools [1].",
+                citations=[Citation(number=1, concept_id="topics/agents")],
+            ),
+            read_ids=frozenset({"topics/agents"}),
+        ),
+        occurred_at=NOW,
+    )
+    expected_wiki = _tree_bytes(workspace.wiki_dir)
+    manifest_path = prepared.transaction_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["phase"] = "swapping"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    workspace.wiki_dir.rename(prepared.backup_wiki)
+
+    result = await run_lint(
+        workspace,
+        semantic=False,
+        explicit_model=None,
+        environment={},
+    )
+
+    assert result.deterministic_has_errors is False
+    assert workspace.wiki_dir.is_dir()
+    assert _tree_bytes(workspace.wiki_dir) == expected_wiki
+    assert not prepared.transaction_dir.exists()
 
 
 async def test_semantic_lint_runs_after_deterministic_lint_and_stays_advisory(

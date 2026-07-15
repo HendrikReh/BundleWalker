@@ -22,7 +22,13 @@ from bundlewalker.agents.semantic_lint import (
     create_semantic_lint_agent,
     run_semantic_lint_agent,
 )
-from bundlewalker.domain import FindingOrigin, LintFinding, OkfMetadata, Severity
+from bundlewalker.domain import (
+    MAX_SEMANTIC_FINDINGS,
+    FindingOrigin,
+    LintFinding,
+    OkfMetadata,
+    Severity,
+)
 from bundlewalker.errors import AgentRunError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
@@ -224,3 +230,12 @@ async def test_semantic_runner_drops_sensitive_provider_exception_chains(tmp_pat
     assert error.__context__ is None
     assert secret not in formatted
     assert "provider echoed" not in formatted
+
+
+def test_semantic_validation_rejects_finding_count_before_evidence_work() -> None:
+    findings = [_finding() for _ in range(MAX_SEMANTIC_FINDINGS + 1)]
+
+    with pytest.raises(AgentRunError, match="too many"):
+        from bundlewalker.agents.semantic_lint import validate_semantic_findings
+
+        validate_semantic_findings(findings, frozenset({"topics/agents"}))

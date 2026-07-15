@@ -8,7 +8,7 @@ import pytest
 
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
-from bundlewalker.domain import Citation, CitedAnswer, OkfMetadata
+from bundlewalker.domain import MAX_ANSWER_BODY_CHARACTERS, Citation, CitedAnswer, OkfMetadata
 from bundlewalker.errors import AgentRunError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
@@ -150,6 +150,60 @@ async def test_answer_workflow_revalidates_injected_runner_output(tmp_path: Path
         return _answer(), frozenset()
 
     with pytest.raises(AgentRunError, match="not read"):
+        await answer_question(
+            workspace,
+            "Question?",
+            explicit_model="test:model",
+            environment={},
+            runner=invalid_runner,
+        )
+
+
+async def test_answer_workflow_rejects_injected_raw_line_spans(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    unsafe = CitedAnswer.model_construct(
+        title="Unsafe spans",
+        body="Agents use tools [1].",
+        citations=[Citation(number=1, concept_id="topics/agents", start_line=1, end_line=2)],
+    )
+
+    async def invalid_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add("topics/agents")
+        return unsafe, frozenset({"topics/agents"})
+
+    with pytest.raises(AgentRunError, match="line spans") as caught:
+        await answer_question(
+            workspace,
+            "Question?",
+            explicit_model="test:model",
+            environment={},
+            runner=invalid_runner,
+        )
+
+    assert caught.value.__cause__ is None
+
+
+async def test_answer_workflow_rejects_injected_oversized_answer(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    oversized = CitedAnswer.model_construct(
+        title="Oversized",
+        body="x" * (MAX_ANSWER_BODY_CHARACTERS + 1),
+        citations=[Citation(number=1, concept_id="topics/agents")],
+    )
+
+    async def invalid_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add("topics/agents")
+        return oversized, frozenset({"topics/agents"})
+
+    with pytest.raises(AgentRunError, match="output size"):
         await answer_question(
             workspace,
             "Question?",

@@ -95,7 +95,8 @@ uv run bundlewalker ask --save QUESTION [--model MODEL]
 Plain `ask` reads the compiled wiki and prints a Markdown answer with citations; it does not
 write the workspace. Every citation must target an existing concept that the query run actually
 read. `--save` converts that same validated answer into one create-only Synthesis proposal and
-uses the normal diff and confirmation path.
+uses the normal diff and confirmation path. Query answers cite concepts, not raw-source line
+spans; line spans are reserved for evidence citations created during ingestion.
 
 ### Lint the knowledge bundle
 
@@ -111,7 +112,9 @@ warnings; deterministic errors exit `1`.
 `--semantic` runs an additional provider-neutral, read-only agent pass for contradictions,
 staleness, unsupported claims, missing concepts, and knowledge gaps. Its findings are advisory:
 even a semantic finding displayed as `ERROR` does not change the process status. Only
-deterministic errors control lint's exit code. Lint never auto-fixes the workspace.
+deterministic errors control lint's exit code. Before either pass, lint completes or rolls back
+any authenticated interrupted BundleWalker transaction. This crash recovery is maintenance of
+an already reviewed operation; lint never auto-fixes knowledge content.
 
 ## Workspace layout
 
@@ -171,6 +174,14 @@ Because `raw/` intentionally preserves exact personal source bytes, decide what 
 to publish before pushing a knowledge workspace to any remote.
 
 ## V1 limits
+
+Model-produced concept paths are exactly `<category>/<lowercase-ascii-slug>`. Per proposal,
+BundleWalker accepts at most 128 drafts and 1,000,000 total proposal characters. Individual
+draft and answer bodies are capped at 128,000 characters, titles at 300, descriptions at 1,000,
+tags at 32 entries of 80 characters, and citations at 100. Semantic lint returns at most 100
+findings. These limits are deliberately large enough for the intended hundreds-page local wiki
+while bounding malformed provider output. Existing OKF concepts remain permissively readable,
+including custom paths, unknown types, and extra frontmatter.
 
 BundleWalker v1 intentionally excludes:
 

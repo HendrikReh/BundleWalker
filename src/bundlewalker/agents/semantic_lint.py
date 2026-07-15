@@ -7,7 +7,7 @@ from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, Model
 
 from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
-from bundlewalker.domain import FindingOrigin, LintFinding
+from bundlewalker.domain import MAX_SEMANTIC_FINDINGS, FindingOrigin, LintFinding
 from bundlewalker.errors import AgentRunError
 
 type AgentModel = Model | KnownModelName | str
@@ -82,6 +82,10 @@ def validate_semantic_findings(
     read_ids: frozenset[str],
 ) -> list[LintFinding]:
     """Normalize semantic origin and reject unsupported codes or unread evidence."""
+    if len(findings) > MAX_SEMANTIC_FINDINGS:
+        raise AgentRunError(
+            f"semantic lint returned too many findings; maximum is {MAX_SEMANTIC_FINDINGS}"
+        )
     validated: list[LintFinding] = []
     for finding in findings:
         if finding.code not in _ALLOWED_CODES:

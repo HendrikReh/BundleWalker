@@ -147,3 +147,30 @@ def test_ask_save_accepts_review_without_second_model_call(
     assert "Saved synthesis: Agent Tool Use" in (cli_workspace / "wiki" / "log.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_ask_cli_sanitizes_injected_raw_line_spans(
+    cli_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unsafe = CitedAnswer.model_construct(
+        title="Unsafe spans",
+        body="Agents can use tools [1].",
+        citations=[Citation(number=1, concept_id="topics/agents", start_line=1, end_line=2)],
+    )
+
+    async def fake_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add("topics/agents")
+        return unsafe, frozenset({"topics/agents"})
+
+    monkeypatch.setattr(ask_workflow, "run_query_agent", fake_runner)
+
+    result = runner.invoke(app, ["ask", "Question?", "--model", "test:model"])
+
+    assert result.exit_code == 1
+    assert "line spans" in result.output
+    assert "raw lines 1" not in result.output

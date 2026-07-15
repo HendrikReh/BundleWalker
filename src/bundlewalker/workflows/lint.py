@@ -16,6 +16,7 @@ from bundlewalker.errors import AgentRunError, OkfError
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
+from bundlewalker.transactions import recover_transactions
 from bundlewalker.workflows.context import read_context, validate_repository_path
 from bundlewalker.workspace import Workspace
 
@@ -46,6 +47,7 @@ async def run_lint(
     runner: SemanticLintRunner | None = None,
 ) -> LintRun:
     """Run deterministic lint and, when requested, one read-only semantic pass."""
+    recover_transactions(workspace)
     deterministic_findings = tuple(lint_bundle(workspace.wiki_dir, workspace.root))
     deterministic_has_errors = has_errors(deterministic_findings)
     if not semantic:

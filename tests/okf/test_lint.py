@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,6 +136,114 @@ def test_invalid_log_date_is_an_error(tmp_path: Path) -> None:
     assert findings[0].severity is Severity.ERROR
     assert findings[0].path == "log.md"
     assert "2026-02-30" in findings[0].message
+
+
+@pytest.mark.parametrize(
+    ("headings", "chronology_error"),
+    [
+        (["2026-07-16", "2026-07-15"], False),
+        (["2026-07-16", "2026-07-16"], False),
+        (["2026-07-15", "2026-07-16"], True),
+    ],
+)
+def test_log_dates_are_newest_first(
+    tmp_path: Path,
+    headings: list[str],
+    chronology_error: bool,
+) -> None:
+    root = _copy_fixture(tmp_path)
+    sections = "\n".join(f"## {value}\n\n* **Update**: Entry.\n" for value in headings)
+    (root / "log.md").write_text(f"# Knowledge Update Log\n\n{sections}", encoding="utf-8")
+
+    chronology = [
+        finding
+        for finding in _findings_with_code(lint_bundle(root), "LOG001")
+        if "newest-first" in finding.message
+    ]
+
+    assert bool(chronology) is chronology_error
+
+
+def test_malformed_log_date_does_not_create_a_second_chronology_error(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    (root / "log.md").write_text(
+        "# Knowledge Update Log\n\n## not-a-date\n\n* **Update**: Entry.\n"
+        "\n## 2026-07-16\n\n* **Update**: Entry.\n",
+        encoding="utf-8",
+    )
+
+    log_findings = _findings_with_code(lint_bundle(root), "LOG001")
+
+    assert len(log_findings) == 1
+    assert "invalid log date" in log_findings[0].message
+
+
+@pytest.mark.parametrize("target_kind", ["escaping", "internal", "broken"])
+def test_lint_reports_directory_symlinks_without_following_them(
+    tmp_path: Path,
+    target_kind: str,
+) -> None:
+    root = _copy_fixture(tmp_path)
+    link = root / "linked"
+    if target_kind == "escaping":
+        target = tmp_path / "outside"
+        target.mkdir()
+    elif target_kind == "internal":
+        target = root / "topics"
+    else:
+        target = tmp_path / "missing"
+    link.symlink_to(target, target_is_directory=True)
+
+    path_findings = _findings_with_code(lint_bundle(root), "PATH001")
+
+    assert [(finding.path, finding.severity) for finding in path_findings] == [
+        ("linked", Severity.ERROR)
+    ]
+    assert "symbolic link" in path_findings[0].message
+
+
+def test_lint_reports_fifo_without_opening_or_blocking_on_it(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    fifo = root / "unexpected.pipe"
+    os.mkfifo(fifo)
+
+    path_findings = _findings_with_code(lint_bundle(root), "PATH001")
+
+    assert [(finding.path, finding.severity) for finding in path_findings] == [
+        ("unexpected.pipe", Severity.ERROR)
+    ]
+    assert "regular file" in path_findings[0].message
+
+
+def test_lint_reports_file_symlink_without_parsing_its_target(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("# No frontmatter\n", encoding="utf-8")
+    (root / "linked.md").symlink_to(outside)
+
+    findings = lint_bundle(root)
+
+    assert any(finding.code == "PATH001" and finding.path == "linked.md" for finding in findings)
+    assert not any(finding.code == "OKF001" and finding.path == "linked.md" for finding in findings)
+
+
+def test_internal_links_do_not_follow_a_symlinked_directory(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    (root / "linked").symlink_to(root / "topics", target_is_directory=True)
+    agents = root / "topics" / "agents.md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace(
+            "[Agents](/topics/agents.md)", "[Agents](/linked/agents.md)"
+        ),
+        encoding="utf-8",
+    )
+
+    findings = lint_bundle(root)
+
+    assert any(finding.code == "PATH001" and finding.path == "linked" for finding in findings)
+    assert any(
+        finding.code == "LINK001" and "/linked/agents.md" in finding.message for finding in findings
+    )
 
 
 def test_broken_internal_link_is_a_warning(tmp_path: Path) -> None:

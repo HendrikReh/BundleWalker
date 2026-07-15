@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import os
 import re
+import stat
 import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
-from bundlewalker.domain import FindingOrigin, LintFinding, OkfDocument, Severity
+from bundlewalker.domain import (
+    MAX_CITATION_LINE,
+    MAX_CITATIONS,
+    FindingOrigin,
+    LintFinding,
+    OkfDocument,
+    Severity,
+)
 from bundlewalker.errors import OkfError
 from bundlewalker.okf.derived import render_index
 from bundlewalker.okf.documents import RESERVED_NAMES, parse_document
@@ -30,6 +40,9 @@ _CITATION_REFERENCE = re.compile(
     r"^\[(?P<number>\d+)]\s+\[[^]]+]\((?P<target>[^)]+)\)"
     r"(?:\s+[—-]\s+raw lines (?P<start>\d+)[\u2013-](?P<end>\d+))?\s*$"
 )
+_MAX_CITATION_DIGITS = len(str(MAX_CITATIONS))
+_MAX_LINE_DIGITS = len(str(MAX_CITATION_LINE))
+_MAX_CITATION_MARKERS = 1_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +60,19 @@ class _CitationReference:
 
 def lint_bundle(wiki_root: Path, workspace_root: Path | None = None) -> list[LintFinding]:
     """Return all deterministic conformance and health findings for an OKF bundle."""
-    if not wiki_root.is_dir():
+    try:
+        root_mode = wiki_root.lstat().st_mode
+    except OSError:
+        root_mode = 0
+    if stat.S_ISLNK(root_mode):
+        return [
+            _finding(
+                Severity.ERROR,
+                "PATH001",
+                "bundle root must not be a symbolic link",
+            )
+        ]
+    if not stat.S_ISDIR(root_mode):
         return [
             _finding(
                 Severity.ERROR,
@@ -56,7 +81,9 @@ def lint_bundle(wiki_root: Path, workspace_root: Path | None = None) -> list[Lin
             )
         ]
 
-    documents, findings = _parse_documents(wiki_root)
+    findings = _lint_path_structure(wiki_root)
+    documents, parse_findings = _parse_documents(wiki_root)
+    findings.extend(parse_findings)
     findings.extend(_lint_indexes(wiki_root, documents))
     findings.extend(_lint_logs(wiki_root))
     link_findings, inbound_counts = _lint_links(wiki_root, documents)
@@ -93,6 +120,57 @@ def has_errors(findings: Iterable[LintFinding]) -> bool:
     return any(finding.severity is Severity.ERROR for finding in findings)
 
 
+def _lint_path_structure(root: Path) -> list[LintFinding]:
+    """Inspect entries with lstat semantics so links and special files are never followed."""
+    findings: list[LintFinding] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name)
+        except OSError:
+            relative = directory.relative_to(root).as_posix()
+            findings.append(
+                _finding(
+                    Severity.ERROR,
+                    "PATH001",
+                    "cannot inspect bundle directory",
+                    None if relative == "." else relative,
+                )
+            )
+            continue
+        for entry in entries:
+            relative = entry.relative_to(root).as_posix()
+            try:
+                mode = entry.lstat().st_mode
+            except OSError:
+                findings.append(
+                    _finding(Severity.ERROR, "PATH001", "cannot inspect bundle entry", relative)
+                )
+                continue
+            if stat.S_ISLNK(mode):
+                findings.append(
+                    _finding(
+                        Severity.ERROR,
+                        "PATH001",
+                        "symbolic link entries are not allowed in an OKF bundle",
+                        relative,
+                    )
+                )
+            elif stat.S_ISDIR(mode):
+                pending.append(entry)
+            elif not stat.S_ISREG(mode):
+                findings.append(
+                    _finding(
+                        Severity.ERROR,
+                        "PATH001",
+                        "bundle entry is not a regular file or directory",
+                        relative,
+                    )
+                )
+    return findings
+
+
 def _parse_documents(root: Path) -> tuple[list[OkfDocument], list[LintFinding]]:
     documents: list[OkfDocument] = []
     findings: list[LintFinding] = []
@@ -103,7 +181,8 @@ def _parse_documents(root: Path) -> tuple[list[OkfDocument], list[LintFinding]]:
             (
                 path
                 for path in root.rglob("*")
-                if path.is_file()
+                if not path.is_symlink()
+                and path.is_file()
                 and path.suffix.casefold() == ".md"
                 and path.name.casefold() not in RESERVED_NAMES
             ),
@@ -146,7 +225,7 @@ def _lint_indexes(root: Path, documents: list[OkfDocument]) -> list[LintFinding]
     try:
         directories = {root}
         directories.update(
-            path for path in root.rglob("*") if path.is_dir() and not path.is_symlink()
+            path for path in root.rglob("*") if not path.is_symlink() and path.is_dir()
         )
     except OSError:
         return [_finding(Severity.ERROR, "INDEX001", "cannot scan bundle directories")]
@@ -220,7 +299,7 @@ def _lint_logs(root: Path) -> list[LintFinding]:
             (
                 path
                 for path in root.rglob("*")
-                if path.is_file() and path.name.casefold() == "log.md"
+                if not path.is_symlink() and path.is_file() and path.name.casefold() == "log.md"
             ),
             key=lambda path: path.relative_to(root).as_posix(),
         )
@@ -248,6 +327,7 @@ def _lint_logs(root: Path) -> list[LintFinding]:
                 )
             )
             continue
+        valid_dates: list[date] = []
         for line in lines:
             match = _LOG_HEADING.fullmatch(line)
             if match is None:
@@ -266,6 +346,17 @@ def _lint_logs(root: Path) -> list[LintFinding]:
                         relative_path,
                     )
                 )
+            else:
+                valid_dates.append(parsed)
+        if any(later > earlier for earlier, later in pairwise(valid_dates)):
+            findings.append(
+                _finding(
+                    Severity.ERROR,
+                    "LOG001",
+                    "log date headings must be newest-first",
+                    relative_path,
+                )
+            )
     return findings
 
 
@@ -284,7 +375,7 @@ def _lint_links(
             internal, target = _resolve_internal_link(root, document.path, href)
             if not internal:
                 continue
-            if target is None or not target.is_file():
+            if target is None or target.is_symlink() or not target.is_file():
                 key = (document.concept_id, href)
                 if key not in reported_broken_links:
                     findings.append(
@@ -476,7 +567,7 @@ def _lint_citations(
         heading = _CITATION_HEADING.search(document.body)
         claims = document.body if heading is None else document.body[: heading.start()]
         references_text = "" if heading is None else document.body[heading.end() :]
-        marker_numbers = [int(number) for number in _CITATION_MARKER.findall(claims)]
+        marker_numbers, marker_overflow = _bounded_marker_numbers(claims)
         references, malformed_numbers = _parse_citation_references(references_text)
         reference_numbers = [reference.number for reference in references]
 
@@ -486,6 +577,16 @@ def _lint_citations(
                     Severity.ERROR,
                     "CITATION001",
                     f"citation reference {number} is malformed",
+                    relative_path,
+                )
+            )
+
+        if marker_overflow:
+            findings.append(
+                _finding(
+                    Severity.ERROR,
+                    "CITATION001",
+                    "citation markers exceed supported numeric or count limits",
                     relative_path,
                 )
             )
@@ -568,28 +669,65 @@ def _lint_citations(
 
 def _parse_citation_references(
     text: str,
-) -> tuple[list[_CitationReference], list[int]]:
+) -> tuple[list[_CitationReference], list[str]]:
     references: list[_CitationReference] = []
-    malformed_numbers: list[int] = []
+    malformed_numbers: list[str] = []
     for line in text.splitlines():
         prefix = _CITATION_REFERENCE_PREFIX.match(line)
         if prefix is None:
             continue
         match = _CITATION_REFERENCE.fullmatch(line)
         if match is None:
-            malformed_numbers.append(int(prefix.group(1)))
+            malformed_numbers.append(_bounded_label(prefix.group(1)))
             continue
+        number = _bounded_positive_int(match.group("number"), MAX_CITATIONS, _MAX_CITATION_DIGITS)
         start = match.group("start")
         end = match.group("end")
+        start_line = (
+            _bounded_positive_int(start, MAX_CITATION_LINE, _MAX_LINE_DIGITS)
+            if start is not None
+            else None
+        )
+        end_line = (
+            _bounded_positive_int(end, MAX_CITATION_LINE, _MAX_LINE_DIGITS)
+            if end is not None
+            else None
+        )
+        if number is None or (start is not None and (start_line is None or end_line is None)):
+            malformed_numbers.append(_bounded_label(match.group("number")))
+            continue
         references.append(
             _CitationReference(
-                number=int(match.group("number")),
+                number=number,
                 target=match.group("target"),
-                start_line=int(start) if start is not None else None,
-                end_line=int(end) if end is not None else None,
+                start_line=start_line,
+                end_line=end_line,
             )
         )
     return references, malformed_numbers
+
+
+def _bounded_marker_numbers(text: str) -> tuple[list[int], bool]:
+    numbers: list[int] = []
+    for count, match in enumerate(_CITATION_MARKER.finditer(text), start=1):
+        if count > _MAX_CITATION_MARKERS:
+            return numbers, True
+        number = _bounded_positive_int(match.group(1), MAX_CITATIONS, _MAX_CITATION_DIGITS)
+        if number is None:
+            return numbers, True
+        numbers.append(number)
+    return numbers, False
+
+
+def _bounded_positive_int(digits: str, maximum: int, max_digits: int) -> int | None:
+    if len(digits) > max_digits:
+        return None
+    value = int(digits)
+    return value if 1 <= value <= maximum else None
+
+
+def _bounded_label(digits: str) -> str:
+    return digits if len(digits) <= _MAX_CITATION_DIGITS else f"{digits[:3]}..."
 
 
 def _resolve_internal_link(
@@ -610,13 +748,23 @@ def _resolve_internal_link(
         )
         if target_value.endswith("/"):
             candidate /= "index.md"
-        resolved_root = root.resolve(strict=False)
-        resolved_candidate = candidate.resolve(strict=False)
+        absolute_root = root.absolute()
+        normalized_candidate = Path(os.path.normpath(candidate.absolute()))
+        relative_candidate = normalized_candidate.relative_to(absolute_root)
     except (ValueError, OSError, RuntimeError):
         return True, None
-    if not resolved_candidate.is_relative_to(resolved_root):
-        return True, None
-    return True, resolved_candidate
+    current = absolute_root
+    for part in relative_candidate.parts:
+        current /= part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            break
+        except (OSError, ValueError):
+            return True, None
+        if stat.S_ISLNK(mode):
+            return True, None
+    return True, normalized_candidate
 
 
 def _workspace_relative_path(value: object) -> PurePosixPath | None:
