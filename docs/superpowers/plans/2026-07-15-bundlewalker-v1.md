@@ -27,7 +27,7 @@
 
 ### Project and package entry points
 
-- `.gitignore`: exclude Python artifacts, `.venv/`, `.bundlewalker/`, visual-companion state, and macOS metadata.
+- `.gitignore`: exclude Python artifacts, `.venv/`, `.bundlewalker/`, `.worktrees/`, visual-companion state, and macOS metadata.
 - `.python-version`: pin the local uv interpreter selector to Python 3.13.
 - `README.md`: retain the scaffold overview in Task 1 and replace it with complete user documentation in Task 12.
 - `pyproject.toml`: runtime/dev dependencies, package discovery, CLI entry point, pytest, Ruff, and Pyright configuration.
@@ -75,7 +75,7 @@
 ### Task 1: Package tooling and typed domain contracts
 
 **Files:**
-- Create: `.gitignore`
+- Modify: `.gitignore`
 - Modify: `.python-version`
 - Modify: `README.md`
 - Modify: `pyproject.toml`
@@ -216,6 +216,7 @@ __pycache__/
 .ruff_cache/
 .superpowers/
 .bundlewalker/
+.worktrees/
 *.py[cod]
 ```
 
