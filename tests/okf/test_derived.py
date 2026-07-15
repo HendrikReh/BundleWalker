@@ -204,5 +204,31 @@ def test_tree_diff_separates_replacement_lines_without_final_newlines(
 
     diff = tree_diff(old, new)
 
-    assert "-before\n+after\n" in diff
+    assert ("-before\n\\ No newline at end of file\n+after\n\\ No newline at end of file\n") in diff
     assert "-before+after" not in diff
+
+
+def test_tree_diff_reports_adding_only_the_final_newline(tmp_path: Path) -> None:
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / "changed.md").write_text("same", encoding="utf-8")
+    (new / "changed.md").write_text("same\n", encoding="utf-8")
+
+    diff = tree_diff(old, new)
+
+    assert "-same\n\\ No newline at end of file\n+same\n" in diff
+
+
+def test_tree_diff_reports_removing_only_the_final_newline(tmp_path: Path) -> None:
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / "changed.md").write_text("same\n", encoding="utf-8")
+    (new / "changed.md").write_text("same", encoding="utf-8")
+
+    diff = tree_diff(old, new)
+
+    assert "-same\n+same\n\\ No newline at end of file\n" in diff

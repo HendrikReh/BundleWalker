@@ -83,20 +83,21 @@ def tree_diff(old: Path, new: Path) -> str:
             continue
         old_name = f"wiki/{relative_path.as_posix()}" if old_text is not None else "/dev/null"
         new_name = f"wiki/{relative_path.as_posix()}" if new_text is not None else "/dev/null"
-        chunks.extend(
-            difflib.unified_diff(
-                [] if old_text is None else _diff_lines(old_text),
-                [] if new_text is None else _diff_lines(new_text),
-                fromfile=old_name,
-                tofile=new_name,
-                lineterm="\n",
-            )
+        diff_chunks = difflib.unified_diff(
+            [] if old_text is None else old_text.splitlines(keepends=True),
+            [] if new_text is None else new_text.splitlines(keepends=True),
+            fromfile=old_name,
+            tofile=new_name,
+            lineterm="\n",
         )
+        chunks.extend(_terminate_diff_chunk(chunk) for chunk in diff_chunks)
     return "".join(chunks)
 
 
-def _diff_lines(text: str) -> list[str]:
-    return [f"{line}\n" for line in text.splitlines()]
+def _terminate_diff_chunk(chunk: str) -> str:
+    if chunk.endswith(("\n", "\r")):
+        return chunk
+    return f"{chunk}\n\\ No newline at end of file\n"
 
 
 def _render_index(
