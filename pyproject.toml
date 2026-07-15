@@ -30,6 +30,9 @@ build-backend = "hatchling.build"
 addopts = "-q"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "eval: opt-in live-model quality evaluations (requires BUNDLEWALKER_EVAL_MODEL)",
+]
 
 [tool.ruff]
 line-length = 100

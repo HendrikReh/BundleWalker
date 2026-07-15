@@ -159,9 +159,7 @@ def test_malformed_internal_target_does_not_abort_other_lint_passes(tmp_path: Pa
     root = _copy_fixture(tmp_path)
     agents = root / "topics" / "agents.md"
     agents.write_text(
-        agents.read_text(encoding="utf-8").replace(
-            "[Agents](/topics/agents.md)", "[bad](%00)"
-        ),
+        agents.read_text(encoding="utf-8").replace("[Agents](/topics/agents.md)", "[bad](%00)"),
         encoding="utf-8",
     )
     (root / "log.md").write_text(
@@ -177,9 +175,7 @@ def test_malformed_internal_target_does_not_abort_other_lint_passes(tmp_path: Pa
         and "%00" in finding.message
         for finding in findings
     )
-    assert any(
-        finding.code == "LOG001" and finding.path == "log.md" for finding in findings
-    )
+    assert any(finding.code == "LOG001" and finding.path == "log.md" for finding in findings)
 
 
 def test_concept_without_inbound_concept_links_is_an_orphan_warning(tmp_path: Path) -> None:
@@ -335,8 +331,7 @@ def test_source_raw_path_cannot_escape_workspace(tmp_path: Path) -> None:
     findings = _findings_with_code(lint_bundle(wiki, workspace), "SOURCE001")
 
     assert any(
-        "raw_path" in finding.message and "workspace" in finding.message
-        for finding in findings
+        "raw_path" in finding.message and "workspace" in finding.message for finding in findings
     )
 
 
@@ -400,17 +395,14 @@ def test_malformed_citation_target_is_a_link_warning_and_citation_error(
     workspace, wiki, _ = _make_workspace_bundle(tmp_path)
     topic = wiki / "topics" / "agents.md"
     topic.write_text(
-        topic.read_text(encoding="utf-8").replace(
-            "/sources/source.md", "%00"
-        ),
+        topic.read_text(encoding="utf-8").replace("/sources/source.md", "%00"),
         encoding="utf-8",
     )
 
     findings = lint_bundle(wiki, workspace)
 
     assert any(
-        finding.code == "LINK001" and finding.path == "topics/agents.md"
-        for finding in findings
+        finding.code == "LINK001" and finding.path == "topics/agents.md" for finding in findings
     )
     assert any(
         finding.code == "CITATION001"
@@ -428,9 +420,7 @@ def test_citation_line_ranges_must_fit_raw_source(
     workspace, wiki, _ = _make_workspace_bundle(tmp_path)
     topic = wiki / "topics" / "agents.md"
     topic.write_text(
-        topic.read_text(encoding="utf-8").replace(
-            "raw lines 1\N{EN DASH}2", f"raw lines {span}"
-        ),
+        topic.read_text(encoding="utf-8").replace("raw lines 1\N{EN DASH}2", f"raw lines {span}"),
         encoding="utf-8",
     )
 

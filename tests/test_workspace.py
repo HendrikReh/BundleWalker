@@ -215,9 +215,7 @@ def test_lint_uses_the_workspace_configured_raw_directory(
     initialized = initialize_workspace(tmp_path / "knowledge")
     config_path = initialized.root / "bundlewalker.toml"
     config_path.write_text(
-        DEFAULT_CONFIG_TEXT.replace(
-            'raw_dir = "raw"', f'raw_dir = "{configured_raw_dir}"'
-        ),
+        DEFAULT_CONFIG_TEXT.replace('raw_dir = "raw"', f'raw_dir = "{configured_raw_dir}"'),
         encoding="utf-8",
     )
     initialized.raw_dir.rename(initialized.root / "archive")

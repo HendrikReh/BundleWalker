@@ -275,9 +275,7 @@ def _lint_links(
 ) -> tuple[list[LintFinding], dict[str, int]]:
     findings: list[LintFinding] = []
     inbound_counts = {document.concept_id: 0 for document in documents}
-    documents_by_path = {
-        document.path.resolve(strict=False): document for document in documents
-    }
+    documents_by_path = {document.path.resolve(strict=False): document for document in documents}
     reported_broken_links: set[tuple[str, str]] = set()
 
     for document in documents:
@@ -388,10 +386,7 @@ def _lint_sources(
                 _finding(
                     Severity.ERROR,
                     "SOURCE001",
-                    (
-                        "raw_path must be below "
-                        f"{configured_raw_directory.as_posix()}/"
-                    ),
+                    (f"raw_path must be below {configured_raw_directory.as_posix()}/"),
                     relative_document,
                 )
             )
@@ -474,9 +469,7 @@ def _lint_citations(
     raw_sources: dict[str, _RawSource],
 ) -> list[LintFinding]:
     findings: list[LintFinding] = []
-    documents_by_path = {
-        document.path.resolve(strict=False): document for document in documents
-    }
+    documents_by_path = {document.path.resolve(strict=False): document for document in documents}
 
     for document in documents:
         relative_path = document.path.relative_to(root).as_posix()

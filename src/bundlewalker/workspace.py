@@ -19,7 +19,7 @@ from bundlewalker.paths import normalize_workspace_config_path
 
 CONFIG_FILENAME = "bundlewalker.toml"
 DEFAULT_CONFIG_TEXT = (
-    'version = 1\n'
+    "version = 1\n"
     'wiki_dir = "wiki"\n'
     'raw_dir = "raw"\n'
     'conventions_file = "conventions.md"\n'
@@ -183,9 +183,7 @@ def stable_source_paths(
         absolute_path = workspace.root / stored_path
         concept_id = f"sources/{prefix}-{slug}"
         concept_path = workspace.wiki_dir / f"{concept_id}.md"
-        raw_available = not absolute_path.exists() or _file_matches_digest(
-            absolute_path, sha256
-        )
+        raw_available = not absolute_path.exists() or _file_matches_digest(absolute_path, sha256)
         concept_available = not concept_path.exists() and not concept_path.is_symlink()
         if raw_available and concept_available:
             return stored_path, concept_id

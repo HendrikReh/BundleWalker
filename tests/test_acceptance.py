@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from pydantic_ai import RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
+from typer.testing import CliRunner
+
+import bundlewalker.workflows.ask as ask_workflow
+import bundlewalker.workflows.ingest as ingest_workflow
+import bundlewalker.workflows.lint as lint_workflow
+from bundlewalker.agents.common import AgentDependencies, read_concept
+from bundlewalker.agents.ingest import AgentModel as IngestionModel
+from bundlewalker.agents.query import AgentModel as QueryModel
+from bundlewalker.agents.semantic_lint import AgentModel as SemanticLintModel
+from bundlewalker.cli import app
+from bundlewalker.domain import (
+    ChangeOperation,
+    ChangeSet,
+    Citation,
+    CitedAnswer,
+    ConceptType,
+    DraftConcept,
+    FindingOrigin,
+    LintFinding,
+    Severity,
+)
+from bundlewalker.okf.lint import has_errors, lint_bundle
+from bundlewalker.transactions import PreparedTransaction
+from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
+from bundlewalker.workspace import RawSource, discover_workspace
+
+NOW = datetime(2026, 7, 16, 12, tzinfo=UTC)
+runner = CliRunner()
+
+
+def _knowledge_bytes(root: Path) -> dict[str, bytes]:
+    """Snapshot durable knowledge while excluding transaction-only state."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+        and not path.is_symlink()
+        and ".bundlewalker" not in path.relative_to(root).parts
+    }
+
+
+def _ingestion_change_set(source: RawSource) -> ChangeSet:
+    topic_id = "topics/review-first-knowledge"
+    return ChangeSet(
+        summary="Integrated review-first knowledge.",
+        source_sha256=source.sha256,
+        drafts=[
+            DraftConcept(
+                operation=ChangeOperation.CREATE,
+                path=source.concept_id,
+                type=ConceptType.SOURCE,
+                title="Review-first notes",
+                description="Notes about a review-first knowledge workflow.",
+                tags=["knowledge", "review"],
+                body=(
+                    "# Review-first notes\n\n"
+                    "Durable changes require review [1].\n\n"
+                    "See [Review-first knowledge](/topics/review-first-knowledge.md).\n"
+                ),
+                citations=[
+                    Citation(
+                        number=1,
+                        concept_id=source.concept_id,
+                        start_line=1,
+                        end_line=2,
+                    )
+                ],
+            ),
+            DraftConcept(
+                operation=ChangeOperation.CREATE,
+                path=topic_id,
+                type=ConceptType.TOPIC,
+                title="Review-first knowledge",
+                description="Knowledge changes are reviewed before persistence.",
+                tags=["knowledge", "review"],
+                body="# Review-first knowledge\n\nDurable changes require review [1].\n",
+                citations=[
+                    Citation(
+                        number=1,
+                        concept_id=source.concept_id,
+                        start_line=1,
+                        end_line=2,
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+def _answer() -> CitedAnswer:
+    return CitedAnswer(
+        title="Why review knowledge changes?",
+        body="# Answer\n\nReview keeps durable knowledge changes inspectable [1].\n",
+        citations=[Citation(number=1, concept_id="topics/review-first-knowledge")],
+    )
+
+
+def _set_swapping(prepared: PreparedTransaction) -> None:
+    manifest_path = prepared.transaction_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["phase"] = "swapping"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+
+
+def test_complete_offline_review_first_workflow_and_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "knowledge"
+    source_path = tmp_path / "review-notes.txt"
+    source_bytes = b"Review every durable change.\r\nKeep the exact source bytes.\n"
+    source_path.write_bytes(source_bytes)
+
+    initialized = runner.invoke(app, ["init", str(root)], catch_exceptions=False)
+    assert initialized.exit_code == 0, initialized.output
+    monkeypatch.chdir(root)
+
+    clean_lint = runner.invoke(app, ["lint"], catch_exceptions=False)
+    assert clean_lint.exit_code == 0, clean_lint.output
+    assert "No lint findings." in clean_lint.output
+
+    ingestion_calls: list[str] = []
+
+    async def fake_ingestion_runner(
+        model: IngestionModel,
+        _dependencies: AgentDependencies,
+        source: RawSource,
+    ) -> tuple[ChangeSet, frozenset[str]]:
+        ingestion_calls.append(str(model))
+        assert source.content == source_bytes
+        return _ingestion_change_set(source), frozenset()
+
+    monkeypatch.setattr(ingest_workflow, "run_ingestion_agent", fake_ingestion_runner)
+
+    before_decline = _knowledge_bytes(root)
+    declined = runner.invoke(
+        app,
+        ["ingest", str(source_path), "--model", "test:model"],
+        input="n\n",
+        catch_exceptions=False,
+    )
+    assert declined.exit_code == 0, declined.output
+    assert "--- /dev/null" in declined.output
+    assert "+++ wiki/" in declined.output
+    assert "No changes applied." in declined.output
+    assert _knowledge_bytes(root) == before_decline
+
+    accepted = runner.invoke(
+        app,
+        ["ingest", str(source_path), "--model", "test:model"],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert "Changes applied." in accepted.output
+    assert ingestion_calls == ["test:model", "test:model"]
+
+    raw_files = list((root / "raw").glob("*.txt"))
+    source_pages = [
+        path for path in (root / "wiki" / "sources").glob("*.md") if path.name != "index.md"
+    ]
+    assert len(raw_files) == 1 and raw_files[0].read_bytes() == source_bytes
+    assert len(source_pages) == 1
+    assert (root / "wiki" / "topics" / "review-first-knowledge.md").is_file()
+    assert "Review-first knowledge" in (root / "wiki" / "topics" / "index.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Integrated review-first knowledge." in (root / "wiki" / "log.md").read_text(
+        encoding="utf-8"
+    )
+    assert not has_errors(lint_bundle(root / "wiki", root))
+
+    duplicate = runner.invoke(
+        app,
+        ["ingest", str(source_path)],
+        catch_exceptions=False,
+    )
+    assert duplicate.exit_code == 0, duplicate.output
+    assert "already ingested" in duplicate.output
+    assert ingestion_calls == ["test:model", "test:model"]
+
+    query_calls: list[str] = []
+
+    async def fake_query_runner(
+        model: QueryModel,
+        dependencies: AgentDependencies,
+        question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        query_calls.append(f"{model}:{question}")
+        read_result = read_concept(
+            RunContext(deps=dependencies, model=TestModel(), usage=RunUsage()),
+            "topics/review-first-knowledge",
+        )
+        assert "error" not in read_result
+        return _answer(), frozenset({"topics/review-first-knowledge"})
+
+    monkeypatch.setattr(ask_workflow, "run_query_agent", fake_query_runner)
+
+    before_ask = _knowledge_bytes(root)
+    asked = runner.invoke(
+        app,
+        ["ask", "Why review knowledge changes?", "--model", "test:model"],
+        catch_exceptions=False,
+    )
+    assert asked.exit_code == 0, asked.output
+    assert "inspectable [1]" in asked.output
+    assert "[1] [Review-first knowledge](/topics/review-first-knowledge.md)" in asked.output
+    assert _knowledge_bytes(root) == before_ask
+
+    before_save_decline = _knowledge_bytes(root)
+    declined_save = runner.invoke(
+        app,
+        ["ask", "Why review knowledge changes?", "--model", "test:model", "--save"],
+        input="n\n",
+        catch_exceptions=False,
+    )
+    assert declined_save.exit_code == 0, declined_save.output
+    assert "Saved synthesis: Why review knowledge changes?" in declined_save.output
+    assert _knowledge_bytes(root) == before_save_decline
+
+    calls_before_accept = len(query_calls)
+    accepted_save = runner.invoke(
+        app,
+        ["ask", "Why review knowledge changes?", "--model", "test:model", "--save"],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert accepted_save.exit_code == 0, accepted_save.output
+    assert len(query_calls) == calls_before_accept + 1
+    assert (root / "wiki" / "syntheses" / "why-review-knowledge-changes.md").is_file()
+
+    semantic_calls: list[str] = []
+
+    async def fake_semantic_runner(
+        model: SemanticLintModel,
+        dependencies: AgentDependencies,
+        _findings: tuple[LintFinding, ...],
+    ) -> tuple[list[LintFinding], frozenset[str]]:
+        semantic_calls.append(str(model))
+        read_result = read_concept(
+            RunContext(deps=dependencies, model=TestModel(), usage=RunUsage()),
+            "topics/review-first-knowledge",
+        )
+        assert "error" not in read_result
+        return (
+            [
+                LintFinding(
+                    origin=FindingOrigin.SEMANTIC,
+                    severity=Severity.INFO,
+                    code="SEM-GAP",
+                    message="A related comparison could deepen the topic.",
+                    evidence_paths=["topics/review-first-knowledge"],
+                )
+            ],
+            frozenset({"topics/review-first-knowledge"}),
+        )
+
+    monkeypatch.setattr(lint_workflow, "run_semantic_lint_agent", fake_semantic_runner)
+    before_semantic_lint = _knowledge_bytes(root)
+    semantic_lint = runner.invoke(
+        app,
+        ["lint", "--semantic", "--model", "test:model"],
+        catch_exceptions=False,
+    )
+    assert semantic_lint.exit_code == 0, semantic_lint.output
+    assert "SEM-GAP" in semantic_lint.output
+    assert semantic_calls == ["test:model"]
+    assert _knowledge_bytes(root) == before_semantic_lint
+
+    workspace = discover_workspace(root)
+    interrupted = prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=CitedAnswer(
+                title="Interrupted synthesis",
+                body="# Interrupted synthesis\n\nReview is inspectable [1].\n",
+                citations=[Citation(number=1, concept_id="topics/review-first-knowledge")],
+            ),
+            read_ids=frozenset({"topics/review-first-knowledge"}),
+        ),
+        occurred_at=NOW,
+    )
+    live_before_interruption = _knowledge_bytes(root)
+    _set_swapping(interrupted)
+    assert not workspace.wiki_dir.exists()
+    assert interrupted.backup_wiki.is_dir()
+
+    recovered_then_deduplicated = runner.invoke(
+        app,
+        ["ingest", str(source_path)],
+        catch_exceptions=False,
+    )
+    assert recovered_then_deduplicated.exit_code == 0, recovered_then_deduplicated.output
+    assert "already ingested" in recovered_then_deduplicated.output
+    assert ingestion_calls == ["test:model", "test:model"]
+    assert _knowledge_bytes(root) == live_before_interruption
+    assert not interrupted.transaction_dir.exists()

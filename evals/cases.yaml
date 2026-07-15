@@ -1,0 +1,61 @@
+- name: faithful-source-summary
+  kind: ingest
+  sources:
+    - filename: aurora.txt
+      text: |
+        Project Aurora uses an append-only event log.
+        The log records every accepted knowledge change.
+        Rejected proposals do not alter the durable knowledge files.
+  expected_phrases:
+    - append-only
+    - rejected
+
+- name: cross-source-topic-update
+  kind: ingest
+  sources:
+    - filename: review-gate.txt
+      text: |
+        A review gate requires human confirmation before any durable knowledge change.
+        A declined proposal leaves the knowledge base unchanged.
+    - filename: review-storage.txt
+      text: |
+        A review-first workflow keeps immutable raw source bytes.
+        After an accepted review, the workflow regenerates its Markdown indexes.
+  expected_phrases:
+    - human confirmation
+    - immutable raw
+  minimum_shared_source_citations: 2
+  shared_concept_type: Topic
+
+- name: contradiction-preservation
+  kind: ingest
+  sources:
+    - filename: northstar-offline.txt
+      text: |
+        The Northstar notebook has no network access.
+        It is designed to remain completely offline.
+    - filename: northstar-hosted.txt
+      text: |
+        The Northstar notebook synchronizes every note to a hosted server.
+        It therefore requires network access.
+  expected_phrases:
+    - offline
+    - requires network
+    - contradict
+  minimum_shared_source_citations: 2
+
+- name: cited-answer
+  kind: query
+  concepts:
+    - path: topics/review-gates
+      title: Review gates
+      description: Review separates model proposals from durable persistence.
+      body: |
+        # Review gates
+
+        A review gate separates a model proposal from persistence.
+        Declining the proposal leaves durable knowledge unchanged.
+  question: Why is a review gate useful before persistence?
+  expected_phrases:
+    - review
+    - persistence

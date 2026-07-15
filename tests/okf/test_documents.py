@@ -74,9 +74,7 @@ def test_parse_document_populates_identity_and_exact_byte_digest(tmp_path: Path)
 
 
 def test_render_document_is_deterministic_and_preserves_unicode() -> None:
-    metadata = OkfMetadata.model_validate(
-        {"type": "Topic", "title": "Café", "owner": "Hendrik"}
-    )
+    metadata = OkfMetadata.model_validate({"type": "Topic", "title": "Café", "owner": "Hendrik"})
 
     assert render_document(metadata, "\n# Café\n") == (
         "---\ntype: Topic\ntitle: Café\nowner: Hendrik\n---\n\n# Café\n"
@@ -85,8 +83,7 @@ def test_render_document_is_deterministic_and_preserves_unicode() -> None:
 
 def test_extract_links_walks_inline_token_children() -> None:
     markdown = (
-        "See **[Pydantic](/entities/pydantic.md)** and "
-        "[the guide](https://example.com/guide).\n"
+        "See **[Pydantic](/entities/pydantic.md)** and [the guide](https://example.com/guide).\n"
     )
 
     assert extract_links(markdown) == (

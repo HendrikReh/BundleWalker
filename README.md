@@ -1,50 +1,208 @@
 # BundleWalker
 
-*Exploring portable knowledge with the Open Knowledge Format and Pydantic AI.*
+BundleWalker is a local, review-first CLI for building a persistent personal knowledge wiki
+from Markdown and plain-text sources. It follows the LLM-wiki pattern: immutable source bytes
+feed a maintained, interlinked knowledge layer instead of being rediscovered for every
+question. The resulting `wiki/` directory is a standalone Open Knowledge Format (OKF) v0.1
+bundle that remains readable without BundleWalker.
 
-BundleWalker is a hands-on exploration of how structured knowledge can move between tools, workflows, and AI agents. It combines the Open Knowledge Format (OKF) with Pydantic AI's typed agent model to investigate knowledge that is portable, inspectable, and explicit about its structure.
+PydanticAI agents propose typed changes and cited answers. Deterministic application code owns
+paths, rendering, validation, indexes, logs, diffs, confirmation, and crash recovery. Agents
+receive read-only list, search, and concept-read tools; they cannot write files, use a shell,
+access arbitrary paths, or make network calls through BundleWalker tools.
 
-## Purpose
+## Install
 
-The project is a practical space for exploring questions such as:
-
-- How can knowledge be packaged so that it remains understandable outside the system that created it?
-- How can typed models make agent inputs, outputs, and knowledge boundaries easier to inspect?
-- How might OKF bundles be validated, loaded, and reused across Pydantic AI workflows?
-
-The emphasis is on learning by building small, concrete experiments rather than defining a production framework upfront.
-
-## Project status
-
-> [!NOTE]
-> BundleWalker is an early-stage learning and experimentation project. The repository currently contains the initial Python scaffold; the ideas described here are its direction, not completed features.
-
-Expect the structure, examples, and API to evolve as the project develops.
-
-## Setup
-
-### Prerequisites
-
-- Python 3.13 or newer
-- [uv](https://docs.astral.sh/uv/)
-
-Install the locked dependencies:
+BundleWalker requires Python 3.13 or newer and
+[`uv`](https://docs.astral.sh/uv/). From this repository, install the locked environment:
 
 ```bash
 uv sync --locked
+uv run bundlewalker --help
 ```
 
-Run the current scaffold:
+`init` and deterministic `lint` need no model. Agent-backed commands resolve a model in this
+order:
+
+1. `--model MODEL`
+2. `BUNDLEWALKER_MODEL`
+
+Use any model string supported by your PydanticAI installation. Provider credentials are your
+responsibility and remain in the provider's environment variables; BundleWalker does not write
+credentials or model identifiers into the workspace.
+
+## Copy-paste workflow
+
+Replace the placeholder model string with one configured for your PydanticAI environment. This
+session stays provider-neutral and creates the workspace inside the repository so `uv --project`
+can keep using the checked-out application:
 
 ```bash
-uv run main.py
+uv sync --locked
+export BUNDLEWALKER_MODEL='<pydantic-ai-model-string>'
+
+printf '%s\n' \
+  'Reviewing a proposed change before persistence keeps durable knowledge inspectable.' \
+  'Rejected proposals do not change the knowledge base.' > example-notes.txt
+
+uv run bundlewalker init ./my-knowledge
+cd ./my-knowledge
+
+uv run --project .. bundlewalker lint
+uv run --project .. bundlewalker ingest ../example-notes.txt
+uv run --project .. bundlewalker ask 'Why review changes before persistence?'
+uv run --project .. bundlewalker ask --save 'Why review changes before persistence?'
+uv run --project .. bundlewalker lint --semantic
 ```
 
-## Current direction
+`ingest` and `ask --save` print a summary and complete prospective wiki diff, then prompt before
+any model-derived knowledge is persisted. Answer `n`, press Ctrl-C, or end the prompt to discard
+the proposal with a successful unchanged outcome. A saved answer uses the already validated
+answer; it does not make a second model call.
 
-BundleWalker is intended to explore:
+## Commands
 
-- representing portable knowledge as explicit, inspectable bundles;
-- mapping OKF structures to typed Python models;
-- giving Pydantic AI agents well-defined access to bundled knowledge; and
-- documenting small experiments that reveal useful patterns and limitations.
+### Initialize a workspace
+
+```bash
+uv run bundlewalker init PATH
+```
+
+`PATH` must be new or empty. Initialization creates the configuration, conventions, raw-source
+directory, four wiki categories, generated indexes, and initial log. The empty wiki is checked
+with deterministic lint before the command succeeds. Initialization never needs a model.
+
+### Ingest one text source
+
+```bash
+uv run bundlewalker ingest FILE [--model MODEL]
+```
+
+V1 accepts one regular UTF-8 `.md` or `.txt` file per invocation. The default maximum is exactly
+100,000 Unicode characters. BundleWalker hashes the original bytes, stages one Source page plus
+any proposed Topic or Entity changes, regenerates indexes and the log, lints the prospective
+wiki, and shows the diff before confirmation. On acceptance, the original bytes are copied
+unchanged into `raw/`. Re-ingesting identical bytes is a successful no-op and does not call a
+model.
+
+### Ask a cited question
+
+```bash
+uv run bundlewalker ask QUESTION [--model MODEL]
+uv run bundlewalker ask --save QUESTION [--model MODEL]
+```
+
+Plain `ask` reads the compiled wiki and prints a Markdown answer with citations; it does not
+write the workspace. Every citation must target an existing concept that the query run actually
+read. `--save` converts that same validated answer into one create-only Synthesis proposal and
+uses the normal diff and confirmation path.
+
+### Lint the knowledge bundle
+
+```bash
+uv run bundlewalker lint
+uv run bundlewalker lint --semantic [--model MODEL]
+```
+
+Deterministic lint is offline and checks OKF parsing, safe paths, internal links, indexes, logs,
+raw-source identity, citation structure, and orphan concepts. Broken links and orphans are
+warnings; deterministic errors exit `1`.
+
+`--semantic` runs an additional provider-neutral, read-only agent pass for contradictions,
+staleness, unsupported claims, missing concepts, and knowledge gaps. Its findings are advisory:
+even a semantic finding displayed as `ERROR` does not change the process status. Only
+deterministic errors control lint's exit code. Lint never auto-fixes the workspace.
+
+## Workspace layout
+
+```text
+my-knowledge/
+├── bundlewalker.toml
+├── conventions.md
+├── raw/
+│   └── <digest-prefix>-<source-slug>.(md|txt)
+├── wiki/
+│   ├── index.md
+│   ├── log.md
+│   ├── sources/
+│   ├── topics/
+│   ├── entities/
+│   └── syntheses/
+└── .bundlewalker/
+    ├── transaction.lock
+    └── transactions/
+```
+
+`wiki/` is the portable OKF bundle and canonical compiled knowledge layer. `raw/` holds immutable
+source bytes under content-derived identities. `bundlewalker.toml` contains local paths and the
+source-size limit, but no model or credential settings.
+
+`conventions.md` is the human-editable instruction and schema layer supplied to every agent. Use
+it to state local writing style, naming, emphasis, and wiki conventions. Agents may read this
+file but cannot propose edits to it.
+
+`.bundlewalker/` contains only temporary transaction journals and a coordination lock. It is not
+knowledge content and is safe to delete when no BundleWalker command or interrupted transaction
+is active.
+
+## Exit codes
+
+- `0`: success, duplicate-ingest no-op, declined/interrupted review, or lint with only warnings
+  and semantic advisories.
+- `1`: model/provider failure, invalid model output, source or OKF validation error,
+  deterministic lint error, transaction failure, or unrecoverable workspace state.
+- `2`: command usage or configuration error, including a missing model for an agent-backed
+  command.
+
+Tracebacks are hidden by default. Errors report a concise primary cause without printing source
+content or provider credentials.
+
+## Version control
+
+Git is recommended for reviewing and backing up `bundlewalker.toml`, `conventions.md`, `raw/`,
+and `wiki/`. BundleWalker performs no Git operations. Initialize and commit the repository
+yourself, and ignore transaction state:
+
+```gitignore
+.bundlewalker/
+```
+
+Because `raw/` intentionally preserves exact personal source bytes, decide what is appropriate
+to publish before pushing a knowledge workspace to any remote.
+
+## V1 limits
+
+BundleWalker v1 intentionally excludes:
+
+- URL, PDF, image, audio, video, and OCR ingestion;
+- batch ingestion, watched directories, and automatic chunking of book-sized sources;
+- embeddings, vector databases, SQLite catalogs, and background indexes;
+- a web UI, Obsidian plugin, MCP server, or hosted service;
+- agent-authored deletes, renames, convention edits, or automatic contradiction resolution;
+- multi-user synchronization and automatic Git operations; and
+- producer taxonomies beyond Source, Topic, Entity, and Synthesis.
+
+The OKF reader remains permissive: it accepts unknown concept types and extra frontmatter even
+though the v1 producer emits only those four page types.
+
+## Development and opt-in evaluations
+
+The default suite is offline and requires no credentials, network access, or paid inference:
+
+```bash
+uv run pytest -m 'not eval' -q
+uv run ruff format --check src tests
+uv run ruff check src tests
+uv run pyright
+```
+
+Four small live-model quality cases cover faithful summarization, cross-source topic updates,
+contradiction preservation, and cited answers. They are skipped unless an evaluation model is
+explicitly selected:
+
+```bash
+BUNDLEWALKER_EVAL_MODEL='<pydantic-ai-model-string>' uv run pytest -m eval -v
+```
+
+Live evaluations use the selected provider and may incur network use or cost. They complement,
+but never weaken or replace, the offline acceptance suite.

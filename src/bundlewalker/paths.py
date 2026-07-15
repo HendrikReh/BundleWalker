@@ -6,10 +6,6 @@ def normalize_workspace_config_path(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     relative = PurePosixPath(value)
-    if (
-        relative.is_absolute()
-        or ".." in relative.parts
-        or relative == PurePosixPath(".")
-    ):
+    if relative.is_absolute() or ".." in relative.parts or relative == PurePosixPath("."):
         return None
     return relative.as_posix()
