@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import os
+import shutil
 import uuid
+from dataclasses import fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -129,6 +133,69 @@ def _prepare(tmp_path: Path) -> tuple[PreparedTransaction, RawSource]:
         NOW,
     )
     return prepared, source
+
+
+def _ingestion_in_workspace(
+    tmp_path: Path,
+    workspace: Workspace,
+) -> tuple[RawSource, ChangeSet, ChangeValidationContext]:
+    input_path = tmp_path / "Nested Source Notes.txt"
+    input_path.write_bytes(b"first line\nsecond line\n")
+    source = load_raw_source(input_path, workspace)
+    change_set = ChangeSet(
+        summary="Integrated nested source notes.",
+        source_sha256=source.sha256,
+        drafts=[
+            _draft(
+                path=source.concept_id,
+                type=ConceptType.SOURCE,
+                title="Nested source notes",
+                body="# Nested source notes\n\nA grounded claim [1].\n",
+                citations=[
+                    Citation(
+                        number=1,
+                        concept_id=source.concept_id,
+                        start_line=1,
+                        end_line=2,
+                    )
+                ],
+            )
+        ],
+    )
+    context = ChangeValidationContext(
+        mode="ingest",
+        repository=OkfRepository(workspace.wiki_dir),
+        readable_concepts=frozenset(),
+        source=source,
+    )
+    return source, change_set, context
+
+
+def _nested_workspace(
+    tmp_path: Path,
+    *,
+    nested_wiki: bool = False,
+    nested_raw: bool = False,
+) -> Workspace:
+    workspace = initialize_workspace(tmp_path / "nested-knowledge", occurred_at=NOW)
+    configured = workspace.root / "configured"
+    configured.mkdir()
+    config = workspace.config
+    if nested_wiki:
+        workspace.wiki_dir.rename(configured / "wiki")
+        config = replace(config, wiki_dir="configured/wiki")
+    if nested_raw:
+        workspace.raw_dir.rename(configured / "raw")
+        config = replace(config, raw_dir="configured/raw")
+    (workspace.root / "bundlewalker.toml").write_text(
+        "version = 1\n"
+        f'wiki_dir = "{config.wiki_dir}"\n'
+        f'raw_dir = "{config.raw_dir}"\n'
+        f'conventions_file = "{config.conventions_file}"\n'
+        f"max_source_characters = {config.max_source_characters}\n",
+        encoding="utf-8",
+    )
+    return Workspace(root=workspace.root, config=config)
 
 
 def _manifest(prepared: PreparedTransaction) -> dict[str, object]:
@@ -520,17 +587,17 @@ def test_commit_recursively_syncs_trees_before_each_swap_boundary(
 ) -> None:
     prepared, _ = _prepare(tmp_path)
     events: list[tuple[str, Path]] = []
-    original_rename = Path.rename
+    original_rename = transactions._rename_workspace_entry  # pyright: ignore[reportPrivateUsage]
 
     def recording_sync_tree(path: Path) -> None:
         events.append(("sync-tree", path))
 
-    def recording_rename(path: Path, target: Path) -> Path:
+    def recording_rename(workspace: Workspace, path: Path, target: Path) -> None:
         events.append(("rename", path))
-        return original_rename(path, target)
+        original_rename(workspace, path, target)
 
     monkeypatch.setattr(transactions, "_sync_tree", recording_sync_tree, raising=False)
-    monkeypatch.setattr(Path, "rename", recording_rename)
+    monkeypatch.setattr(transactions, "_rename_workspace_entry", recording_rename)
 
     commit_transaction(prepared)
 
@@ -605,13 +672,23 @@ def test_concurrent_edit_after_live_rename_is_restored_and_commit_aborts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared, _ = _prepare(tmp_path)
-    original_rename = Path.rename
+    original_rename = os.rename
     injected = False
 
-    def rename_with_concurrent_edit(path: Path, target: Path) -> Path:
+    def rename_with_concurrent_edit(
+        path: os.PathLike[str] | str,
+        target: os.PathLike[str] | str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
         nonlocal injected
-        result = original_rename(path, target)
-        if path == prepared.workspace.wiki_dir and target == prepared.backup_wiki and not injected:
+        original_rename(path, target, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        if (
+            os.fspath(path).endswith("wiki")
+            and os.fspath(target).endswith("backup-wiki")
+            and not injected
+        ):
             injected = True
             concurrent = prepared.backup_wiki / "topics/concurrent.md"
             concurrent.write_text(
@@ -625,9 +702,8 @@ def test_concurrent_edit_after_live_rename_is_restored_and_commit_aborts(
                 encoding="utf-8",
             )
             regenerate_indexes(prepared.backup_wiki)
-        return result
 
-    monkeypatch.setattr(Path, "rename", rename_with_concurrent_edit)
+    monkeypatch.setattr(os, "rename", rename_with_concurrent_edit)
 
     with pytest.raises(TransactionError, match="changed during swap"):
         commit_transaction(prepared)
@@ -641,13 +717,19 @@ def test_concurrent_edit_before_backup_deletion_is_restored_and_commit_aborts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared, _ = _prepare(tmp_path)
-    original_rename = Path.rename
+    original_rename = os.rename
     injected = False
 
-    def rename_with_late_concurrent_edit(path: Path, target: Path) -> Path:
+    def rename_with_late_concurrent_edit(
+        path: os.PathLike[str] | str,
+        target: os.PathLike[str] | str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
         nonlocal injected
-        result = original_rename(path, target)
-        if path == prepared.prospective_wiki and target == prepared.workspace.wiki_dir:
+        original_rename(path, target, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        if os.fspath(path).endswith("prospective-wiki") and os.fspath(target).endswith("wiki"):
             injected = True
             concurrent = prepared.backup_wiki / "topics/late-concurrent.md"
             concurrent.write_text(
@@ -661,9 +743,8 @@ def test_concurrent_edit_before_backup_deletion_is_restored_and_commit_aborts(
                 encoding="utf-8",
             )
             regenerate_indexes(prepared.backup_wiki)
-        return result
 
-    monkeypatch.setattr(Path, "rename", rename_with_late_concurrent_edit)
+    monkeypatch.setattr(os, "rename", rename_with_late_concurrent_edit)
 
     with pytest.raises(TransactionError, match="changed during swap"):
         commit_transaction(prepared)
@@ -784,3 +865,229 @@ def test_uuid_collision_does_not_delete_an_unowned_transaction_directory(
         prepare_transaction(workspace, change_set, context, source, NOW)
 
     assert sentinel.read_text(encoding="utf-8") == "pre-existing\n"
+
+
+def test_commit_rejects_a_linked_configured_wiki_ancestor_without_touching_outside(
+    tmp_path: Path,
+) -> None:
+    workspace = _nested_workspace(tmp_path, nested_wiki=True)
+    source, change_set, context = _ingestion_in_workspace(tmp_path, workspace)
+    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    outside = tmp_path / "outside-wiki-parent"
+    outside.mkdir()
+    shutil.copytree(workspace.wiki_dir, outside / "wiki")
+    outside_before = _tree_bytes(outside)
+    configured = workspace.root / "configured"
+    configured.rename(workspace.root / "detached-configured")
+    configured.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(TransactionError, match=r"wiki.*symlink|configured wiki"):
+        commit_transaction(prepared)
+
+    assert _tree_bytes(outside) == outside_before
+    assert not (outside / "wiki" / f"{source.concept_id}.md").exists()
+
+
+def test_raw_persistence_never_follows_an_intermediate_directory_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _nested_workspace(tmp_path, nested_raw=True)
+    source, change_set, context = _ingestion_in_workspace(tmp_path, workspace)
+    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    outside = tmp_path / "outside-raw-parent"
+    (outside / "raw").mkdir(parents=True)
+    configured = workspace.root / "configured"
+    parked = workspace.root / "configured-before-swap"
+    injected = False
+    original_open = os.open
+
+    def inject_swap_once() -> None:
+        nonlocal injected
+        if injected:
+            return
+        injected = True
+        configured.rename(parked)
+        configured.symlink_to(outside, target_is_directory=True)
+
+    def open_then_swap(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "configured" and dir_fd is not None:
+            inject_swap_once()
+        return descriptor
+
+    monkeypatch.setattr(os, "open", open_then_swap)
+
+    with pytest.raises(TransactionError):
+        commit_transaction(prepared)
+
+    assert injected
+    assert not (outside / "raw" / source.stored_relative_path.name).exists()
+
+
+def test_backup_change_immediately_after_final_digest_is_preserved_and_aborts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    original_digest = transactions._materialized_tree_digest  # pyright: ignore[reportPrivateUsage]
+    injected = False
+
+    def digest_then_change(path: Path, transaction_dir: Path) -> str:
+        nonlocal injected
+        digest = original_digest(path, transaction_dir)
+        if path == prepared.backup_wiki and prepared.workspace.wiki_dir.is_dir():
+            concurrent = prepared.backup_wiki / "topics/after-final-digest.md"
+            concurrent.write_text(
+                "---\n"
+                "type: Topic\n"
+                "title: After final digest\n"
+                "description: A concurrent edit at the cleanup boundary.\n"
+                "tags: []\n"
+                "---\n\n"
+                "# After final digest\n",
+                encoding="utf-8",
+            )
+            regenerate_indexes(prepared.backup_wiki)
+            injected = True
+        return digest
+
+    monkeypatch.setattr(transactions, "_materialized_tree_digest", digest_then_change)
+
+    with pytest.raises(TransactionError, match="changed during swap"):
+        commit_transaction(prepared)
+
+    assert injected
+    assert (prepared.workspace.wiki_dir / "topics/after-final-digest.md").is_file()
+
+
+def test_recovery_never_deletes_a_changed_quarantined_backup(tmp_path: Path) -> None:
+    prepared, source = _prepare(tmp_path)
+    _persist_raw(prepared, source)
+    _set_phase(prepared, "new-live")
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+    prepared.prospective_wiki.rename(prepared.workspace.wiki_dir)
+    quarantine = prepared.transaction_dir / ".retired-backup-interrupted"
+    prepared.backup_wiki.rename(quarantine)
+    concurrent = quarantine / "topics/quarantined-concurrent.md"
+    concurrent.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Quarantined concurrent\n"
+        "description: Bytes written before interrupted cleanup.\n"
+        "tags: []\n"
+        "---\n\n"
+        "# Quarantined concurrent\n",
+        encoding="utf-8",
+    )
+    regenerate_indexes(quarantine)
+
+    with pytest.raises(TransactionError, match=r"backup.*identity"):
+        recover_transactions(prepared.workspace)
+
+    assert concurrent.is_file()
+    assert quarantine.is_dir()
+
+
+def test_nested_wiki_commit_syncs_live_parent_after_each_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _nested_workspace(tmp_path, nested_wiki=True)
+    source, change_set, context = _ingestion_in_workspace(tmp_path, workspace)
+    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    events: list[tuple[str, str, str | None]] = []
+    original_rename = os.rename
+    original_sync = transactions._sync_directory  # pyright: ignore[reportPrivateUsage]
+
+    def recording_rename(
+        source_path: os.PathLike[str] | str,
+        target_path: os.PathLike[str] | str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        events.append(("rename", os.fspath(source_path), os.fspath(target_path)))
+        original_rename(
+            source_path,
+            target_path,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    def recording_sync(path: Path) -> None:
+        events.append(("sync", os.fspath(path), None))
+        original_sync(path)
+
+    monkeypatch.setattr(os, "rename", recording_rename)
+    monkeypatch.setattr(transactions, "_sync_directory", recording_sync)
+
+    commit_transaction(prepared)
+
+    old_rename = next(
+        index
+        for index, event in enumerate(events)
+        if event[0] == "rename"
+        and event[1].endswith("wiki")
+        and event[2] is not None
+        and event[2].endswith("backup-wiki")
+    )
+    new_rename = next(
+        index
+        for index, event in enumerate(events)
+        if event[0] == "rename"
+        and event[1].endswith("prospective-wiki")
+        and event[2] is not None
+        and event[2].endswith("wiki")
+    )
+    live_parent_syncs = [
+        index
+        for index, event in enumerate(events)
+        if event == ("sync", os.fspath(workspace.wiki_dir.parent), None)
+    ]
+    assert any(old_rename < index < new_rename for index in live_parent_syncs)
+    assert any(new_rename < index for index in live_parent_syncs)
+
+
+def test_prepared_transaction_constructor_has_only_the_planned_fields() -> None:
+    expected = (
+        "transaction_id",
+        "workspace",
+        "transaction_dir",
+        "prospective_wiki",
+        "backup_wiki",
+        "change_set",
+        "raw_source",
+        "summary",
+        "diff",
+    )
+
+    assert tuple(inspect.signature(PreparedTransaction).parameters) == expected
+    assert tuple(field.name for field in fields(PreparedTransaction) if field.init) == expected
+
+
+def test_discard_syncs_the_transaction_parent_after_owned_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _ = _prepare(tmp_path)
+    observations: list[bool] = []
+    original_sync = transactions._sync_directory  # pyright: ignore[reportPrivateUsage]
+
+    def recording_sync(path: Path) -> None:
+        if path == prepared.transaction_dir.parent:
+            observations.append(prepared.transaction_dir.exists())
+        original_sync(path)
+
+    monkeypatch.setattr(transactions, "_sync_directory", recording_sync)
+
+    discard_transaction(prepared)
+
+    assert observations
+    assert observations[-1] is False
