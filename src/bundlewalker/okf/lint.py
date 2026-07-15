@@ -15,6 +15,8 @@ from urllib.parse import unquote, urlsplit
 from bundlewalker.domain import (
     MAX_CITATION_LINE,
     MAX_CITATIONS,
+    MAX_LINT_MESSAGE_CHARACTERS,
+    MAX_LINT_PATH_CHARACTERS,
     FindingOrigin,
     LintFinding,
     OkfDocument,
@@ -801,6 +803,12 @@ def _finding(
         origin=FindingOrigin.DETERMINISTIC,
         severity=severity,
         code=code,
-        message=message,
-        path=path,
+        message=_bounded_finding_text(message, MAX_LINT_MESSAGE_CHARACTERS),
+        path=(_bounded_finding_text(path, MAX_LINT_PATH_CHARACTERS) if path is not None else None),
     )
+
+
+def _bounded_finding_text(value: str, maximum: int) -> str:
+    if len(value) <= maximum:
+        return value
+    return f"{value[: maximum - 1]}…"

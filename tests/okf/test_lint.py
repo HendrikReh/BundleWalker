@@ -10,7 +10,14 @@ from typing import Any
 import pytest
 import yaml
 
-from bundlewalker.domain import FindingOrigin, LintFinding, OkfDocument, Severity
+from bundlewalker.domain import (
+    MAX_LINT_MESSAGE_CHARACTERS,
+    MAX_LINT_PATH_CHARACTERS,
+    FindingOrigin,
+    LintFinding,
+    OkfDocument,
+    Severity,
+)
 from bundlewalker.okf import lint as lint_module
 from bundlewalker.okf.derived import prepend_log_entry, regenerate_indexes
 from bundlewalker.okf.documents import parse_document
@@ -262,6 +269,39 @@ def test_broken_internal_link_is_a_warning(tmp_path: Path) -> None:
     assert findings[0].severity is Severity.WARNING
     assert findings[0].path == "topics/agents.md"
     assert "/topics/missing.md" in findings[0].message
+
+
+def test_very_long_broken_link_is_reported_with_bounded_message(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    agents = root / "topics" / "agents.md"
+    href = "/" + "x" * 9_000 + ".md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace(
+            "[Agents](/topics/agents.md)", f"[Missing]({href})"
+        ),
+        encoding="utf-8",
+    )
+
+    findings = _findings_with_code(lint_bundle(root), "LINK001")
+
+    assert len(findings) == 1
+    assert len(findings[0].message) == MAX_LINT_MESSAGE_CHARACTERS
+    assert findings[0].message.endswith("…")
+
+
+def test_deterministic_finding_bounds_untrusted_path_and_message() -> None:
+    finding = lint_module._finding(  # pyright: ignore[reportPrivateUsage]
+        Severity.ERROR,
+        "TEST001",
+        "m" * (MAX_LINT_MESSAGE_CHARACTERS + 1_000),
+        "p" * (MAX_LINT_PATH_CHARACTERS + 1_000),
+    )
+
+    assert len(finding.message) == MAX_LINT_MESSAGE_CHARACTERS
+    assert finding.message.endswith("…")
+    assert finding.path is not None
+    assert len(finding.path) == MAX_LINT_PATH_CHARACTERS
+    assert finding.path.endswith("…")
 
 
 def test_malformed_internal_target_does_not_abort_other_lint_passes(tmp_path: Path) -> None:

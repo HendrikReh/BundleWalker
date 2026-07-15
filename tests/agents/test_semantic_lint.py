@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -19,6 +20,7 @@ from pydantic_ai.models.test import TestModel
 
 from bundlewalker.agents.common import AgentDependencies, read_tools
 from bundlewalker.agents.semantic_lint import (
+    SemanticFindings,
     create_semantic_lint_agent,
     run_semantic_lint_agent,
 )
@@ -96,7 +98,8 @@ def test_semantic_lint_agent_has_the_strict_read_only_contract() -> None:
     details = cast(Any, agent)
 
     assert agent.deps_type is AgentDependencies
-    assert agent.output_type == list[LintFinding]
+    assert agent.output_type == SemanticFindings
+    assert TypeAdapter(SemanticFindings).json_schema()["maxItems"] == MAX_SEMANTIC_FINDINGS
     assert details._max_output_retries == 2
     assert details._max_tool_retries == 2
     assert tuple(details._function_toolset.tools) == tuple(tool.__name__ for tool in read_tools)
@@ -129,6 +132,7 @@ async def test_semantic_runner_frames_context_and_accepts_only_read_evidence(
         nonlocal calls
         calls += 1
         captured["instructions"] = info.instructions or ""
+        captured["schema"] = json.dumps(info.output_tools[0].parameters_json_schema)
         captured["prompt"] = "\n".join(
             part.content
             for message in messages
@@ -182,6 +186,12 @@ async def test_semantic_runner_frames_context_and_accepts_only_read_evidence(
         },
     }
     assert "untrusted data" in captured["instructions"].casefold()
+    output_schema = json.loads(captured["schema"])
+    response_schema = output_schema["properties"]["response"]
+    if response_reference := response_schema.get("$ref"):
+        response_definition = response_reference.rsplit("/", maxsplit=1)[-1]
+        response_schema = output_schema["$defs"][response_definition]
+    assert response_schema["maxItems"] == MAX_SEMANTIC_FINDINGS
 
 
 @pytest.mark.parametrize(
@@ -239,3 +249,46 @@ def test_semantic_validation_rejects_finding_count_before_evidence_work() -> Non
         from bundlewalker.agents.semantic_lint import validate_semantic_findings
 
         validate_semantic_findings(findings, frozenset({"topics/agents"}))
+
+
+async def test_semantic_agent_schema_rejects_over_count_before_result_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies = _dependencies(tmp_path)
+    finding = _finding().model_dump(mode="json")
+    calls = 0
+    delivered = 0
+
+    def must_not_receive_result(
+        _findings: list[LintFinding],
+        _read_ids: frozenset[str],
+    ) -> list[LintFinding]:
+        nonlocal delivered
+        delivered += 1
+        raise AssertionError("over-count result escaped PydanticAI output parsing")
+
+    monkeypatch.setattr(
+        "bundlewalker.agents.semantic_lint.validate_semantic_findings",
+        must_not_receive_result,
+    )
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args={"response": [finding] * (MAX_SEMANTIC_FINDINGS + 1)},
+                )
+            ]
+        )
+
+    with pytest.raises(AgentRunError, match="could not produce findings") as caught:
+        await run_semantic_lint_agent(FunctionModel(respond), dependencies, _signals())
+
+    assert calls == 3
+    assert delivered == 0
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from importlib import resources
-from typing import Any
+from typing import Annotated, Any, TypeAlias, cast
 
+from pydantic import Field
 from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, Model
+from pydantic_ai.output import OutputSpec
 
 from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
 from bundlewalker.domain import MAX_SEMANTIC_FINDINGS, FindingOrigin, LintFinding
 from bundlewalker.errors import AgentRunError
 
 type AgentModel = Model | KnownModelName | str
+SemanticFindings: TypeAlias = Annotated[  # noqa: UP040 - PydanticAI needs runtime Annotated
+    list[LintFinding],
+    Field(max_length=MAX_SEMANTIC_FINDINGS),
+]
 
 _ALLOWED_CODES = frozenset(
     {
@@ -25,17 +31,18 @@ _ALLOWED_CODES = frozenset(
 
 def create_semantic_lint_agent(
     model: AgentModel,
-) -> Agent[AgentDependencies, list[LintFinding]]:
+) -> Agent[AgentDependencies, SemanticFindings]:
     """Create the provider-neutral semantic reviewer with read-only knowledge tools."""
     instructions = (
         resources.files("bundlewalker.agents.prompts")
         .joinpath("semantic-lint.md")
         .read_text(encoding="utf-8")
     )
-    return Agent(
+    output_spec = cast(OutputSpec[SemanticFindings], SemanticFindings)
+    return Agent[AgentDependencies, SemanticFindings](
         model,
         deps_type=AgentDependencies,
-        output_type=list[LintFinding],
+        output_type=output_spec,
         tools=read_tools,
         retries=2,
         instructions=instructions,
