@@ -13,6 +13,7 @@ from bundlewalker.domain import FindingOrigin, LintFinding, OkfDocument, Severit
 from bundlewalker.errors import OkfError
 from bundlewalker.okf.derived import render_index
 from bundlewalker.okf.documents import RESERVED_NAMES, parse_document
+from bundlewalker.paths import normalize_workspace_config_path
 
 _SEVERITY_ORDER = {
     Severity.ERROR: 0,
@@ -645,8 +646,8 @@ def _configured_raw_directory(workspace_root: Path) -> PurePosixPath:
             values = tomllib.load(config_file)
     except (OSError, tomllib.TOMLDecodeError):
         return PurePosixPath("raw")
-    configured = _workspace_relative_path(values.get("raw_dir"))
-    return configured or PurePosixPath("raw")
+    configured = normalize_workspace_config_path(values.get("raw_dir"))
+    return PurePosixPath(configured or "raw")
 
 
 def _finding(

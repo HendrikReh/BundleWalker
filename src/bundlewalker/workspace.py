@@ -15,6 +15,7 @@ from bundlewalker.errors import BundleWalkerError, ConfigurationError, UsageErro
 from bundlewalker.okf.derived import prepend_log_entry, regenerate_indexes
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
+from bundlewalker.paths import normalize_workspace_config_path
 
 CONFIG_FILENAME = "bundlewalker.toml"
 DEFAULT_CONFIG_TEXT = (
@@ -262,10 +263,10 @@ def _load_config(path: Path) -> WorkspaceConfig:
 
     path_values: dict[str, str] = {}
     for key in ("wiki_dir", "raw_dir", "conventions_file"):
-        value = values[key]
-        if not isinstance(value, str) or not _safe_relative_path(value):
+        normalized = normalize_workspace_config_path(values[key])
+        if normalized is None:
             raise ConfigurationError(f"{key} must be a safe workspace-relative path")
-        path_values[key] = value
+        path_values[key] = normalized
 
     return WorkspaceConfig(
         version=version,
@@ -276,15 +277,15 @@ def _load_config(path: Path) -> WorkspaceConfig:
     )
 
 
-def _safe_relative_path(value: str) -> bool:
-    path = PurePosixPath(value)
-    return bool(value) and not path.is_absolute() and ".." not in path.parts
-
-
 def _slugify(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     slug = re.sub(r"[^a-z0-9]+", "-", normalized.casefold()).strip("-")
     return slug or "source"
+
+
+def _safe_relative_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return bool(value) and not path.is_absolute() and ".." not in path.parts
 
 
 def _source_identities(workspace: Workspace) -> dict[str, tuple[Path, str]]:

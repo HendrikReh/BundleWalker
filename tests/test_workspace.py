@@ -207,15 +207,22 @@ def test_stable_source_paths_avoids_an_occupied_custom_concept_id(
     assert concept_id == f"sources/{digest[:13]}-incoming"
 
 
-def test_lint_uses_the_workspace_configured_raw_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("configured_raw_dir", ["archive", "archive/"])
+def test_lint_uses_the_workspace_configured_raw_directory(
+    tmp_path: Path,
+    configured_raw_dir: str,
+) -> None:
     initialized = initialize_workspace(tmp_path / "knowledge")
     config_path = initialized.root / "bundlewalker.toml"
     config_path.write_text(
-        DEFAULT_CONFIG_TEXT.replace('raw_dir = "raw"', 'raw_dir = "archive"'),
+        DEFAULT_CONFIG_TEXT.replace(
+            'raw_dir = "raw"', f'raw_dir = "{configured_raw_dir}"'
+        ),
         encoding="utf-8",
     )
     initialized.raw_dir.rename(initialized.root / "archive")
     workspace = discover_workspace(initialized.root)
+    assert workspace.config.raw_dir == "archive"
     content = b"configured source\n"
     digest = hashlib.sha256(content).hexdigest()
     raw_path = workspace.raw_dir / f"{digest[:12]}-configured.txt"
