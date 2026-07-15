@@ -23,7 +23,13 @@ from bundlewalker.errors import ChangeSetError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import parse_document
 from bundlewalker.okf.repository import OkfRepository
-from bundlewalker.workspace import RawSource, Workspace, initialize_workspace, load_raw_source
+from bundlewalker.workspace import (
+    RawSource,
+    Workspace,
+    discover_workspace,
+    initialize_workspace,
+    load_raw_source,
+)
 
 NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
 
@@ -207,6 +213,28 @@ def test_validation_rejects_bare_category_path(tmp_path: Path) -> None:
     with pytest.raises(ChangeSetError, match="concept name"):
         validate_change_set(
             _valid_ingest(source, _draft(path="topics")),
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "topics/nested/..",
+        "topics/nested/../agents",
+        "topics/./agents",
+        "topics/.",
+    ],
+)
+def test_validation_rejects_dot_segments_before_adding_markdown_suffix(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    _, source, context = _ingest_context(tmp_path)
+
+    with pytest.raises(ChangeSetError, match="dot path segment"):
+        validate_change_set(
+            _valid_ingest(source, _draft(path=path)),
             context,
         )
 
@@ -634,6 +662,42 @@ def test_build_prospective_wiki_rejects_destination_inside_live_wiki(
     destination = workspace.wiki_dir / "prospective"
 
     with pytest.raises(ChangeSetError, match="outside the live wiki"):
+        build_prospective_wiki(
+            workspace,
+            _valid_ingest(source),
+            context,
+            destination,
+            NOW,
+        )
+
+    assert not destination.exists()
+
+
+def test_build_prospective_wiki_rejects_destination_inside_configured_raw_dir(
+    tmp_path: Path,
+) -> None:
+    initialized = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    config_path = initialized.root / "bundlewalker.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'raw_dir = "raw"',
+            'raw_dir = "archive"',
+        ),
+        encoding="utf-8",
+    )
+    initialized.raw_dir.rename(initialized.root / "archive")
+    workspace = discover_workspace(initialized.root)
+    source = _raw_source(tmp_path, workspace)
+    (workspace.root / source.stored_relative_path).write_bytes(source.content)
+    context = ChangeValidationContext(
+        mode="ingest",
+        repository=OkfRepository(workspace.wiki_dir),
+        readable_concepts=frozenset(),
+        source=source,
+    )
+    destination = workspace.raw_dir / "prospective-wiki"
+
+    with pytest.raises(ChangeSetError, match="outside the live workspace"):
         build_prospective_wiki(
             workspace,
             _valid_ingest(source),

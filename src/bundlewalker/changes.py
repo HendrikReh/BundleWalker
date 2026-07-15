@@ -139,7 +139,7 @@ def build_prospective_wiki(
 ) -> None:
     """Build and lint the complete wiki tree that a proposal would produce."""
     validate_change_set(change_set, context)
-    _validate_destination_location(workspace.wiki_dir, destination)
+    _validate_destination_location(workspace.root, destination)
     _require_empty_destination(destination)
     _validate_copy_symlinks(workspace.wiki_dir)
     try:
@@ -176,6 +176,8 @@ def _normalized_draft_path(value: str) -> str:
     unnormalized = value[:-3] if value.endswith(".md") else value
     if not unnormalized:
         raise ChangeSetError(f"unsafe concept path: {value}")
+    if any(segment in {".", ".."} for segment in unnormalized.split("/")):
+        raise ChangeSetError(f"concept path contains a dot path segment: {value}")
     concept_id = PurePosixPath(unnormalized).as_posix()
     try:
         concept_path(Path("/bundle"), concept_id)
@@ -356,12 +358,13 @@ def _require_empty_destination(destination: Path) -> None:
             ) from exc
 
 
-def _validate_destination_location(live_wiki: Path, destination: Path) -> None:
-    resolved_live = live_wiki.resolve(strict=False)
+def _validate_destination_location(workspace_root: Path, destination: Path) -> None:
+    resolved_workspace = workspace_root.resolve(strict=False)
     resolved_destination = destination.resolve(strict=False)
-    if resolved_destination.is_relative_to(resolved_live):
+    if resolved_destination.is_relative_to(resolved_workspace):
         raise ChangeSetError(
-            f"prospective destination must be outside the live wiki: {destination}"
+            "prospective destination must be outside the live workspace and "
+            f"outside the live wiki: {destination}"
         )
 
 
