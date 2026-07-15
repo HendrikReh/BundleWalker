@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Self
@@ -32,6 +33,11 @@ class OkfMetadata(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: str = Field(min_length=1)
+    title: str | None = None
+    description: str | None = None
+    resource: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    timestamp: datetime | None = None
 
 
 class OkfDocument(BaseModel):
