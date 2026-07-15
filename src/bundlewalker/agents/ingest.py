@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 from importlib import resources
 from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, Model
 
-from bundlewalker.agents.common import AgentDependencies, read_tools
+from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
 from bundlewalker.domain import ChangeSet
 from bundlewalker.errors import AgentRunError
 from bundlewalker.workspace import RawSource
@@ -57,7 +56,7 @@ async def run_ingestion_agent(
             "sha256": source.sha256,
         },
     }
-    prompt = f"UNTRUSTED_DATA_JSON_V1\n{_escaped_json(payload)}"
+    prompt = frame_untrusted_data(payload)
     try:
         result = await create_ingestion_agent(model).run(prompt, deps=dependencies)
     except Exception:
@@ -65,13 +64,3 @@ async def run_ingestion_agent(
     else:
         return result.output, frozenset(dependencies.read_ids)
     raise AgentRunError("ingestion agent could not produce a proposal") from None
-
-
-def _escaped_json(value: dict[str, Any]) -> str:
-    serialized = json.dumps(
-        value,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return serialized.replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")

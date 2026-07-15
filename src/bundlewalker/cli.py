@@ -7,7 +7,9 @@ from typing import NoReturn
 import typer
 
 from bundlewalker.errors import BundleWalkerError
-from bundlewalker.transactions import commit_transaction, discard_transaction
+from bundlewalker.okf.repository import OkfRepository
+from bundlewalker.transactions import PreparedTransaction, commit_transaction, discard_transaction
+from bundlewalker.workflows.ask import answer_question, prepare_synthesis, render_cited_answer
 from bundlewalker.workflows.ingest import DuplicateIngestion, prepare_ingestion
 from bundlewalker.workspace import Workspace, discover_workspace, initialize_workspace
 
@@ -62,7 +64,38 @@ def ingest_command(
         typer.echo("Source already ingested; no changes applied.")
         return
 
-    transaction = outcome.transaction
+    _review_transaction(outcome.transaction)
+
+
+@app.command("ask")
+def ask_command(
+    context: typer.Context,
+    question: str,
+    model: str | None = typer.Option(None, "--model"),
+    save: bool = typer.Option(False, "--save"),
+) -> None:
+    """Answer a cited knowledge question and optionally save a reviewed synthesis."""
+    workspace = current_workspace(context)
+    try:
+        answered = asyncio.run(
+            answer_question(
+                workspace,
+                question,
+                explicit_model=model,
+            )
+        )
+        typer.echo(render_cited_answer(answered.answer, OkfRepository(workspace.wiki_dir)))
+        if not save:
+            return
+        transaction = prepare_synthesis(workspace, answered)
+    except BundleWalkerError as exc:
+        _exit_for_error(exc)
+
+    _review_transaction(transaction)
+
+
+def _review_transaction(transaction: PreparedTransaction) -> None:
+    """Display, confirm, and apply the shared reviewed-transaction path."""
     typer.echo(f"Summary: {transaction.summary}")
     typer.echo(transaction.diff, nl=not transaction.diff.endswith("\n"))
     try:

@@ -160,6 +160,18 @@ def read_concept(
 read_tools = (list_concepts, search_concepts, read_concept)
 
 
+def frame_untrusted_data(payload: Mapping[str, Any]) -> str:
+    """Encode protected-context payloads without executable delimiter tokens."""
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    escaped = serialized.replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")
+    return f"UNTRUSTED_DATA_JSON_V1\n{escaped}"
+
+
 def _summary_entry(summary: ConceptSummary) -> ConceptEntry:
     return ConceptEntry(
         kind="concept",
