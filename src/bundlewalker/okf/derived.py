@@ -36,7 +36,7 @@ def regenerate_indexes(root: Path) -> None:
             == PurePosixPath(relative_directory.as_posix())
         ]
         (directory / "index.md").write_text(
-            _render_index(
+            render_index(
                 directory,
                 relative_directory,
                 child_directories,
@@ -100,7 +100,7 @@ def _terminate_diff_chunk(chunk: str) -> str:
     return f"{chunk}\n\\ No newline at end of file\n"
 
 
-def _render_index(
+def render_index(
     directory: Path,
     relative_directory: Path,
     child_directories: list[Path],
