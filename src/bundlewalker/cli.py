@@ -11,6 +11,7 @@ from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import PreparedTransaction, commit_transaction, discard_transaction
 from bundlewalker.workflows.ask import answer_question, prepare_synthesis, render_cited_answer
 from bundlewalker.workflows.ingest import DuplicateIngestion, prepare_ingestion
+from bundlewalker.workflows.lint import run_lint
 from bundlewalker.workspace import Workspace, discover_workspace, initialize_workspace
 
 app = typer.Typer(
@@ -92,6 +93,37 @@ def ask_command(
         _exit_for_error(exc)
 
     _review_transaction(transaction)
+
+
+@app.command("lint")
+def lint_command(
+    context: typer.Context,
+    semantic: bool = typer.Option(False, "--semantic"),
+    model: str | None = typer.Option(None, "--model"),
+) -> None:
+    """Check deterministic wiki health and optionally add semantic advisories."""
+    workspace = current_workspace(context)
+    try:
+        result = asyncio.run(
+            run_lint(
+                workspace,
+                semantic=semantic,
+                explicit_model=model,
+            )
+        )
+    except BundleWalkerError as exc:
+        _exit_for_error(exc)
+
+    if not result.findings:
+        typer.echo("No lint findings.")
+    for finding in result.findings:
+        location = f" {finding.path}:" if finding.path is not None else ":"
+        typer.echo(
+            f"{finding.severity.value.upper()} {finding.code} "
+            f"[{finding.origin.value}]{location} {finding.message}"
+        )
+    if result.deterministic_has_errors:
+        raise typer.Exit(code=1)
 
 
 def _review_transaction(transaction: PreparedTransaction) -> None:
