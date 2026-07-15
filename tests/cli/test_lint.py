@@ -4,10 +4,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic_ai import RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 from typer.testing import CliRunner
 
 import bundlewalker.workflows.lint as lint_workflow
-from bundlewalker.agents.common import AgentDependencies
+from bundlewalker.agents.common import AgentDependencies, read_concept
 from bundlewalker.agents.semantic_lint import AgentModel
 from bundlewalker.cli import app
 from bundlewalker.domain import FindingOrigin, LintFinding, OkfMetadata, Severity
@@ -93,7 +96,11 @@ def test_semantic_findings_are_printed_but_do_not_control_exit_status(
         dependencies: AgentDependencies,
         _deterministic_findings: tuple[LintFinding, ...],
     ) -> tuple[list[LintFinding], frozenset[str]]:
-        dependencies.read_ids.add("topics/agents")
+        read_result = read_concept(
+            RunContext(deps=dependencies, model=TestModel(), usage=RunUsage()),
+            "topics/agents",
+        )
+        assert "error" not in read_result
         return (
             [
                 LintFinding(

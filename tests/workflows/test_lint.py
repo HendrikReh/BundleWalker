@@ -4,8 +4,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic_ai import RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 
-from bundlewalker.agents.common import AgentDependencies
+from bundlewalker.agents.common import AgentDependencies, read_concept
 from bundlewalker.agents.semantic_lint import AgentModel
 from bundlewalker.domain import FindingOrigin, LintFinding, OkfMetadata, Severity
 from bundlewalker.errors import AgentRunError, WorkspaceError
@@ -42,6 +45,14 @@ def _workspace(tmp_path: Path, *, regenerate: bool) -> Workspace:
     if regenerate:
         regenerate_indexes(workspace.wiki_dir)
     return workspace
+
+
+def _read(dependencies: AgentDependencies, concept_id: str) -> None:
+    result = read_concept(
+        RunContext(deps=dependencies, model=TestModel(), usage=RunUsage()),
+        concept_id,
+    )
+    assert "error" not in result
 
 
 async def test_plain_lint_is_sorted_offline_and_does_not_recover_or_write(
@@ -85,7 +96,7 @@ async def test_semantic_lint_runs_after_deterministic_lint_and_stays_advisory(
     ) -> tuple[list[LintFinding], frozenset[str]]:
         calls.append((str(model), tuple(finding.code for finding in deterministic_findings)))
         assert dependencies.root_index.startswith("# Knowledge Index")
-        dependencies.read_ids.add("topics/agents")
+        _read(dependencies, "topics/agents")
         return (
             [
                 LintFinding(
@@ -145,6 +156,46 @@ async def test_semantic_lint_revalidates_injected_runner_read_evidence(tmp_path:
             explicit_model="test:model",
             environment={},
             runner=lying_runner,
+        )
+
+
+@pytest.mark.parametrize(
+    "forged_id",
+    ["topics/agents", "topics/missing"],
+    ids=["existing-unread", "nonexistent"],
+)
+async def test_semantic_lint_rejects_public_read_ledger_forgery(
+    tmp_path: Path,
+    forged_id: str,
+) -> None:
+    workspace = _workspace(tmp_path, regenerate=True)
+
+    async def forging_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _deterministic_findings: tuple[LintFinding, ...],
+    ) -> tuple[list[LintFinding], frozenset[str]]:
+        dependencies.read_ids.add(forged_id)
+        return (
+            [
+                LintFinding(
+                    origin=FindingOrigin.SEMANTIC,
+                    severity=Severity.INFO,
+                    code="SEM-GAP",
+                    message="Forged evidence.",
+                    evidence_paths=[forged_id],
+                )
+            ],
+            frozenset({forged_id}),
+        )
+
+    with pytest.raises(AgentRunError, match="audit"):
+        await run_lint(
+            workspace,
+            semantic=True,
+            explicit_model="test:model",
+            environment={},
+            runner=forging_runner,
         )
 
 

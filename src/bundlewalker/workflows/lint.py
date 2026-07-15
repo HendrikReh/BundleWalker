@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from bundlewalker.agents.common import AgentDependencies, resolve_model
 from bundlewalker.agents.semantic_lint import (
@@ -11,7 +11,7 @@ from bundlewalker.agents.semantic_lint import (
     run_semantic_lint_agent,
     validate_semantic_findings,
 )
-from bundlewalker.domain import LintFinding, Severity
+from bundlewalker.domain import LintFinding, OkfDocument, Severity
 from bundlewalker.errors import AgentRunError, OkfError
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
@@ -59,7 +59,7 @@ async def run_lint(
         return _lint_run(deterministic_findings, deterministic_has_errors)
 
     validate_repository_path(workspace)
-    repository = OkfRepository(workspace.wiki_dir)
+    repository, audited_reads = _audited_repository(workspace.wiki_dir)
     try:
         repository.scan()
     except OkfError:
@@ -88,15 +88,28 @@ async def run_lint(
         deterministic_findings,
     )
     actual_reads = frozenset(dependencies.read_ids)
-    if reported_reads != actual_reads:
+    independent_reads = frozenset(audited_reads)
+    if not reported_reads == actual_reads == independent_reads:
         raise AgentRunError(
-            "semantic lint runner read history does not match the actual read ledger"
+            "semantic lint runner read history does not match the independent read audit"
         )
-    validated_semantic = validate_semantic_findings(semantic_findings, actual_reads)
+    validated_semantic = validate_semantic_findings(semantic_findings, independent_reads)
     return _lint_run(
         (*deterministic_findings, *validated_semantic),
         deterministic_has_errors,
     )
+
+
+def _audited_repository(root: Path) -> tuple[OkfRepository, set[str]]:
+    audited_reads: set[str] = set()
+
+    class AuditedRepository(OkfRepository):
+        def get(self, concept_id: str) -> OkfDocument:
+            document = super().get(concept_id)
+            audited_reads.add(document.concept_id)
+            return document
+
+    return AuditedRepository(root), audited_reads
 
 
 def _deterministic_parsing_is_unusable(findings: tuple[LintFinding, ...]) -> bool:
