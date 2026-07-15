@@ -598,20 +598,23 @@ def _resolve_internal_link(
     source_path: Path,
     href: str,
 ) -> tuple[bool, Path | None]:
-    parsed = urlsplit(href)
-    if parsed.scheme or parsed.netloc or not parsed.path:
-        return False, None
-    target_value = unquote(parsed.path)
-    relative = PurePosixPath(target_value.lstrip("/"))
-    candidate = (
-        root.joinpath(*relative.parts)
-        if target_value.startswith("/")
-        else source_path.parent.joinpath(*relative.parts)
-    )
-    if target_value.endswith("/"):
-        candidate /= "index.md"
-    resolved_root = root.resolve(strict=False)
-    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        parsed = urlsplit(href)
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            return False, None
+        target_value = unquote(parsed.path)
+        relative = PurePosixPath(target_value.lstrip("/"))
+        candidate = (
+            root.joinpath(*relative.parts)
+            if target_value.startswith("/")
+            else source_path.parent.joinpath(*relative.parts)
+        )
+        if target_value.endswith("/"):
+            candidate /= "index.md"
+        resolved_root = root.resolve(strict=False)
+        resolved_candidate = candidate.resolve(strict=False)
+    except (ValueError, OSError, RuntimeError):
+        return True, None
     if not resolved_candidate.is_relative_to(resolved_root):
         return True, None
     return True, resolved_candidate

@@ -155,6 +155,33 @@ def test_broken_internal_link_is_a_warning(tmp_path: Path) -> None:
     assert "/topics/missing.md" in findings[0].message
 
 
+def test_malformed_internal_target_does_not_abort_other_lint_passes(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    agents = root / "topics" / "agents.md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace(
+            "[Agents](/topics/agents.md)", "[bad](%00)"
+        ),
+        encoding="utf-8",
+    )
+    (root / "log.md").write_text(
+        "# Knowledge Update Log\n\n## 2026-02-30\n\n* **Update**: Impossible.\n",
+        encoding="utf-8",
+    )
+
+    findings = lint_bundle(root)
+
+    assert any(
+        finding.code == "LINK001"
+        and finding.path == "topics/agents.md"
+        and "%00" in finding.message
+        for finding in findings
+    )
+    assert any(
+        finding.code == "LOG001" and finding.path == "log.md" for finding in findings
+    )
+
+
 def test_concept_without_inbound_concept_links_is_an_orphan_warning(tmp_path: Path) -> None:
     root = _copy_fixture(tmp_path)
     _write_concept(
@@ -365,6 +392,32 @@ def test_citation_markers_must_match_references(tmp_path: Path) -> None:
     assert findings[0].severity is Severity.ERROR
     assert findings[0].path == "topics/agents.md"
     assert "markers" in findings[0].message and "references" in findings[0].message
+
+
+def test_malformed_citation_target_is_a_link_warning_and_citation_error(
+    tmp_path: Path,
+) -> None:
+    workspace, wiki, _ = _make_workspace_bundle(tmp_path)
+    topic = wiki / "topics" / "agents.md"
+    topic.write_text(
+        topic.read_text(encoding="utf-8").replace(
+            "/sources/source.md", "%00"
+        ),
+        encoding="utf-8",
+    )
+
+    findings = lint_bundle(wiki, workspace)
+
+    assert any(
+        finding.code == "LINK001" and finding.path == "topics/agents.md"
+        for finding in findings
+    )
+    assert any(
+        finding.code == "CITATION001"
+        and finding.path == "topics/agents.md"
+        and "does not reference an existing concept" in finding.message
+        for finding in findings
+    )
 
 
 @pytest.mark.parametrize("span", ["1\N{EN DASH}3", "2\N{EN DASH}1"])
