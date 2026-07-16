@@ -67,6 +67,13 @@ def test_ingestion_agent_has_the_strict_read_only_contract() -> None:
     assert "exactly one structured citation" in instructions
     assert "contiguous starting at `1`" in instructions
     assert "do not add a `# citations` section" in instructions
+    assert "search existing knowledge for related reusable concepts" in instructions
+    assert (
+        "create or replace a shared topic when new evidence corroborates, refines, or "
+        "contradicts a reusable theme" in instructions
+    )
+    assert "cite every relevant source in that shared topic" in instructions
+    assert "reusable cross-source knowledge must not remain only in source drafts" in instructions
 
 
 async def test_ingestion_runner_delimits_context_and_numbers_source_lines(

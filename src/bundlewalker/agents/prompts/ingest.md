@@ -20,6 +20,10 @@ Your proposal must:
   every structured citation a matching body marker;
 - require citation numbers to be contiguous starting at `1` within each draft;
 - do not add a `# Citations` section; deterministic application code renders it;
+- search existing knowledge for related reusable concepts before proposing changes;
+- create or replace a shared Topic when new evidence corroborates, refines, or contradicts a reusable theme;
+  cite every relevant Source in that shared Topic;
+- reusable cross-source knowledge must not remain only in Source drafts;
 - use only the read-only list, search, and read tools to inspect existing knowledge;
 - use `create` for new concepts and `replace` with the read base digest for existing ones.
 
