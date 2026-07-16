@@ -84,7 +84,7 @@ def validate_change_set(
         _validate_category(concept_id, draft.type)
         _validate_operation(concept_id, draft, live_documents)
 
-    _validate_mode(change_set, context, normalized_drafts)
+    _validate_mode(change_set, context, normalized_drafts, live_documents)
     _validate_citations(context, normalized_drafts, live_documents)
 
 
@@ -231,6 +231,7 @@ def _validate_mode(
     change_set: ChangeSet,
     context: ChangeValidationContext,
     normalized_drafts: dict[str, DraftConcept],
+    live_documents: dict[str, OkfDocument],
 ) -> None:
     if context.mode == "ingest":
         source = context.source
@@ -257,13 +258,15 @@ def _validate_mode(
         raise ChangeSetError(f"unknown change validation mode: {context.mode}")
     if context.source is not None or change_set.source_sha256 is not None:
         raise ChangeSetError("synthesis validation must not include a source")
-    drafts = list(normalized_drafts.values())
-    if (
-        len(drafts) != 1
-        or drafts[0].type is not ConceptType.SYNTHESIS
-        or drafts[0].operation is not ChangeOperation.CREATE
-    ):
-        raise ChangeSetError("synthesis requires one create-only Synthesis draft")
+    draft_items = list(normalized_drafts.items())
+    if len(draft_items) != 1 or draft_items[0][1].type is not ConceptType.SYNTHESIS:
+        raise ChangeSetError("synthesis mode requires exactly one Synthesis draft")
+
+    concept_id, draft = draft_items[0]
+    if draft.operation is ChangeOperation.REPLACE:
+        existing = live_documents.get(concept_id)
+        if existing is None or existing.metadata.type != ConceptType.SYNTHESIS.value:
+            raise ChangeSetError("synthesis replacement target must be an existing Synthesis")
 
 
 def _validate_citations(
@@ -297,6 +300,8 @@ def _validate_citations(
         for citation in draft.citations:
             live_type = live_types.get(citation.concept_id)
             if context.mode == "synthesis":
+                if draft.operation is ChangeOperation.REPLACE and citation.concept_id == concept_id:
+                    raise ChangeSetError(f"synthesis replacement cannot cite itself: {concept_id}")
                 if live_type is None:
                     raise ChangeSetError(
                         "synthesis citation must target an existing live concept: "

@@ -376,7 +376,7 @@ def test_ingestion_requires_matching_change_set_source_digest(tmp_path: Path) ->
         validate_change_set(change_set, context)
 
 
-def test_synthesis_requires_one_create_only_synthesis_and_no_source(tmp_path: Path) -> None:
+def test_synthesis_requires_one_synthesis_and_no_source(tmp_path: Path) -> None:
     workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
     context = ChangeValidationContext(
         mode="synthesis",
@@ -384,9 +384,12 @@ def test_synthesis_requires_one_create_only_synthesis_and_no_source(tmp_path: Pa
         readable_concepts=frozenset(),
     )
 
-    with pytest.raises(ChangeSetError, match="one create-only Synthesis"):
+    with pytest.raises(ChangeSetError, match="exactly one Synthesis"):
         validate_change_set(
-            ChangeSet(summary="Wrong type.", drafts=[_draft()]),
+            ChangeSet(
+                summary="Wrong type.",
+                drafts=[_draft(path="sources/answer", type=ConceptType.SOURCE)],
+            ),
             context,
         )
 
@@ -400,6 +403,75 @@ def test_synthesis_requires_one_create_only_synthesis_and_no_source(tmp_path: Pa
     synthesis = _draft(path="syntheses/answer", type=ConceptType.SYNTHESIS)
     with pytest.raises(ChangeSetError, match="must not include a source"):
         validate_change_set(ChangeSet(summary="Answer.", drafts=[synthesis]), invalid_context)
+
+    validate_change_set(ChangeSet(summary="Answer.", drafts=[synthesis]), context)
+
+
+def test_synthesis_mode_accepts_one_digest_protected_synthesis_replacement(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    _write_concept(workspace, "syntheses/existing", type="Synthesis")
+    repository = OkfRepository(workspace.wiki_dir)
+    existing = repository.get("syntheses/existing")
+    context = ChangeValidationContext(
+        mode="synthesis",
+        repository=repository,
+        readable_concepts=frozenset(),
+    )
+    replacement = _draft(
+        operation=ChangeOperation.REPLACE,
+        path="syntheses/existing",
+        type=ConceptType.SYNTHESIS,
+        base_digest=existing.digest,
+    )
+
+    validate_change_set(ChangeSet(summary="Refresh.", drafts=[replacement]), context)
+
+
+def test_synthesis_mode_rejects_replacing_a_non_synthesis(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    _write_concept(workspace, "syntheses/not-a-synthesis", type="Topic")
+    repository = OkfRepository(workspace.wiki_dir)
+    existing = repository.get("syntheses/not-a-synthesis")
+    context = ChangeValidationContext(
+        mode="synthesis",
+        repository=repository,
+        readable_concepts=frozenset(),
+    )
+    replacement = _draft(
+        operation=ChangeOperation.REPLACE,
+        path="syntheses/not-a-synthesis",
+        type=ConceptType.SYNTHESIS,
+        base_digest=existing.digest,
+    )
+
+    with pytest.raises(ChangeSetError, match="existing Synthesis"):
+        validate_change_set(ChangeSet(summary="Refresh.", drafts=[replacement]), context)
+
+
+def test_synthesis_replacement_rejects_self_citation(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    synthesis_id = "syntheses/existing"
+    _write_concept(workspace, synthesis_id, type="Synthesis")
+    repository = OkfRepository(workspace.wiki_dir)
+    existing = repository.get(synthesis_id)
+    context = ChangeValidationContext(
+        mode="synthesis",
+        repository=repository,
+        readable_concepts=frozenset({synthesis_id}),
+    )
+    replacement = _draft(
+        operation=ChangeOperation.REPLACE,
+        path=synthesis_id,
+        type=ConceptType.SYNTHESIS,
+        body="# Existing\n\nA circular conclusion [1].\n",
+        citations=[Citation(number=1, concept_id=synthesis_id)],
+        base_digest=existing.digest,
+    )
+
+    with pytest.raises(ChangeSetError, match="cannot cite itself"):
+        validate_change_set(ChangeSet(summary="Refresh.", drafts=[replacement]), context)
 
 
 @pytest.mark.parametrize(
