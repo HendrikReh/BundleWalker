@@ -403,6 +403,34 @@ def test_refresh_quality_accepts_whether_uncertainty_governing_coordinated_predi
     )
 
 
+def test_refresh_quality_accepts_uncertain_oxford_list() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Applicability across "
+        "repository sizes, languages, and time horizons remains uncertain."
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
+def test_refresh_quality_accepts_question_with_oxford_list() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Does the result apply to "
+        "all repositories, tasks, and languages?"
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
 def test_refresh_quality_rejects_overclaim_after_qualified_comma_clause() -> None:
     case = _qualified_refresh_case()
     answer = _answer(

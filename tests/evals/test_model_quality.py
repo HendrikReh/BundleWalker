@@ -343,6 +343,7 @@ def _assert_refresh_qualification(
         normalized,
         expectation.clause_boundary_patterns,
         expectation.coordinating_markers,
+        expectation.concept_patterns,
     )
     concessive_spans = [
         assertion
@@ -391,19 +392,28 @@ def _split_qualification_clauses(
     text: str,
     boundary_patterns: list[str],
     coordinating_markers: list[str],
+    concept_patterns: list[str],
 ) -> list[str]:
+    clause_boundary_pattern = "|".join(f"(?:{pattern})" for pattern in boundary_patterns)
+    clause_boundaries = re.compile(clause_boundary_pattern, flags=re.IGNORECASE)
     marker_pattern = "|".join(
         re.escape(marker.casefold())
         for marker in sorted(coordinating_markers, key=len, reverse=True)
     )
     comma_coordination_pattern = rf",\s+(?:{marker_pattern})\b[:,]?\s*"
     boundaries = re.compile(
-        "|".join(f"(?:{pattern})" for pattern in [*boundary_patterns, comma_coordination_pattern]),
+        rf"(?P<comma_coordination>{comma_coordination_pattern})|{clause_boundary_pattern}",
         flags=re.IGNORECASE,
     )
     clauses: list[str] = []
     start = 0
     for boundary in boundaries.finditer(text):
+        if boundary.group("comma_coordination") is not None:
+            right = text[boundary.end() :]
+            if next_boundary := clause_boundaries.search(right):
+                right = right[: next_boundary.start()]
+            if _first_matching_pattern(right, concept_patterns) is None:
+                continue
         if clause := text[start : boundary.start()].strip():
             clauses.append(clause)
         start = boundary.end()
