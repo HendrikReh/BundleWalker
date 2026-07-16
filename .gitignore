@@ -6,4 +6,6 @@ __pycache__/
 .superpowers/
 .bundlewalker/
 .worktrees/
+.env*
+!.env.example
 *.py[cod]
