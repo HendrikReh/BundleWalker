@@ -15,6 +15,7 @@ from pydantic_ai.usage import RunUsage
 
 from bundlewalker.agents.common import (
     AgentDependencies,
+    frame_untrusted_data,
     list_concepts,
     read_concept,
     read_tools,
@@ -308,6 +309,45 @@ print(json.dumps(result["metadata"]["extension"]["labels"]))
         results.append(cast(list[str], json.loads(completed.stdout)))
 
     assert results == [["alpha", "middle", "zeta"]] * 5
+
+
+def test_read_concept_normalizes_mixed_scalar_mapping_keys_for_framing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    path = root / "topics" / "mixed-keys.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\n"
+        "type: Topic\n"
+        "title: Mixed keys\n"
+        "description: Valid permissive metadata with mixed scalar keys.\n"
+        "extension:\n"
+        "  mapping:\n"
+        "    1: numeric-value\n"
+        "    alpha: text-value\n"
+        "---\n"
+        "# Mixed keys\n",
+        encoding="utf-8",
+    )
+    repository = OkfRepository(root)
+    dependencies = AgentDependencies(
+        repository=repository,
+        retriever=LexicalRetriever(repository),
+        conventions="# Conventions",
+        root_index="# Knowledge Index",
+    )
+
+    result = read_concept(_context(dependencies), "topics/mixed-keys")
+
+    assert "error" not in result
+    mapping = result["metadata"]["extension"]["mapping"]
+    assert mapping == {"1": "numeric-value", "alpha": "text-value"}
+    framing, serialized = frame_untrusted_data({"metadata": result["metadata"]}).split(
+        "\n", maxsplit=1
+    )
+    assert framing == "UNTRUSTED_DATA_JSON_V1"
+    assert json.loads(serialized)["metadata"]["extension"]["mapping"] == mapping
 
 
 @pytest.mark.parametrize(

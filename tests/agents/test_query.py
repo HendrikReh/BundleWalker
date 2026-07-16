@@ -102,6 +102,27 @@ def _refresh_target(dependencies: AgentDependencies) -> OkfDocument:
     return dependencies.repository.get("syntheses/old-answer")
 
 
+def _refresh_target_with_colliding_metadata(
+    dependencies: AgentDependencies,
+) -> OkfDocument:
+    path = dependencies.repository.root / "syntheses" / "colliding-metadata.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "type: Synthesis\n"
+        "title: Colliding metadata\n"
+        "description: Repository-valid metadata that cannot be framed.\n"
+        "extension:\n"
+        "  mapping:\n"
+        "    1: numeric-value\n"
+        '    "1": text-value\n'
+        "---\n"
+        "# Colliding metadata\n",
+        encoding="utf-8",
+    )
+    return dependencies.repository.get("syntheses/colliding-metadata")
+
+
 def test_query_agent_has_the_strict_read_only_contract() -> None:
     agent = create_query_agent(TestModel())
     details = cast(Any, agent)
@@ -318,6 +339,32 @@ async def test_refresh_query_runner_rejects_self_citation(tmp_path: Path) -> Non
             "Revise this answer.",
             target,
         )
+
+
+async def test_refresh_query_runner_sanitizes_metadata_framing_failures(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+    target = _refresh_target_with_colliding_metadata(dependencies)
+    calls = 0
+
+    def respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("metadata framing failure reached the model")
+
+    with pytest.raises(
+        AgentRunError,
+        match=r"^query agent could not produce an answer$",
+    ) as caught:
+        await run_refresh_query_agent(
+            FunctionModel(respond),
+            dependencies,
+            "Revise this answer.",
+            target,
+        )
+
+    assert calls == 0
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.parametrize(

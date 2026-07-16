@@ -85,30 +85,30 @@ async def _run_query_agent(
         raise UsageError("question must not be empty")
 
     previous_reads = frozenset(dependencies.read_ids)
-    payload: dict[str, Any] = {
-        "workspace_conventions": {
-            "character_count": len(dependencies.conventions),
-            "content": dependencies.conventions,
-        },
-        "root_index": {
-            "character_count": len(dependencies.root_index),
-            "content": dependencies.root_index,
-        },
-        "question": {
-            "character_count": len(question),
-            "content": question,
-        },
-    }
-    if refresh_target is not None:
-        payload["refresh_target"] = {
-            "concept_id": refresh_target.concept_id,
-            "metadata": metadata_for_agent(refresh_target.metadata),
-            "body": {
-                "character_count": len(refresh_target.body),
-                "content": refresh_target.body,
+    try:
+        payload: dict[str, Any] = {
+            "workspace_conventions": {
+                "character_count": len(dependencies.conventions),
+                "content": dependencies.conventions,
+            },
+            "root_index": {
+                "character_count": len(dependencies.root_index),
+                "content": dependencies.root_index,
+            },
+            "question": {
+                "character_count": len(question),
+                "content": question,
             },
         }
-    try:
+        if refresh_target is not None:
+            payload["refresh_target"] = {
+                "concept_id": refresh_target.concept_id,
+                "metadata": metadata_for_agent(refresh_target.metadata),
+                "body": {
+                    "character_count": len(refresh_target.body),
+                    "content": refresh_target.body,
+                },
+            }
         result = await create_query_agent(model, refresh=refresh_target is not None).run(
             frame_untrusted_data(payload),
             deps=dependencies,

@@ -225,16 +225,16 @@ def _normalize_json_key(value: Any) -> str | int | float | bool | None:
     return _canonical_json(normalized)
 
 
-def _normalize_json_mapping(mapping: Mapping[Any, Any]) -> dict[Any, Any]:
-    result: dict[Any, Any] = {}
+def _normalize_json_mapping(mapping: Mapping[Any, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
     member_names: set[str] = set()
     for raw_key, raw_value in mapping.items():
         key = _normalize_json_key(raw_key)
         member_name = _json_member_name(key)
-        if key in result or member_name in member_names:
+        if member_name in member_names:
             raise ValueError(f"duplicate canonical JSON metadata key: {member_name}")
         member_names.add(member_name)
-        result[key] = _normalize_json_value(raw_value)
+        result[member_name] = _normalize_json_value(raw_value)
     return result
 
 
