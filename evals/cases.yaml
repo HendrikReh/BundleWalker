@@ -102,10 +102,21 @@
   refresh_target: syntheses/decision-framework-for-repository-guidance
   required_citations:
     - topics/repository-guidance-controlled-comparison
+  qualification:
+    scope_anchor_groups:
+      - [three, '3']
+      - [repository, repositories, repo, repos]
+      - [python]
+      - [four weeks, 4 weeks, four-week, 4-week, one month, month-long]
+    uncertainty_patterns:
+      - '\b(?:not|cannot|uncertain|unknown|insufficient|unclear)\b.{0,100}\b(?:generali[sz]|transfer|appl|extend)'
+      - '\b(?:generali[sz]|transfer|appl|extend)\w*.{0,100}\b(?:not|uncertain|unknown|unsupported|unestablished|unclear)\b'
+    forbidden_overclaim_patterns:
+      - '\bno (?:meaningful )?limitations?\b'
+      - '\bproves?.{0,40}\buniversal(?:ly)?\b'
+      - '\bgenerali[sz]es? (?:universally|to all|across all)\b'
+      - '(?<!not )(?<!n''t )\b(?:apply|applies|applicable)\s+to\s+(?:all|every)\b'
   question: >-
     Refresh this decision framework with the newer controlled comparison. Explain its explicit
     limitation and do not overstate generalization beyond the studied repositories, task types,
     language, or time horizon.
-  expected_phrases:
-    - controlled
-    - limitation

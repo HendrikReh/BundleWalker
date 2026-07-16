@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal, Self, cast
 
@@ -8,7 +9,7 @@ import pytest
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from bundlewalker.domain import OkfMetadata
+from bundlewalker.domain import CitedAnswer, OkfMetadata
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.okf.lint import has_errors, lint_bundle
@@ -48,6 +49,31 @@ class ConceptFixture(BaseModel):
     body: str = Field(min_length=1)
 
 
+class QualificationExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope_anchor_groups: list[list[str]] = Field(min_length=1)
+    uncertainty_patterns: list[str] = Field(min_length=1)
+    forbidden_overclaim_patterns: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_expectation(self) -> Self:
+        if any(
+            not group or any(not anchor.strip() for anchor in group)
+            for group in self.scope_anchor_groups
+        ):
+            raise ValueError("qualification anchor groups must contain non-empty alternatives")
+        patterns = self.uncertainty_patterns + self.forbidden_overclaim_patterns
+        if any(not pattern.strip() for pattern in patterns):
+            raise ValueError("qualification patterns must not be empty")
+        try:
+            for pattern in patterns:
+                re.compile(pattern)
+        except re.error as exc:
+            raise ValueError("qualification patterns must be valid regular expressions") from exc
+        return self
+
+
 class QualityCase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,8 +86,9 @@ class QualityCase(BaseModel):
         default=None,
         pattern=r"^syntheses/[a-z0-9]+(?:-[a-z0-9]+)*$",
     )
-    expected_phrases: list[str] = Field(min_length=1)
+    expected_phrases: list[str] = Field(default_factory=list[str])
     required_citations: list[str] = Field(default_factory=list[str])
+    qualification: QualificationExpectation | None = None
     minimum_shared_source_citations: int = Field(default=0, ge=0)
     shared_concept_type: Literal["Topic", "Entity"] | None = None
 
@@ -73,25 +100,34 @@ class QualityCase(BaseModel):
             or self.question
             or self.refresh_target
             or self.required_citations
+            or self.qualification
+            or not self.expected_phrases
         ):
             raise ValueError("ingest cases require only source fixtures")
         if self.kind == "query" and (
-            not self.concepts or self.sources or not self.question or self.refresh_target
+            not self.concepts
+            or self.sources
+            or not self.question
+            or self.refresh_target
+            or self.qualification
+            or not self.expected_phrases
         ):
             raise ValueError("query cases require concepts and a question")
         concept_ids = {concept.path for concept in self.concepts}
         if self.kind == "refresh":
-            if not self.concepts or self.sources or not self.question or not self.refresh_target:
+            if (
+                not self.concepts
+                or self.sources
+                or not self.question
+                or not self.refresh_target
+                or self.qualification is None
+            ):
                 raise ValueError(
-                    "refresh cases require concepts, a question, and a Synthesis target"
+                    "refresh cases require concepts, a question, a Synthesis target, "
+                    "and qualification expectations"
                 )
             if self.refresh_target not in concept_ids:
                 raise ValueError("refresh target must identify a concept fixture")
-            synthesis_ids = {
-                concept_id for concept_id in concept_ids if concept_id.startswith("syntheses/")
-            }
-            if synthesis_ids != {self.refresh_target}:
-                raise ValueError("refresh cases require exactly one Synthesis concept fixture")
             if self.refresh_target in self.required_citations:
                 raise ValueError("refresh target cannot be a required citation")
         if not set(self.required_citations).issubset(concept_ids):
@@ -246,11 +282,7 @@ async def _evaluate_refresh_case(
         explicit_model=model,
         environment={},
     )
-    assert answered.answer.citations
-    cited_ids = {citation.concept_id for citation in answered.answer.citations}
-    assert cited_ids.issubset(answered.read_ids)
-    assert case.refresh_target not in cited_ids
-    assert set(case.required_citations).issubset(cited_ids)
+    assert_refresh_answer_quality(case, answered.answer, answered.read_ids)
 
     outcome = prepare_synthesis_refresh(workspace, answered)
     assert not isinstance(outcome, SynthesisAlreadyCurrent)
@@ -260,7 +292,59 @@ async def _evaluate_refresh_case(
     assert refreshed.path == target_path
     assert refreshed.digest != target_digest
     assert refreshed.metadata.type == "Synthesis"
+    assert answered.answer.body in refreshed.body
     assert not has_errors(lint_bundle(workspace.wiki_dir, workspace.root))
-    answer_text = refreshed.body.casefold()
+
+
+def assert_refresh_answer_quality(
+    case: QualityCase,
+    answer: CitedAnswer,
+    read_ids: frozenset[str],
+) -> None:
+    assert case.kind == "refresh"
+    assert case.refresh_target is not None
+    assert case.qualification is not None
+    assert answer.citations
+    cited_ids = {citation.concept_id for citation in answer.citations}
+    assert cited_ids.issubset(read_ids)
+    assert case.refresh_target not in cited_ids
+    assert set(case.required_citations).issubset(cited_ids)
+    answer_text = answer.body.casefold()
     for phrase in case.expected_phrases:
         assert phrase.casefold() in answer_text
+    _assert_refresh_qualification(answer.body, case.qualification)
+
+
+def _assert_refresh_qualification(
+    answer_body: str,
+    expectation: QualificationExpectation,
+) -> None:
+    normalized = " ".join(answer_body.casefold().split())
+    forbidden = next(
+        (
+            pattern
+            for pattern in expectation.forbidden_overclaim_patterns
+            if re.search(pattern, normalized, flags=re.IGNORECASE)
+        ),
+        None,
+    )
+    assert forbidden is None, f"refresh answer matched forbidden overclaim pattern: {forbidden}"
+
+    missing_anchor_groups = [
+        group
+        for group in expectation.scope_anchor_groups
+        if not any(
+            re.search(
+                rf"(?<!\w){re.escape(anchor.casefold())}(?!\w)",
+                normalized,
+            )
+            for anchor in group
+        )
+    ]
+    assert not missing_anchor_groups, (
+        f"refresh answer is missing evidence-scope anchor groups: {missing_anchor_groups}"
+    )
+    assert any(
+        re.search(pattern, normalized, flags=re.IGNORECASE)
+        for pattern in expectation.uncertainty_patterns
+    ), "refresh answer does not express the required uncertainty boundary"
