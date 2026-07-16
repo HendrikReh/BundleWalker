@@ -3,12 +3,13 @@ from __future__ import annotations
 from importlib import resources
 from typing import Any
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.models import KnownModelName, Model
 
 from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
+from bundlewalker.changes import ChangeValidationContext, validate_change_set
 from bundlewalker.domain import ChangeSet
-from bundlewalker.errors import AgentRunError
+from bundlewalker.errors import AgentRunError, ChangeSetError
 from bundlewalker.workspace import RawSource
 
 type AgentModel = Model | KnownModelName | str
@@ -57,8 +58,27 @@ async def run_ingestion_agent(
         },
     }
     prompt = frame_untrusted_data(payload)
+    agent = create_ingestion_agent(model)
+
+    @agent.output_validator
+    def validate_ingestion_output(  # pyright: ignore[reportUnusedFunction]
+        ctx: RunContext[AgentDependencies],
+        output: ChangeSet,
+    ) -> ChangeSet:
+        context = ChangeValidationContext(
+            mode="ingest",
+            repository=ctx.deps.repository,
+            readable_concepts=frozenset(ctx.deps.read_ids),
+            source=source,
+        )
+        try:
+            validate_change_set(output, context)
+        except ChangeSetError as exc:
+            raise ModelRetry(str(exc)) from None
+        return output
+
     try:
-        result = await create_ingestion_agent(model).run(prompt, deps=dependencies)
+        result = await agent.run(prompt, deps=dependencies)
     except Exception:
         pass
     else:

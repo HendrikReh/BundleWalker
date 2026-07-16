@@ -22,6 +22,7 @@ from bundlewalker.domain import (
     MAX_TITLE_CHARACTERS,
     ChangeOperation,
     ChangeSet,
+    Citation,
     ConceptType,
     DraftConcept,
 )
@@ -190,6 +191,108 @@ async def test_ingestion_runner_json_frames_all_untrusted_blocks_without_tokens(
         "content": numbered,
         "sha256": source.sha256,
     }
+
+
+@pytest.mark.parametrize("invalid_kind", ["markdown-suffix", "citation-mismatch"])
+async def test_ingestion_runner_retries_domain_invalid_output(
+    tmp_path: Path,
+    invalid_kind: str,
+) -> None:
+    dependencies = _dependencies(tmp_path)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("Evidence.\n", encoding="utf-8")
+    source = load_raw_source(input_path, discover_workspace(dependencies.repository.root))
+    citation = Citation(
+        number=1,
+        concept_id=source.concept_id,
+        start_line=1,
+        end_line=1,
+    )
+    valid_draft = DraftConcept(
+        operation=ChangeOperation.CREATE,
+        path=source.concept_id,
+        type=ConceptType.SOURCE,
+        title="Notes",
+        description="Source evidence.",
+        body="# Notes\n\nEvidence [1].\n",
+        citations=[citation],
+    )
+    if invalid_kind == "markdown-suffix":
+        invalid_draft = valid_draft.model_copy(update={"path": f"{source.concept_id}.md"})
+    else:
+        invalid_draft = valid_draft.model_copy(update={"body": "# Notes\n\nEvidence.\n"})
+    invalid_change_set = ChangeSet(
+        summary="Invalid first proposal.",
+        source_sha256=source.sha256,
+        drafts=[invalid_draft],
+    )
+    valid_change_set = ChangeSet(
+        summary="Repaired proposal.",
+        source_sha256=source.sha256,
+        drafts=[valid_draft],
+    )
+    responses = (invalid_change_set, valid_change_set)
+    calls = 0
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        response = responses[min(calls, len(responses) - 1)]
+        calls += 1
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args=response.model_dump(mode="json"),
+                )
+            ]
+        )
+
+    output, read_ids = await run_ingestion_agent(FunctionModel(respond), dependencies, source)
+
+    assert calls == 2
+    assert output == valid_change_set
+    assert read_ids == frozenset()
+
+
+async def test_ingestion_runner_sanitizes_exhausted_domain_retries(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("Evidence.\n", encoding="utf-8")
+    source = load_raw_source(input_path, discover_workspace(dependencies.repository.root))
+    invalid_change_set = ChangeSet(
+        summary="Invalid proposal.",
+        source_sha256=source.sha256,
+        drafts=[
+            DraftConcept(
+                operation=ChangeOperation.CREATE,
+                path=f"{source.concept_id}.md",
+                type=ConceptType.SOURCE,
+                title="Notes",
+                description="Source evidence.",
+                body="# Notes\n",
+            )
+        ],
+    )
+    calls = 0
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args=invalid_change_set.model_dump(mode="json"),
+                )
+            ]
+        )
+
+    with pytest.raises(AgentRunError, match="could not produce a proposal") as caught:
+        await run_ingestion_agent(FunctionModel(respond), dependencies, source)
+
+    assert calls == 3
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 async def test_ingestion_runner_drops_sensitive_provider_exception_chains(
