@@ -7,12 +7,18 @@ from typing import Any
 from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, Model
 
-from bundlewalker.agents.common import AgentDependencies, frame_untrusted_data, read_tools
+from bundlewalker.agents.common import (
+    AgentDependencies,
+    frame_untrusted_data,
+    metadata_for_agent,
+    read_tools,
+)
 from bundlewalker.domain import (
     MAX_ANSWER_BODY_CHARACTERS,
     MAX_CITATIONS,
     MAX_TITLE_CHARACTERS,
     CitedAnswer,
+    OkfDocument,
 )
 from bundlewalker.errors import AgentRunError, UsageError
 from bundlewalker.okf.repository import OkfRepository
@@ -25,13 +31,15 @@ _MAX_CITATION_DIGITS = len(str(_MAX_CITATION_NUMBER))
 _MAX_CITATION_MARKERS = 1_000
 
 
-def create_query_agent(model: AgentModel) -> Agent[AgentDependencies, CitedAnswer]:
+def create_query_agent(
+    model: AgentModel,
+    *,
+    refresh: bool = False,
+) -> Agent[AgentDependencies, CitedAnswer]:
     """Create the provider-neutral query agent with read-only knowledge tools."""
-    instructions = (
-        resources.files("bundlewalker.agents.prompts")
-        .joinpath("query.md")
-        .read_text(encoding="utf-8")
-    )
+    instructions = _read_prompt("query.md")
+    if refresh:
+        instructions += "\n\n" + _read_prompt("query-refresh.md")
     return Agent(
         model,
         deps_type=AgentDependencies,
@@ -48,6 +56,31 @@ async def run_query_agent(
     question: str,
 ) -> tuple[CitedAnswer, frozenset[str]]:
     """Answer one question and verify citations against this run's read ledger."""
+    return await _run_query_agent(model, dependencies, question, refresh_target=None)
+
+
+async def run_refresh_query_agent(
+    model: AgentModel,
+    dependencies: AgentDependencies,
+    question: str,
+    refresh_target: OkfDocument,
+) -> tuple[CitedAnswer, frozenset[str]]:
+    """Revise one synthesis using explicit untrusted prior context and fresh citations."""
+    return await _run_query_agent(
+        model,
+        dependencies,
+        question,
+        refresh_target=refresh_target,
+    )
+
+
+async def _run_query_agent(
+    model: AgentModel,
+    dependencies: AgentDependencies,
+    question: str,
+    *,
+    refresh_target: OkfDocument | None,
+) -> tuple[CitedAnswer, frozenset[str]]:
     if not question.strip():
         raise UsageError("question must not be empty")
 
@@ -66,8 +99,17 @@ async def run_query_agent(
             "content": question,
         },
     }
+    if refresh_target is not None:
+        payload["refresh_target"] = {
+            "concept_id": refresh_target.concept_id,
+            "metadata": metadata_for_agent(refresh_target.metadata),
+            "body": {
+                "character_count": len(refresh_target.body),
+                "content": refresh_target.body,
+            },
+        }
     try:
-        result = await create_query_agent(model).run(
+        result = await create_query_agent(model, refresh=refresh_target is not None).run(
             frame_untrusted_data(payload),
             deps=dependencies,
         )
@@ -76,8 +118,19 @@ async def run_query_agent(
     else:
         run_reads = frozenset(dependencies.read_ids).difference(previous_reads)
         validate_cited_answer(result.output, dependencies.repository, run_reads)
+        if refresh_target is not None:
+            _validate_no_refresh_self_citation(result.output, refresh_target.concept_id)
         return result.output, frozenset(run_reads)
     raise AgentRunError("query agent could not produce an answer") from None
+
+
+def _read_prompt(name: str) -> str:
+    return resources.files("bundlewalker.agents.prompts").joinpath(name).read_text(encoding="utf-8")
+
+
+def _validate_no_refresh_self_citation(answer: CitedAnswer, concept_id: str) -> None:
+    if any(citation.concept_id == concept_id for citation in answer.citations):
+        raise AgentRunError(f"refreshed synthesis cannot cite itself: {concept_id}")
 
 
 def validate_cited_answer(

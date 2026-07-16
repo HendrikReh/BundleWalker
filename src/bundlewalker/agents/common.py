@@ -143,7 +143,7 @@ def read_concept(
         body = document.body[:_MAX_BODY_CHARACTERS]
         result = ReadResult(
             concept_id=document.concept_id,
-            metadata=_metadata_for_tool(document.metadata),
+            metadata=metadata_for_agent(document.metadata),
             body=body,
             links=list(document.links),
             digest=document.digest,
@@ -183,7 +183,7 @@ def _summary_entry(summary: ConceptSummary) -> ConceptEntry:
     )
 
 
-def _metadata_for_tool(metadata: OkfMetadata) -> dict[str, Any]:
+def metadata_for_agent(metadata: OkfMetadata) -> dict[str, Any]:
     """Recursively normalize permissive metadata into deterministic JSON values."""
     value = _normalize_json_value(metadata.model_dump(mode="python"))
     if not isinstance(value, dict):

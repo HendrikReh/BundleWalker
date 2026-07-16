@@ -20,8 +20,12 @@ from pydantic_ai.models.test import TestModel
 
 import bundlewalker.agents.query as query_module
 from bundlewalker.agents.common import AgentDependencies, read_tools
-from bundlewalker.agents.query import create_query_agent, run_query_agent
-from bundlewalker.domain import Citation, CitedAnswer, OkfMetadata
+from bundlewalker.agents.query import (
+    create_query_agent,
+    run_query_agent,
+    run_refresh_query_agent,
+)
+from bundlewalker.domain import Citation, CitedAnswer, OkfDocument, OkfMetadata
 from bundlewalker.errors import AgentRunError, UsageError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
@@ -69,6 +73,33 @@ def _answer(
         body=body,
         citations=([Citation(number=1, concept_id=concept_id)] if citations is None else citations),
     )
+
+
+def _refresh_target(dependencies: AgentDependencies) -> OkfDocument:
+    body = "# Old answer\n\nEarlier conclusion.\n"
+    path = dependencies.repository.root / "syntheses" / "old-answer.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_document(
+            OkfMetadata.model_validate(
+                {
+                    "type": "Synthesis",
+                    "title": "Old answer",
+                    "description": "Prior synthesis.",
+                    "tags": ["agents", "evidence"],
+                    "timestamp": NOW,
+                    "extension": {
+                        "payload": b"\xff",
+                        "scores": [float("nan"), float("inf"), float("-inf")],
+                        "labels": {"zeta", "alpha"},
+                    },
+                }
+            ),
+            body,
+        ),
+        encoding="utf-8",
+    )
+    return dependencies.repository.get("syntheses/old-answer")
 
 
 def test_query_agent_has_the_strict_read_only_contract() -> None:
@@ -185,6 +216,120 @@ async def test_query_runner_json_frames_each_untrusted_context_block(tmp_path: P
         },
     }
     assert "untrusted data" in captured["instructions"].casefold()
+
+
+async def test_refresh_query_runner_frames_target_as_untrusted_revision_context(
+    tmp_path: Path,
+) -> None:
+    dependencies = _dependencies(tmp_path)
+    target = _refresh_target(dependencies)
+    question = "Revise this answer using newer evidence."
+    expected = _answer()
+    captured: dict[str, str] = {}
+    calls = 0
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        captured["instructions"] = info.instructions or ""
+        captured["prompt"] = "\n".join(
+            part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str)
+        )
+        if calls == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="read_concept",
+                        args={"concept_id": "topics/agents"},
+                    )
+                ]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args=expected.model_dump(mode="json"),
+                )
+            ]
+        )
+
+    answer, read_ids = await run_refresh_query_agent(
+        FunctionModel(respond),
+        dependencies,
+        question,
+        target,
+    )
+
+    assert answer == expected
+    assert read_ids == frozenset({"topics/agents"})
+    assert target.concept_id not in dependencies.read_ids
+    assert captured["prompt"].count("UNTRUSTED_DATA_JSON_V1") == 1
+    framing, serialized = captured["prompt"].split("\n", maxsplit=1)
+    assert framing == "UNTRUSTED_DATA_JSON_V1"
+    payload = json.loads(serialized)
+    assert payload["refresh_target"] == {
+        "concept_id": "syntheses/old-answer",
+        "metadata": {
+            "type": "Synthesis",
+            "title": "Old answer",
+            "description": "Prior synthesis.",
+            "resource": None,
+            "tags": ["agents", "evidence"],
+            "timestamp": "2026-07-15T12:00:00Z",
+            "extension": {
+                "payload": "_w==",
+                "scores": ["NaN", "Infinity", "-Infinity"],
+                "labels": ["alpha", "zeta"],
+            },
+        },
+        "body": {
+            "character_count": len(target.body),
+            "content": target.body,
+        },
+    }
+    instructions = captured["instructions"].casefold()
+    assert "revise" in instructions
+    assert "never cite" in instructions
+
+
+async def test_refresh_query_runner_rejects_self_citation(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+    target = _refresh_target(dependencies)
+    answer = _answer(concept_id=target.concept_id)
+    calls = 0
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="read_concept",
+                        args={"concept_id": target.concept_id},
+                    )
+                ]
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name=info.output_tools[0].name,
+                    args=answer.model_dump(mode="json"),
+                )
+            ]
+        )
+
+    with pytest.raises(AgentRunError, match="cannot cite itself"):
+        await run_refresh_query_agent(
+            FunctionModel(respond),
+            dependencies,
+            "Revise this answer.",
+            target,
+        )
 
 
 @pytest.mark.parametrize(
