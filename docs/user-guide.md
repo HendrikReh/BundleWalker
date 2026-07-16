@@ -310,16 +310,21 @@ replacement title and body with fresh citations to other live concepts read duri
 Preparation does not make a second model call. The target cannot cite itself.
 
 Refresh keeps the same concept path, so inbound links remain valid. The visible title, body, and
-citations may change, while the existing description, tags, and metadata extensions (extra
-frontmatter fields) are preserved. BundleWalker records the target digest and refuses to overwrite
-it if another process or editor changes it before preparation or commit.
+citations may change. Existing description, tags, and metadata extensions (extra frontmatter
+fields) are preserved when present and representable by the replacement producer. A missing
+description uses `A saved answer to a knowledge query.`, and an accepted replacement uses the
+operation time as its timestamp, including when the target had no timestamp. Preserved metadata
+fields outside supported producer limits are rejected before model use. BundleWalker records the
+target digest and refuses to overwrite it if another process or editor changes it before
+preparation or commit.
 
 For a changed result, BundleWalker shows the rendered answer followed by the complete replacement
 diff. Answer `y` to apply it through the recoverable transaction path. Answer `n`, press Ctrl-C,
 or end input to discard it without changing live knowledge. Acceptance updates the page,
 generated indexes when needed, and `wiki/log.md` with a `Refreshed synthesis:` entry.
 
-If the refreshed title, body, and citations are already canonically identical, the command prints:
+Only when the complete canonical replacement—content, citations, and all rendered metadata—matches
+the existing Synthesis does the command print:
 
 ```text
 Synthesis is already current; no changes applied.

@@ -376,16 +376,21 @@ replacement title and body with fresh citations to other live concepts read duri
 Preparation does not make a second model call. The target cannot cite itself.
 
 Refresh keeps the same concept path, so inbound links remain valid. The visible title, body, and
-citations may change, while the existing description, tags, and metadata extensions (extra
-frontmatter fields) are preserved. BundleWalker records the target digest and refuses to overwrite
-it if another process or editor changes it before preparation or commit.
+citations may change. Existing description, tags, and metadata extensions (extra frontmatter
+fields) are preserved when present and representable by the replacement producer. A missing
+description uses `A saved answer to a knowledge query.`, and an accepted replacement uses the
+operation time as its timestamp, including when the target had no timestamp. Preserved metadata
+fields outside supported producer limits are rejected before model use. BundleWalker records the
+target digest and refuses to overwrite it if another process or editor changes it before
+preparation or commit.
 
 For a changed result, BundleWalker shows the rendered answer followed by the complete replacement
 diff. Answer `y` to apply it through the recoverable transaction path. Answer `n`, press Ctrl-C,
 or end input to discard it without changing live knowledge. Acceptance updates the page,
 generated indexes when needed, and `wiki/log.md` with a `Refreshed synthesis:` entry.
 
-If the refreshed title, body, and citations are already canonically identical, the command prints:
+Only when the complete canonical replacement—content, citations, and all rendered metadata—matches
+the existing Synthesis does the command print:
 
 ```text
 Synthesis is already current; no changes applied.
@@ -600,11 +605,28 @@ from bundlewalker.cli import app
 from bundlewalker.conventions import ConventionsStyle
 
 guide_path = Path("docs/user-guide.md")
+plan_path = Path("docs/superpowers/plans/2026-07-16-end-user-guide.md")
 guide = guide_path.read_text(encoding="utf-8")
+plan = plan_path.read_text(encoding="utf-8")
 readme = Path("README.md").read_text(encoding="utf-8")
 
 assert "[BundleWalker User Guide](docs/user-guide.md)" in readme
 assert guide.startswith("# BundleWalker User Guide\n")
+
+embedded_guide_start_marker = (
+    "Create `docs/user-guide.md` with exactly:\n\n````markdown\n"
+)
+embedded_guide_end_marker = (
+    "\n````\n\n- [ ] **Step 3: Link the guide from the README**"
+)
+assert plan.count(embedded_guide_start_marker) == 1
+assert plan.count(embedded_guide_end_marker) == 1
+embedded_start = plan.index(embedded_guide_start_marker) + len(
+    embedded_guide_start_marker
+)
+embedded_end = plan.index(embedded_guide_end_marker, embedded_start)
+embedded_guide = plan[embedded_start:embedded_end] + "\n"
+assert embedded_guide == guide, "embedded end-user guide has drifted from docs/user-guide.md"
 
 commands = ("init", "ingest", "ask", "lint")
 runner = CliRunner()

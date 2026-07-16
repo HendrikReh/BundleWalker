@@ -133,12 +133,15 @@ uv run bundlewalker ask \
 
 The existing Synthesis is supplied as untrusted revision context. One query-agent run returns a
 complete replacement title, body, and citations to other live concepts read during that run.
-The concept path remains stable, and BundleWalker preserves the existing description, tags, and
-metadata extensions (extra frontmatter fields). It then shows the full replacement diff; only
-acceptance updates the wiki, generated indexes, and `wiki/log.md`. The target digest protects
-against concurrent edits, so a changed Synthesis is never silently overwritten.
+The concept path remains stable. BundleWalker preserves existing description, tags, and metadata
+extensions when they are present and representable; a missing description gets the normal saved-
+answer fallback, and an accepted replacement receives the operation timestamp. It then shows the
+full replacement diff; only acceptance updates the wiki, generated indexes, and `wiki/log.md`.
+The target digest protects against concurrent edits, so a changed Synthesis is never silently
+overwritten.
 
-If the canonical replacement is already identical, BundleWalker prints
+If the complete canonical replacement, including all rendered metadata, is already identical,
+BundleWalker prints
 `Synthesis is already current; no changes applied.` without opening a review prompt, creating
 transaction state, changing a timestamp, or adding a log entry. A `SEM-STALE` advisory can suggest
 that a refresh is worth reviewing, but semantic lint never starts or authorizes one automatically.
@@ -254,9 +257,9 @@ uv run ruff check src tests
 uv run pyright
 ```
 
-Five small live-model quality cases cover faithful summarization, cross-source topic updates,
-contradiction preservation, cited answers, and Synthesis refresh quality. They are skipped unless
-an evaluation model is explicitly selected:
+The opt-in suite includes small live-model quality cases for faithful summarization, cross-source
+topic updates, contradiction preservation, and cited answers. They are skipped unless an
+evaluation model is explicitly selected:
 
 ```bash
 BUNDLEWALKER_EVAL_MODEL='<pydantic-ai-model-string>' uv run pytest -m eval -v
