@@ -107,6 +107,7 @@ The four supported commands form one operating loop:
 | `ingest` | Propose knowledge from one source | Yes, unless the bytes are already ingested | Only after acceptance | Yes, for a new proposal |
 | `ask` | Answer a cited question | Yes | No | No |
 | `ask --save` | Answer and propose a Synthesis page | Yes | Only after acceptance | Yes |
+| `ask --refresh` | Revise one existing Synthesis in place | Yes | Only after acceptance | Yes, unless already current |
 | `lint` | Run deterministic wiki checks | No | No knowledge edits | No |
 | `lint --semantic` | Add read-only semantic advisories | Yes | No knowledge edits | No |
 
@@ -324,6 +325,7 @@ The no-op happens before model resolution, so it neither needs nor calls a model
 
 ```text
 bundlewalker ask [OPTIONS] QUESTION
+bundlewalker ask QUESTION --refresh SYNTHESIS_ID
 ```
 
 Searches and reads the compiled wiki, then prints a Markdown answer whose citations target
@@ -333,6 +335,7 @@ concepts read during that query.
 | --- | --- | --- | --- |
 | `--model` | PydanticAI model string | `BUNDLEWALKER_MODEL` | Override the model for this invocation |
 | `--save` | flag | off | Propose a new Synthesis page from the validated answer |
+| `--refresh` | `SYNTHESIS_ID` | off | Propose an in-place replacement of one existing Synthesis |
 | `--help` | — | — | Show command help |
 
 Plain `ask` is read-only:
@@ -352,6 +355,45 @@ uv run --project "$PROJECT_ROOT" bundlewalker ask --save \
 
 Saving reuses the already validated answer; it does not make a second model call. Query answers
 cite existing concepts, while evidence line spans belong to ingestion-created knowledge.
+
+Use `--refresh` with an explicit revision instruction and the existing Synthesis concept ID,
+without the `.md` suffix:
+
+```bash
+uv run --project "$PROJECT_ROOT" bundlewalker ask \
+  'Refresh this decision framework using the newer comparative evidence.' \
+  --refresh syntheses/decision-framework
+```
+
+`--save` and `--refresh` are mutually exclusive. Before model resolution or provider use,
+BundleWalker requires a canonical `syntheses/<lowercase-ascii-slug>` ID, an existing target, and
+the exact metadata type `Synthesis`. An unsafe, missing, wrong-type, or unsupported target is a
+usage error and creates no transaction state.
+
+The existing Synthesis is included as separately framed, untrusted revision context; it is not an
+instruction or an automatically valid citation. One model-backed query run produces a complete
+replacement title and body with fresh citations to other live concepts read during that run.
+Preparation does not make a second model call. The target cannot cite itself.
+
+Refresh keeps the same concept path, so inbound links remain valid. The visible title, body, and
+citations may change, while the existing description, tags, and metadata extensions (extra
+frontmatter fields) are preserved. BundleWalker records the target digest and refuses to overwrite
+it if another process or editor changes it before preparation or commit.
+
+For a changed result, BundleWalker shows the rendered answer followed by the complete replacement
+diff. Answer `y` to apply it through the recoverable transaction path. Answer `n`, press Ctrl-C,
+or end input to discard it without changing live knowledge. Acceptance updates the page,
+generated indexes when needed, and `wiki/log.md` with a `Refreshed synthesis:` entry.
+
+If the refreshed title, body, and citations are already canonically identical, the command prints:
+
+```text
+Synthesis is already current; no changes applied.
+```
+
+This successful no-op opens no review prompt and creates no transaction state, timestamp-only
+change, mutation, or log entry. A semantic `SEM-STALE` finding can motivate an explicit refresh,
+but it remains advisory: lint does not start, approve, or apply a refresh.
 
 ### `lint`
 
@@ -444,7 +486,7 @@ back an authenticated transaction that was already reviewed before an earlier in
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success, duplicate-ingest no-op, declined or interrupted review, or lint with only warnings and semantic advisories |
+| `0` | Success, duplicate-ingest or already-current refresh no-op, declined or interrupted review, or lint with only warnings and semantic advisories |
 | `1` | Model/provider failure, invalid model output, source or OKF validation error, deterministic lint error, transaction failure, or unrecoverable workspace state |
 | `2` | Command usage or configuration error, including a missing model for an agent-backed operation |
 
@@ -493,7 +535,16 @@ checking the source, conventions, selected model, and concise error message.
 ### Semantic lint reports an error but exits 0
 
 Semantic severities are advisory by design. Only deterministic lint errors control the exit
-status. Run plain `lint` to isolate deterministic health.
+status. Run plain `lint` to isolate deterministic health. A `SEM-STALE` finding may be a useful
+reason to run an explicit `ask ... --refresh SYNTHESIS_ID`, but lint does not authorize or perform
+that write.
+
+### A Synthesis refresh is rejected
+
+Pass the canonical concept ID without `.md`, for example `syntheses/decision-framework`. The
+target must already exist with exact metadata type `Synthesis`, and `--refresh` cannot be combined
+with `--save`. If the target changed while the model or review was running, start a new refresh so
+the next proposal is based on the current content; BundleWalker will not overwrite the newer edit.
 
 ### An earlier command was interrupted
 
@@ -564,8 +615,17 @@ for command in commands:
     assert f"### `{command}`" in guide
     help_result = runner.invoke(app, [command, "--help"])
     assert help_result.exit_code == 0, help_result.output
+    if command == "ask":
+        assert "--refresh" in help_result.output
 
-for option in ("--conventions-style", "--model", "--save", "--semantic", "--help"):
+for option in (
+    "--conventions-style",
+    "--model",
+    "--save",
+    "--refresh",
+    "--semantic",
+    "--help",
+):
     assert option in guide
 
 documented_styles = {
@@ -589,6 +649,8 @@ assert set(contents_links) == headings
 assert "openai:gpt-5.6-luna" in guide
 assert "replace-with-your-openai-api-key" in guide
 assert "created when the first reviewed write is staged" in guide
+assert "--refresh SYNTHESIS_ID" in guide
+assert "Synthesis is already current; no changes applied." in guide
 assert "sk-" not in guide
 assert "\t" not in guide
 assert guide.endswith("\n")

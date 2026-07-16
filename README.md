@@ -58,10 +58,10 @@ uv run --project .. bundlewalker ask --save 'Why review changes before persisten
 uv run --project .. bundlewalker lint --semantic
 ```
 
-`ingest` and `ask --save` print a summary and complete prospective wiki diff, then prompt before
-any model-derived knowledge is persisted. Answer `n`, press Ctrl-C, or end the prompt to discard
-the proposal with a successful unchanged outcome. A saved answer uses the already validated
-answer; it does not make a second model call.
+`ingest`, `ask --save`, and `ask --refresh` print a summary and complete prospective wiki diff,
+then prompt before any model-derived knowledge is persisted. Answer `n`, press Ctrl-C, or end the
+prompt to discard the proposal with a successful unchanged outcome. Saving or refreshing uses the
+already validated answer; proposal preparation does not make a second model call.
 
 ## Commands
 
@@ -111,6 +111,7 @@ model.
 ```bash
 uv run bundlewalker ask QUESTION [--model MODEL]
 uv run bundlewalker ask --save QUESTION [--model MODEL]
+uv run bundlewalker ask QUESTION --refresh SYNTHESIS_ID [--model MODEL]
 ```
 
 Plain `ask` reads the compiled wiki and prints a Markdown answer with citations; it does not
@@ -118,6 +119,29 @@ write the workspace. Every citation must target an existing concept that the que
 read. `--save` converts that same validated answer into one create-only Synthesis proposal and
 uses the normal diff and confirmation path. Query answers cite concepts, not raw-source line
 spans; line spans are reserved for evidence citations created during ingestion.
+
+`--refresh` revises one existing Synthesis in place from the explicit `QUESTION`. The target must
+be a canonical ID such as `syntheses/decision-framework`, must exist, and must have exact metadata
+type `Synthesis`; BundleWalker checks these requirements before resolving or calling a model.
+`--save` and `--refresh` are mutually exclusive.
+
+```bash
+uv run bundlewalker ask \
+  'Refresh this decision framework using the newer comparative evidence.' \
+  --refresh syntheses/decision-framework
+```
+
+The existing Synthesis is supplied as untrusted revision context. One query-agent run returns a
+complete replacement title, body, and citations to other live concepts read during that run.
+The concept path remains stable, and BundleWalker preserves the existing description, tags, and
+metadata extensions (extra frontmatter fields). It then shows the full replacement diff; only
+acceptance updates the wiki, generated indexes, and `wiki/log.md`. The target digest protects
+against concurrent edits, so a changed Synthesis is never silently overwritten.
+
+If the canonical replacement is already identical, BundleWalker prints
+`Synthesis is already current; no changes applied.` without opening a review prompt, creating
+transaction state, changing a timestamp, or adding a log entry. A `SEM-STALE` advisory can suggest
+that a refresh is worth reviewing, but semantic lint never starts or authorizes one automatically.
 
 ### Lint the knowledge bundle
 
@@ -230,9 +254,9 @@ uv run ruff check src tests
 uv run pyright
 ```
 
-Four small live-model quality cases cover faithful summarization, cross-source topic updates,
-contradiction preservation, and cited answers. They are skipped unless an evaluation model is
-explicitly selected:
+Five small live-model quality cases cover faithful summarization, cross-source topic updates,
+contradiction preservation, cited answers, and Synthesis refresh quality. They are skipped unless
+an evaluation model is explicitly selected:
 
 ```bash
 BUNDLEWALKER_EVAL_MODEL='<pydantic-ai-model-string>' uv run pytest -m eval -v
