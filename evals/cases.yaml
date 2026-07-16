@@ -102,6 +102,9 @@
   refresh_target: syntheses/decision-framework-for-repository-guidance
   required_citations:
     - topics/repository-guidance-controlled-comparison
+  expected_phrases:
+    - controlled
+    - limitation
   qualification:
     scope_anchor_groups:
       - [three, '3']

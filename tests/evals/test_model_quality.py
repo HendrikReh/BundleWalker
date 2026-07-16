@@ -105,7 +105,7 @@ class QualityCase(BaseModel):
         default=None,
         pattern=r"^syntheses/[a-z0-9]+(?:-[a-z0-9]+)*$",
     )
-    expected_phrases: list[str] = Field(default_factory=list[str])
+    expected_phrases: list[str] = Field(min_length=1)
     required_citations: list[str] = Field(default_factory=list[str])
     qualification: QualificationExpectation | None = None
     minimum_shared_source_citations: int = Field(default=0, ge=0)

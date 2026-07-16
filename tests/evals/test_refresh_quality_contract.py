@@ -12,6 +12,25 @@ CONTROLLED_EVIDENCE = "topics/repository-guidance-controlled-comparison"
 CASE_NAME = "stale-synthesis-refresh"
 
 
+def test_refresh_case_preserves_required_phrase_contract() -> None:
+    assert _live_refresh_case().expected_phrases == ["controlled", "limitation"]
+
+
+@pytest.mark.parametrize(
+    "expected_phrases",
+    [pytest.param(None, id="missing"), pytest.param([], id="empty")],
+)
+def test_refresh_case_requires_expected_phrases(expected_phrases: list[str] | None) -> None:
+    value = _refresh_case_value()
+    if expected_phrases is None:
+        value.pop("expected_phrases")
+    else:
+        value["expected_phrases"] = expected_phrases
+
+    with pytest.raises(ValidationError, match="expected_phrases"):
+        QualityCase.model_validate(value)
+
+
 def test_refresh_case_allows_an_unrelated_synthesis_fixture() -> None:
     value = _refresh_case_value()
     concepts = cast(list[dict[str, str]], value["concepts"])
@@ -461,10 +480,14 @@ def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_lite
 
 
 def _refresh_case_value() -> dict[str, object]:
-    return cast(dict[str, object], _qualified_refresh_case().model_dump(mode="python"))
+    return cast(dict[str, object], _live_refresh_case().model_dump(mode="python"))
 
 
 def _qualified_refresh_case() -> QualityCase:
+    return _live_refresh_case().model_copy(update={"expected_phrases": []})
+
+
+def _live_refresh_case() -> QualityCase:
     matches = [case for case in quality.CASES if case.name == CASE_NAME]
     assert len(matches) == 1, f"expected exactly one {CASE_NAME} evaluation case"
     case = matches[0]
