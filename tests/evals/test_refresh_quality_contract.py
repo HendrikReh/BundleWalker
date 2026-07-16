@@ -168,6 +168,65 @@ def test_refresh_quality_rejects_affirmative_extension_after_a_caveat() -> None:
         )
 
 
+def test_refresh_quality_scopes_uncertainty_in_an_although_clause() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Although broader "
+        "applicability is uncertain, the findings apply to all repositories."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_scopes_uncertainty_in_a_despite_clause() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Despite uncertain transfer "
+        "beyond the sample, the findings transfer universally."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_universally_applicable_after_a_caveat() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader applicability is "
+        "uncertain. Nevertheless, the result is universally applicable across every repository."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_accepts_extension_uncertainty() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader extension beyond "
+        "this sample remains unclear."
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
 def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_literal() -> None:
     case = _qualified_refresh_case()
     answer = _answer(

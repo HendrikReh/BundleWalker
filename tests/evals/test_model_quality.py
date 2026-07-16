@@ -54,6 +54,7 @@ class QualificationExpectation(BaseModel):
 
     scope_anchor_groups: list[list[str]] = Field(min_length=1)
     clause_boundary_patterns: list[str] = Field(min_length=1)
+    concessive_prefixes: list[str] = Field(min_length=1)
     uncertainty_patterns: list[str] = Field(min_length=1)
     forbidden_overclaim_patterns: list[str] = Field(min_length=1)
 
@@ -64,6 +65,8 @@ class QualificationExpectation(BaseModel):
             for group in self.scope_anchor_groups
         ):
             raise ValueError("qualification anchor groups must contain non-empty alternatives")
+        if any(not prefix.strip() for prefix in self.concessive_prefixes):
+            raise ValueError("qualification concessive prefixes must not be empty")
         patterns = (
             self.clause_boundary_patterns
             + self.uncertainty_patterns
@@ -326,17 +329,22 @@ def _assert_refresh_qualification(
 ) -> None:
     normalized = " ".join(answer_body.casefold().split())
     clauses = _split_qualification_clauses(normalized, expectation.clause_boundary_patterns)
-    clause_states = [
-        (clause, _is_uncertainty_clause(clause, expectation.uncertainty_patterns))
+    assertion_spans = [
+        assertion
         for clause in clauses
+        for assertion in _split_concessive_assertions(clause, expectation.concessive_prefixes)
+    ]
+    assertion_states = [
+        (assertion, _is_uncertainty_assertion(assertion, expectation.uncertainty_patterns))
+        for assertion in assertion_spans
     ]
     forbidden = next(
         (
             pattern
-            for clause, is_uncertain in clause_states
+            for assertion, is_uncertain in assertion_states
             if not is_uncertain
             for pattern in expectation.forbidden_overclaim_patterns
-            if re.search(pattern, clause, flags=re.IGNORECASE)
+            if re.search(pattern, assertion, flags=re.IGNORECASE)
         ),
         None,
     )
@@ -356,7 +364,7 @@ def _assert_refresh_qualification(
     assert not missing_anchor_groups, (
         f"refresh answer is missing evidence-scope anchor groups: {missing_anchor_groups}"
     )
-    assert any(is_uncertain for _, is_uncertain in clause_states), (
+    assert any(is_uncertain for _, is_uncertain in assertion_states), (
         "refresh answer does not express the required uncertainty boundary"
     )
 
@@ -377,7 +385,27 @@ def _split_qualification_clauses(text: str, boundary_patterns: list[str]) -> lis
     return clauses
 
 
-def _is_uncertainty_clause(clause: str, uncertainty_patterns: list[str]) -> bool:
-    return clause.endswith("?") or any(
-        re.search(pattern, clause, flags=re.IGNORECASE) for pattern in uncertainty_patterns
+def _split_concessive_assertions(clause: str, concessive_prefixes: list[str]) -> list[str]:
+    for prefix in sorted(concessive_prefixes, key=len, reverse=True):
+        match = re.match(
+            rf"{re.escape(prefix.casefold())}(?=\W|$)",
+            clause,
+            flags=re.IGNORECASE,
+        )
+        if match is None:
+            continue
+        comma = clause.find(",", match.end())
+        if comma == -1:
+            return [clause]
+        concession = clause[:comma].strip()
+        assertion = clause[comma + 1 :].strip()
+        if concession and assertion:
+            return [concession, assertion]
+        return [clause]
+    return [clause]
+
+
+def _is_uncertainty_assertion(assertion: str, uncertainty_patterns: list[str]) -> bool:
+    return assertion.endswith("?") or any(
+        re.search(pattern, assertion, flags=re.IGNORECASE) for pattern in uncertainty_patterns
     )
