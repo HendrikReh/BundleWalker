@@ -59,3 +59,53 @@
   expected_phrases:
     - review
     - persistence
+
+- name: stale-synthesis-refresh
+  kind: refresh
+  concepts:
+    - path: topics/repository-guidance-practitioner-evidence
+      title: Repository guidance practitioner evidence
+      description: Earlier practitioner observations about repository-local agent guidance.
+      body: |
+        # Repository guidance practitioner evidence
+
+        Practitioner reports suggest that concise repository-local guidance can reduce
+        avoidable agent mistakes. The reports are observational and do not isolate guidance
+        from repository familiarity, task selection, or reviewer intervention.
+    - path: topics/repository-guidance-controlled-comparison
+      title: Repository guidance controlled comparison
+      description: A newer controlled comparison of repository guidance conditions.
+      body: |
+        # Repository guidance controlled comparison
+
+        A controlled comparison randomly assigned matched repository tasks to concise guidance
+        and no-guidance conditions. It measured task completion, verification failures, context
+        cost, and maintenance effort by task type. The guidance condition improved completion on
+        multi-file maintenance tasks but not on small localized edits.
+
+        The study has an explicit limitation: it covered three Python repositories over a
+        four-week period, so the result does not establish generalization across languages,
+        repository scales, high-stakes domains, or longer maintenance horizons.
+    - path: syntheses/decision-framework-for-repository-guidance
+      title: Decision framework for repository guidance
+      description: A provisional decision framework based on practitioner evidence.
+      body: |
+        # Decision framework for repository guidance
+
+        Repository-local guidance is most useful when agents repeatedly encounter project-specific
+        conventions. This provisional conclusion comes from practitioner reports and remains
+        observational.
+
+        # Citations
+
+        - [Repository guidance practitioner evidence](/topics/repository-guidance-practitioner-evidence.md)
+  refresh_target: syntheses/decision-framework-for-repository-guidance
+  required_citations:
+    - topics/repository-guidance-controlled-comparison
+  question: >-
+    Refresh this decision framework with the newer controlled comparison. Explain its explicit
+    limitation and do not overstate generalization beyond the studied repositories, task types,
+    language, or time horizon.
+  expected_phrases:
+    - controlled
+    - limitation
