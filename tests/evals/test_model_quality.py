@@ -56,6 +56,7 @@ class QualificationExpectation(BaseModel):
     clause_boundary_patterns: list[str] = Field(min_length=1)
     concessive_markers: list[str] = Field(min_length=1)
     coordinating_markers: list[str] = Field(min_length=1)
+    coordinated_qualification_patterns: list[str] = Field(min_length=1)
     concept_patterns: list[str] = Field(min_length=1)
     universal_scope_patterns: list[str] = Field(min_length=1)
     negation_patterns: list[str] = Field(min_length=1)
@@ -75,6 +76,7 @@ class QualificationExpectation(BaseModel):
             raise ValueError("qualification coordinating markers must not be empty")
         patterns = (
             self.clause_boundary_patterns
+            + self.coordinated_qualification_patterns
             + self.concept_patterns
             + self.universal_scope_patterns
             + self.negation_patterns
@@ -426,6 +428,8 @@ def _split_coordinated_assertions(
     assertion: str,
     expectation: QualificationExpectation,
 ) -> list[str]:
+    if _qualification_governs_coordination(assertion, expectation):
+        return [assertion]
     assertions = [assertion]
     index = 0
     while index < len(assertions):
@@ -435,6 +439,20 @@ def _split_coordinated_assertions(
         else:
             assertions[index : index + 1] = split
     return assertions
+
+
+def _qualification_governs_coordination(
+    assertion: str,
+    expectation: QualificationExpectation,
+) -> bool:
+    return (
+        _is_qualified_assertion(assertion, expectation)
+        and _first_matching_pattern(
+            assertion,
+            expectation.coordinated_qualification_patterns,
+        )
+        is not None
+    )
 
 
 def _split_one_coordination(

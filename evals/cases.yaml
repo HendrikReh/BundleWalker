@@ -123,6 +123,10 @@
       - but
       - yet
       - instead
+    coordinated_qualification_patterns:
+      - '\?$'
+      - '\b(?:uncertain|unclear|unknown|undetermined)\b.{0,80}\bwhether\b'
+      - '\bwhether\b.{0,160}\b(?:uncertain|unclear|unknown|undetermined)\b'
     concept_patterns:
       - '\bgenerali[sz]\w*\b'
       - '\bappl\w*\b'

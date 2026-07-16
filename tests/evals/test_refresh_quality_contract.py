@@ -375,6 +375,34 @@ def test_refresh_quality_rejects_universal_application_after_separate_uncertaint
         )
 
 
+def test_refresh_quality_accepts_a_question_governing_coordinated_predicates() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Do the findings apply to "
+        "all repositories and transfer to every language?"
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
+def test_refresh_quality_accepts_whether_uncertainty_governing_coordinated_predicates() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. It is uncertain whether the "
+        "findings generalize to all languages and apply to every repository."
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
 def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_literal() -> None:
     case = _qualified_refresh_case()
     answer = _answer(
