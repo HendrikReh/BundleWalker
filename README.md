@@ -152,7 +152,7 @@ my-knowledge/
 │   ├── topics/
 │   ├── entities/
 │   └── syntheses/
-└── .bundlewalker/
+└── .bundlewalker/  # created when the first reviewed write is staged
     ├── transaction.lock
     └── transactions/
 ```
@@ -167,9 +167,9 @@ file but cannot propose edits to it.
 The initialization presets are starting points only. BundleWalker does not remember, enforce, or
 upgrade the selected style after creating the workspace.
 
-`.bundlewalker/` contains only temporary transaction journals and a coordination lock. It is not
-knowledge content and is safe to delete when no BundleWalker command or interrupted transaction
-is active.
+`.bundlewalker/` is created when the first reviewed write is staged. It contains only temporary
+transaction journals and a coordination lock. It is not knowledge content and is safe to delete
+when no BundleWalker command or interrupted transaction is active.
 
 ## Exit codes
 

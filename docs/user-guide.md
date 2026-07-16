@@ -167,7 +167,7 @@ my-knowledge/
 │   ├── topics/
 │   ├── entities/
 │   └── syntheses/
-└── .bundlewalker/
+└── .bundlewalker/  # created when the first reviewed write is staged
     ├── transaction.lock
     └── transactions/
 ```
@@ -177,7 +177,8 @@ my-knowledge/
 - `conventions.md` is the editable instruction and schema layer supplied to every agent.
 - `raw/` holds exact accepted source bytes.
 - `wiki/` is the portable OKF bundle and canonical compiled knowledge layer.
-- `.bundlewalker/` holds temporary transaction state and a coordination lock, not knowledge.
+- `.bundlewalker/` is created when the first reviewed write is staged. It holds temporary
+  transaction state and a coordination lock, not knowledge.
 
 ## Command reference
 

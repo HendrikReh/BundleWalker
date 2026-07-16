@@ -233,7 +233,7 @@ my-knowledge/
 │   ├── topics/
 │   ├── entities/
 │   └── syntheses/
-└── .bundlewalker/
+└── .bundlewalker/  # created when the first reviewed write is staged
     ├── transaction.lock
     └── transactions/
 ```
@@ -243,7 +243,8 @@ my-knowledge/
 - `conventions.md` is the editable instruction and schema layer supplied to every agent.
 - `raw/` holds exact accepted source bytes.
 - `wiki/` is the portable OKF bundle and canonical compiled knowledge layer.
-- `.bundlewalker/` holds temporary transaction state and a coordination lock, not knowledge.
+- `.bundlewalker/` is created when the first reviewed write is staged. It holds temporary
+  transaction state and a coordination lock, not knowledge.
 
 ## Command reference
 
@@ -587,6 +588,7 @@ assert set(contents_links) == headings
 
 assert "openai:gpt-5.6-luna" in guide
 assert "replace-with-your-openai-api-key" in guide
+assert "created when the first reviewed write is staged" in guide
 assert "sk-" not in guide
 assert "\t" not in guide
 assert guide.endswith("\n")
