@@ -8,12 +8,27 @@ import pytest
 
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
-from bundlewalker.domain import MAX_ANSWER_BODY_CHARACTERS, Citation, CitedAnswer, OkfMetadata
-from bundlewalker.errors import AgentRunError
+from bundlewalker.domain import (
+    MAX_ANSWER_BODY_CHARACTERS,
+    Citation,
+    CitedAnswer,
+    OkfDocument,
+    OkfMetadata,
+)
+from bundlewalker.errors import AgentRunError, ChangeSetError, UsageError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
+from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import PreparedTransaction, discard_transaction
-from bundlewalker.workflows.ask import AnsweredQuestion, answer_question, prepare_synthesis
+from bundlewalker.workflows.ask import (
+    AnsweredQuestion,
+    AnsweredSynthesisRefresh,
+    SynthesisAlreadyCurrent,
+    answer_question,
+    answer_synthesis_refresh,
+    prepare_synthesis,
+    prepare_synthesis_refresh,
+)
 from bundlewalker.workspace import Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
@@ -51,6 +66,44 @@ def _answer(title: str = "Résumé of Agent Design") -> CitedAnswer:
     return CitedAnswer(
         title=title,
         body="# Answer\n\nAgents can use tools [1].\n",
+        citations=[Citation(number=1, concept_id="topics/agents")],
+    )
+
+
+def _write_refresh_target(
+    workspace: Workspace,
+    *,
+    concept_id: str = "syntheses/current-agent-framework",
+    concept_type: str = "Synthesis",
+) -> OkfDocument:
+    target = workspace.wiki_dir / f"{concept_id}.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    metadata = OkfMetadata.model_validate(
+        {
+            "type": concept_type,
+            "title": "Current Agent Framework",
+            "description": "A maintained decision framework.",
+            "tags": ["agents", "decision-framework"],
+            "timestamp": NOW,
+            "owner": "hendrik",
+        }
+    )
+    target.write_text(
+        render_document(
+            metadata,
+            "# Current answer\n\nAgents can use tools [1].\n\n"
+            "# Citations\n\n[1] [Agents](/topics/agents.md)\n",
+        ),
+        encoding="utf-8",
+    )
+    regenerate_indexes(workspace.wiki_dir)
+    return OkfRepository(workspace.wiki_dir).get(concept_id)
+
+
+def _refreshed_answer() -> CitedAnswer:
+    return CitedAnswer(
+        title="Updated Agent Framework",
+        body="# Updated answer\n\nCurrent evidence supports tool use [1].\n",
         citations=[Citation(number=1, concept_id="topics/agents")],
     )
 
@@ -281,3 +334,307 @@ def test_invalid_synthesis_answer_does_not_leave_a_staged_transaction(tmp_path: 
         prepare_synthesis(workspace, answered, occurred_at=NOW)
 
     assert _tree_bytes(workspace.root) == before
+
+
+@pytest.mark.parametrize(
+    "concept_id",
+    [
+        "syntheses/Current-Agent-Framework",
+        "syntheses/current-agent-framework.md",
+        "syntheses/current_agent_framework",
+        "syntheses/../topics/agents",
+        "topics/agents",
+    ],
+)
+async def test_refresh_rejects_noncanonical_target_before_model_resolution(
+    tmp_path: Path,
+    concept_id: str,
+) -> None:
+    workspace = _workspace(tmp_path)
+    before = _tree_bytes(workspace.root)
+    calls = 0
+
+    async def runner(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    with pytest.raises(UsageError, match="canonical Synthesis concept ID"):
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            concept_id,
+            explicit_model=None,
+            environment={},
+            runner=runner,
+        )
+
+    assert calls == 0
+    assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()
+
+
+async def test_refresh_rejects_missing_target_before_model_resolution(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    before = _tree_bytes(workspace.root)
+    calls = 0
+
+    async def runner(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    with pytest.raises(UsageError, match="does not exist"):
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            "syntheses/missing",
+            explicit_model=None,
+            environment={},
+            runner=runner,
+        )
+
+    assert calls == 0
+    assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()
+
+
+async def test_refresh_rejects_non_synthesis_target_before_model_resolution(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target_id = "syntheses/not-a-synthesis"
+    _write_refresh_target(workspace, concept_id=target_id, concept_type="Topic")
+    before = _tree_bytes(workspace.root)
+    calls = 0
+
+    async def runner(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    with pytest.raises(UsageError, match="not a Synthesis"):
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target_id,
+            explicit_model=None,
+            environment={},
+            runner=runner,
+        )
+
+    assert calls == 0
+    assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()
+
+
+async def test_answer_refresh_passes_exact_target_and_verifies_actual_reads(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    expected_target = _write_refresh_target(workspace)
+    received_targets: list[OkfDocument] = []
+
+    async def runner(
+        model: AgentModel,
+        dependencies: AgentDependencies,
+        question: str,
+        target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        assert model == "test:model"
+        assert question == "Refresh using current evidence."
+        received_targets.append(target)
+        dependencies.read_ids.add("topics/agents")
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    result = await answer_synthesis_refresh(
+        workspace,
+        "Refresh using current evidence.",
+        expected_target.concept_id,
+        explicit_model="test:model",
+        environment={},
+        runner=runner,
+    )
+
+    assert received_targets == [expected_target]
+    assert result == AnsweredSynthesisRefresh(
+        answer=_refreshed_answer(),
+        read_ids=frozenset({"topics/agents"}),
+        target=received_targets[0],
+    )
+
+
+async def test_answer_refresh_rejects_runner_read_history_mismatch(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add("topics/agents")
+        return _refreshed_answer(), frozenset()
+
+    with pytest.raises(AgentRunError, match="read history"):
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target.concept_id,
+            explicit_model="test:model",
+            environment={},
+            runner=runner,
+        )
+
+
+async def test_answer_refresh_rejects_self_citation_from_injected_runner(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    self_citing = CitedAnswer(
+        title="Circular update",
+        body="The previous synthesis already answers this [1].",
+        citations=[Citation(number=1, concept_id=target.concept_id)],
+    )
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add(target.concept_id)
+        return self_citing, frozenset({target.concept_id})
+
+    with pytest.raises(AgentRunError, match="cannot cite itself") as caught:
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target.concept_id,
+            explicit_model="test:model",
+            environment={},
+            runner=runner,
+        )
+
+    assert caught.value.__cause__ is None
+
+
+async def test_prepare_refresh_builds_one_digest_protected_replace_without_second_model_call(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    calls = 0
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+        received_target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        assert received_target == target
+        dependencies.read_ids.add("topics/agents")
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    answered = await answer_synthesis_refresh(
+        workspace,
+        "Refresh this synthesis.",
+        target.concept_id,
+        explicit_model="test:model",
+        environment={},
+        runner=runner,
+    )
+
+    transaction = prepare_synthesis_refresh(workspace, answered, occurred_at=NOW)
+
+    assert calls == 1
+    assert isinstance(transaction, PreparedTransaction)
+    assert transaction.change_set.summary == "Refreshed synthesis: Updated Agent Framework"
+    assert transaction.change_set.source_sha256 is None
+    assert len(transaction.change_set.drafts) == 1
+    draft = transaction.change_set.drafts[0]
+    assert draft.operation == "replace"
+    assert draft.path == target.concept_id
+    assert draft.type == "Synthesis"
+    assert draft.title == "Updated Agent Framework"
+    assert draft.description == "A maintained decision framework."
+    assert draft.tags == ["agents", "decision-framework"]
+    assert draft.body == _refreshed_answer().body
+    assert draft.citations == _refreshed_answer().citations
+    assert draft.base_digest == target.digest
+    rendered = (
+        transaction.prospective_wiki / "syntheses" / "current-agent-framework.md"
+    ).read_text(encoding="utf-8")
+    assert "title: Updated Agent Framework" in rendered
+    assert "owner: hendrik" in rendered
+    assert "Current evidence supports tool use [1]." in rendered
+    assert "[1] [Agents](/topics/agents.md)" in rendered
+    discard_transaction(transaction)
+
+
+def test_prepare_refresh_rejects_target_changed_since_answer_without_staging(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    answered = AnsweredSynthesisRefresh(
+        answer=_refreshed_answer(),
+        read_ids=frozenset({"topics/agents"}),
+        target=target,
+    )
+    target.path.write_text(
+        render_document(
+            target.metadata,
+            "# Concurrent edit\n\nAgents can use tools differently [1].\n\n"
+            "# Citations\n\n[1] [Agents](/topics/agents.md)\n",
+        ),
+        encoding="utf-8",
+    )
+    regenerate_indexes(workspace.wiki_dir)
+    before = _tree_bytes(workspace.root)
+
+    with pytest.raises(ChangeSetError, match="stale base digest"):
+        prepare_synthesis_refresh(workspace, answered, occurred_at=NOW)
+
+    assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()
+
+
+def test_prepare_equivalent_refresh_is_canonical_no_op(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    answered = AnsweredSynthesisRefresh(
+        answer=CitedAnswer(
+            title="Current Agent Framework",
+            body="# Current answer\n\nAgents can use tools [1].\n",
+            citations=[Citation(number=1, concept_id="topics/agents")],
+        ),
+        read_ids=frozenset({"topics/agents"}),
+        target=target,
+    )
+    before = _tree_bytes(workspace.root)
+
+    result = prepare_synthesis_refresh(workspace, answered, occurred_at=NOW)
+
+    assert result == SynthesisAlreadyCurrent(target.concept_id)
+    assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()

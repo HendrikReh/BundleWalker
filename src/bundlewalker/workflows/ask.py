@@ -13,17 +13,20 @@ from bundlewalker.agents.common import AgentDependencies, resolve_model
 from bundlewalker.agents.query import (
     AgentModel,
     run_query_agent,
+    run_refresh_query_agent,
     validate_cited_answer,
 )
-from bundlewalker.changes import ChangeValidationContext, validate_change_set
+from bundlewalker.changes import ChangeValidationContext, render_draft, validate_change_set
 from bundlewalker.domain import (
     ChangeOperation,
     ChangeSet,
     CitedAnswer,
     ConceptType,
     DraftConcept,
+    OkfDocument,
 )
 from bundlewalker.errors import AgentRunError, OkfError, UsageError, WorkspaceError
+from bundlewalker.okf.documents import document_digest
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
 from bundlewalker.transactions import PreparedTransaction, prepare_transaction, recover_transactions
@@ -39,12 +42,31 @@ type QueryRunner = Callable[
     [AgentModel, AgentDependencies, str],
     Awaitable[tuple[CitedAnswer, frozenset[str]]],
 ]
+type RefreshQueryRunner = Callable[
+    [AgentModel, AgentDependencies, str, OkfDocument],
+    Awaitable[tuple[CitedAnswer, frozenset[str]]],
+]
+
+_CANONICAL_SYNTHESIS_ID = re.compile(r"^syntheses/[a-z0-9]+(?:-[a-z0-9]+)*$")
+_DEFAULT_SYNTHESIS_DESCRIPTION = "A saved answer to a knowledge query."
 
 
 @dataclass(frozen=True, slots=True)
 class AnsweredQuestion:
     answer: CitedAnswer
     read_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class AnsweredSynthesisRefresh:
+    answer: CitedAnswer
+    read_ids: frozenset[str]
+    target: OkfDocument
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesisAlreadyCurrent:
+    concept_id: str
 
 
 async def answer_question(
@@ -61,24 +83,9 @@ async def answer_question(
         raise UsageError("question must not be empty")
 
     validate_repository_path(workspace)
-    conventions = read_context(
-        workspace,
-        workspace.config.conventions_file,
-        "workspace conventions",
-    )
-    root_index = read_context(
-        workspace,
-        (PurePosixPath(workspace.config.wiki_dir) / "index.md").as_posix(),
-        "root index",
-    )
     repository = OkfRepository(workspace.wiki_dir)
+    dependencies = _query_dependencies(workspace, repository)
     model = resolve_model(explicit_model, environment if environment is not None else os.environ)
-    dependencies = AgentDependencies(
-        repository=repository,
-        retriever=LexicalRetriever(repository),
-        conventions=conventions,
-        root_index=root_index,
-    )
     selected_runner = runner if runner is not None else run_query_agent
     answer, reported_reads = await selected_runner(model, dependencies, question)
     actual_reads = frozenset(dependencies.read_ids)
@@ -86,6 +93,39 @@ async def answer_question(
         raise AgentRunError("query runner read history does not match the actual read ledger")
     validate_cited_answer(answer, repository, actual_reads)
     return AnsweredQuestion(answer=answer, read_ids=actual_reads)
+
+
+async def answer_synthesis_refresh(
+    workspace: Workspace,
+    question: str,
+    concept_id: str,
+    *,
+    explicit_model: str | None,
+    environment: Mapping[str, str] | None = None,
+    runner: RefreshQueryRunner | None = None,
+) -> AnsweredSynthesisRefresh:
+    """Recover, validate one refresh target, then run one cited revision query."""
+    recover_transactions(workspace)
+    if not question.strip():
+        raise UsageError("question must not be empty")
+
+    validate_repository_path(workspace)
+    repository = OkfRepository(workspace.wiki_dir)
+    target = _load_refresh_target(repository, concept_id)
+    dependencies = _query_dependencies(workspace, repository)
+    model = resolve_model(explicit_model, environment if environment is not None else os.environ)
+    selected_runner = runner if runner is not None else run_refresh_query_agent
+    answer, reported_reads = await selected_runner(model, dependencies, question, target)
+    actual_reads = frozenset(dependencies.read_ids)
+    if reported_reads != actual_reads:
+        raise AgentRunError("query runner read history does not match the actual read ledger")
+    _validate_no_refresh_self_citation(answer, target.concept_id)
+    validate_cited_answer(answer, repository, actual_reads)
+    return AnsweredSynthesisRefresh(
+        answer=answer,
+        read_ids=actual_reads,
+        target=target,
+    )
 
 
 def prepare_synthesis(
@@ -105,7 +145,7 @@ def prepare_synthesis(
         path=f"syntheses/{slug}",
         type=ConceptType.SYNTHESIS,
         title=answered.answer.title,
-        description="A saved answer to a knowledge query.",
+        description=_DEFAULT_SYNTHESIS_DESCRIPTION,
         tags=["synthesis"],
         body=answered.answer.body,
         citations=answered.answer.citations,
@@ -126,6 +166,55 @@ def prepare_synthesis(
         context,
         None,
         occurred_at or datetime.now(UTC),
+    )
+
+
+def prepare_synthesis_refresh(
+    workspace: Workspace,
+    refresh: AnsweredSynthesisRefresh,
+    *,
+    occurred_at: datetime | None = None,
+) -> PreparedTransaction | SynthesisAlreadyCurrent:
+    """Build one reviewed in-place Synthesis replacement, or report a canonical no-op."""
+    recover_transactions(workspace)
+    validate_repository_path(workspace)
+    repository = OkfRepository(workspace.wiki_dir)
+    validate_cited_answer(refresh.answer, repository, refresh.read_ids)
+    _validate_no_refresh_self_citation(refresh.answer, refresh.target.concept_id)
+    description = refresh.target.metadata.description
+    draft = DraftConcept(
+        operation=ChangeOperation.REPLACE,
+        path=refresh.target.concept_id,
+        type=ConceptType.SYNTHESIS,
+        title=refresh.answer.title,
+        description=(description if description is not None else _DEFAULT_SYNTHESIS_DESCRIPTION),
+        tags=list(refresh.target.metadata.tags),
+        body=refresh.answer.body,
+        citations=refresh.answer.citations,
+        base_digest=refresh.target.digest,
+    )
+    change_set = ChangeSet(
+        summary=f"Refreshed synthesis: {refresh.answer.title}",
+        drafts=[draft],
+    )
+    context = ChangeValidationContext(
+        mode="synthesis",
+        repository=repository,
+        readable_concepts=refresh.read_ids,
+    )
+    validate_change_set(change_set, context)
+
+    actual_occurred_at = occurred_at or datetime.now(UTC)
+    comparison_time = refresh.target.metadata.timestamp or actual_occurred_at
+    canonical = render_draft(draft, context, occurred_at=comparison_time)
+    if document_digest(canonical.encode("utf-8")) == refresh.target.digest:
+        return SynthesisAlreadyCurrent(refresh.target.concept_id)
+    return prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        None,
+        actual_occurred_at,
     )
 
 
@@ -172,3 +261,44 @@ def _available_synthesis_slug(workspace: Workspace, title: str) -> str:
         if f"{slug}.md".casefold() not in occupied:
             return slug
         suffix += 1
+
+
+def _query_dependencies(
+    workspace: Workspace,
+    repository: OkfRepository,
+) -> AgentDependencies:
+    conventions = read_context(
+        workspace,
+        workspace.config.conventions_file,
+        "workspace conventions",
+    )
+    root_index = read_context(
+        workspace,
+        (PurePosixPath(workspace.config.wiki_dir) / "index.md").as_posix(),
+        "root index",
+    )
+    return AgentDependencies(
+        repository=repository,
+        retriever=LexicalRetriever(repository),
+        conventions=conventions,
+        root_index=root_index,
+    )
+
+
+def _load_refresh_target(repository: OkfRepository, concept_id: str) -> OkfDocument:
+    if _CANONICAL_SYNTHESIS_ID.fullmatch(concept_id) is None:
+        raise UsageError(
+            "refresh target must be a canonical Synthesis concept ID "
+            f"syntheses/<lowercase-ascii-slug>: {concept_id}"
+        )
+    target = repository.scan().get(concept_id)
+    if target is None:
+        raise UsageError(f"refresh target does not exist: {concept_id}")
+    if target.metadata.type != ConceptType.SYNTHESIS.value:
+        raise UsageError(f"refresh target is not a Synthesis: {concept_id}")
+    return target
+
+
+def _validate_no_refresh_self_citation(answer: CitedAnswer, concept_id: str) -> None:
+    if any(citation.concept_id == concept_id for citation in answer.citations):
+        raise AgentRunError(f"refreshed synthesis cannot cite itself: {concept_id}")
