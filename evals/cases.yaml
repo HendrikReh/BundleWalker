@@ -108,14 +108,17 @@
       - [repository, repositories, repo, repos]
       - [python]
       - [four weeks, 4 weeks, four-week, 4-week, one month, month-long]
+    clause_boundary_patterns:
+      - '(?<=[.!?;])\s+'
+      - '\s+(?:but|however|nevertheless|nonetheless|yet)\b[:,]?\s*'
     uncertainty_patterns:
       - '\b(?:not|cannot|uncertain|unknown|insufficient|unclear)\b.{0,100}\b(?:generali[sz]|transfer|appl|extend)'
       - '\b(?:generali[sz]|transfer|appl|extend)\w*.{0,100}\b(?:not|uncertain|unknown|unsupported|unestablished|unclear)\b'
     forbidden_overclaim_patterns:
       - '\bno (?:meaningful )?limitations?\b'
       - '\bproves?.{0,40}\buniversal(?:ly)?\b'
-      - '\bgenerali[sz]es? (?:universally|to all|across all)\b'
-      - '(?<!not )(?<!n''t )\b(?:apply|applies|applicable)\s+to\s+(?:all|every)\b'
+      - '\b(?:generali[sz]\w*|transfer\w*|extend\w*)\s+(?:universally|to\s+(?:all|every)|across\s+(?:all|every))\b'
+      - '\b(?:apply|applies|applicable)\s+to\s+(?:all|every)\b'
   question: >-
     Refresh this decision framework with the newer controlled comparison. Explain its explicit
     limitation and do not overstate generalization beyond the studied repositories, task types,

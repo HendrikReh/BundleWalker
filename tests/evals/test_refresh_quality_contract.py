@@ -9,6 +9,7 @@ from tests.evals.test_model_quality import QualityCase
 
 TARGET = "syntheses/decision-framework-for-repository-guidance"
 CONTROLLED_EVIDENCE = "topics/repository-guidance-controlled-comparison"
+CASE_NAME = "stale-synthesis-refresh"
 
 
 def test_refresh_case_allows_an_unrelated_synthesis_fixture() -> None:
@@ -108,6 +109,65 @@ def test_refresh_quality_rejects_universal_application_after_valid_caveats() -> 
         )
 
 
+def test_refresh_quality_accepts_applicability_uncertainty() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. It remains unclear whether "
+        "the findings apply to all repositories."
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
+def test_refresh_quality_accepts_an_applicability_question() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Do the findings apply to "
+        "all repositories?"
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
+def test_refresh_quality_rejects_affirmative_transfer_after_a_caveat() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader transfer is "
+        "uncertain. Nevertheless, findings transfer universally to every repository and language."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_affirmative_extension_after_a_caveat() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader applicability "
+        "remains uncertain. However, the findings extend to all repositories, languages, and "
+        "time horizons."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
 def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_literal() -> None:
     case = _qualified_refresh_case()
     answer = _answer(
@@ -123,59 +183,15 @@ def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_lite
 
 
 def _refresh_case_value() -> dict[str, object]:
-    return {
-        "name": "refresh-contract",
-        "kind": "refresh",
-        "concepts": [
-            {
-                "path": CONTROLLED_EVIDENCE,
-                "title": "Repository guidance controlled comparison",
-                "description": "A controlled comparison with explicit scope boundaries.",
-                "body": (
-                    "# Controlled comparison\n\n"
-                    "Three Python repositories were studied for four weeks.\n"
-                ),
-            },
-            {
-                "path": TARGET,
-                "title": "Decision framework",
-                "description": "A framework that needs refreshing.",
-                "body": "# Decision framework\n\nEarlier practitioner evidence only.\n",
-            },
-        ],
-        "refresh_target": TARGET,
-        "question": "Refresh the framework without overstating the evidence.",
-        "expected_phrases": [],
-        "required_citations": [CONTROLLED_EVIDENCE],
-        "qualification": _qualification_value(),
-    }
+    return cast(dict[str, object], _qualified_refresh_case().model_dump(mode="python"))
 
 
 def _qualified_refresh_case() -> QualityCase:
-    return QualityCase.model_validate(_refresh_case_value())
-
-
-def _qualification_value() -> dict[str, object]:
-    return {
-        "scope_anchor_groups": [
-            ["three", "3"],
-            ["repository", "repositories", "repo", "repos"],
-            ["python"],
-            ["four weeks", "4 weeks", "four-week", "4-week", "one month", "month-long"],
-        ],
-        "uncertainty_patterns": [
-            r"\b(?:not|cannot|uncertain|unknown|insufficient|unclear)\b.{0,100}"
-            r"\b(?:generali[sz]|transfer|appl|extend)",
-            r"\b(?:generali[sz]|transfer|appl|extend)\w*.{0,100}"
-            r"\b(?:not|uncertain|unknown|unsupported|unestablished|unclear)\b",
-        ],
-        "forbidden_overclaim_patterns": [
-            r"\bno (?:meaningful )?limitations?\b",
-            r"\bproves?.{0,40}\buniversal(?:ly)?\b",
-            r"\bgenerali[sz]es? (?:universally|to all|across all)\b",
-            r"(?<!not )(?<!n't )\b(?:apply|applies|applicable)\s+to\s+(?:all|every)\b",
-        ],
-    }
+    matches = [case for case in quality.CASES if case.name == CASE_NAME]
+    assert len(matches) == 1, f"expected exactly one {CASE_NAME} evaluation case"
+    case = matches[0]
+    assert case.qualification is not None
+    return case
 
 
 def _answer(body: str) -> CitedAnswer:

@@ -53,6 +53,7 @@ class QualificationExpectation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scope_anchor_groups: list[list[str]] = Field(min_length=1)
+    clause_boundary_patterns: list[str] = Field(min_length=1)
     uncertainty_patterns: list[str] = Field(min_length=1)
     forbidden_overclaim_patterns: list[str] = Field(min_length=1)
 
@@ -63,7 +64,11 @@ class QualificationExpectation(BaseModel):
             for group in self.scope_anchor_groups
         ):
             raise ValueError("qualification anchor groups must contain non-empty alternatives")
-        patterns = self.uncertainty_patterns + self.forbidden_overclaim_patterns
+        patterns = (
+            self.clause_boundary_patterns
+            + self.uncertainty_patterns
+            + self.forbidden_overclaim_patterns
+        )
         if any(not pattern.strip() for pattern in patterns):
             raise ValueError("qualification patterns must not be empty")
         try:
@@ -320,11 +325,18 @@ def _assert_refresh_qualification(
     expectation: QualificationExpectation,
 ) -> None:
     normalized = " ".join(answer_body.casefold().split())
+    clauses = _split_qualification_clauses(normalized, expectation.clause_boundary_patterns)
+    clause_states = [
+        (clause, _is_uncertainty_clause(clause, expectation.uncertainty_patterns))
+        for clause in clauses
+    ]
     forbidden = next(
         (
             pattern
+            for clause, is_uncertain in clause_states
+            if not is_uncertain
             for pattern in expectation.forbidden_overclaim_patterns
-            if re.search(pattern, normalized, flags=re.IGNORECASE)
+            if re.search(pattern, clause, flags=re.IGNORECASE)
         ),
         None,
     )
@@ -344,7 +356,28 @@ def _assert_refresh_qualification(
     assert not missing_anchor_groups, (
         f"refresh answer is missing evidence-scope anchor groups: {missing_anchor_groups}"
     )
-    assert any(
-        re.search(pattern, normalized, flags=re.IGNORECASE)
-        for pattern in expectation.uncertainty_patterns
-    ), "refresh answer does not express the required uncertainty boundary"
+    assert any(is_uncertain for _, is_uncertain in clause_states), (
+        "refresh answer does not express the required uncertainty boundary"
+    )
+
+
+def _split_qualification_clauses(text: str, boundary_patterns: list[str]) -> list[str]:
+    boundaries = re.compile(
+        "|".join(f"(?:{pattern})" for pattern in boundary_patterns),
+        flags=re.IGNORECASE,
+    )
+    clauses: list[str] = []
+    start = 0
+    for boundary in boundaries.finditer(text):
+        if clause := text[start : boundary.start()].strip():
+            clauses.append(clause)
+        start = boundary.end()
+    if clause := text[start:].strip():
+        clauses.append(clause)
+    return clauses
+
+
+def _is_uncertainty_clause(clause: str, uncertainty_patterns: list[str]) -> bool:
+    return clause.endswith("?") or any(
+        re.search(pattern, clause, flags=re.IGNORECASE) for pattern in uncertainty_patterns
+    )
