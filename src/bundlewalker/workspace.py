@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
+from bundlewalker.conventions import ConventionsStyle, load_conventions
 from bundlewalker.errors import BundleWalkerError, ConfigurationError, UsageError, WorkspaceError
 from bundlewalker.okf.derived import prepend_log_entry, regenerate_indexes
 from bundlewalker.okf.lint import has_errors, lint_bundle
@@ -25,25 +26,6 @@ DEFAULT_CONFIG_TEXT = (
     'conventions_file = "conventions.md"\n'
     "max_source_characters = 100000\n"
 )
-DEFAULT_CONVENTIONS_TEXT = """# BundleWalker Conventions
-
-## Writing
-
-- Prefer concise, factual prose and descriptive headings.
-- Preserve uncertainty and record conflicting claims explicitly.
-- Link related concepts using OKF Markdown links.
-
-## Naming
-
-- Use stable, lowercase ASCII slugs for concept filenames.
-- Keep tags short, normalized, and relevant.
-
-## Knowledge maintenance
-
-- Source pages describe what an immutable source says.
-- Topic and Entity pages accumulate knowledge across sources.
-- Synthesis pages capture reviewed, question-driven conclusions.
-"""
 
 _SOURCE_CATEGORIES = ("sources", "topics", "entities", "syntheses")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -106,6 +88,7 @@ def discover_workspace(start: Path | None = None) -> Workspace:
 def initialize_workspace(
     path: Path,
     *,
+    conventions_style: ConventionsStyle = ConventionsStyle.DEFAULT,
     occurred_at: datetime | None = None,
 ) -> Workspace:
     root = path.expanduser().resolve(strict=False)
@@ -123,8 +106,9 @@ def initialize_workspace(
 
     try:
         root.mkdir(parents=True, exist_ok=not created_root)
+        conventions_text = load_conventions(conventions_style)
         (root / CONFIG_FILENAME).write_text(DEFAULT_CONFIG_TEXT, encoding="utf-8")
-        (root / "conventions.md").write_text(DEFAULT_CONVENTIONS_TEXT, encoding="utf-8")
+        (root / "conventions.md").write_text(conventions_text, encoding="utf-8")
         (root / "raw").mkdir()
         wiki_dir = root / "wiki"
         for category in _SOURCE_CATEGORIES:

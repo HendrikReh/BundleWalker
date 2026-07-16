@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+import bundlewalker.workspace as workspace_module
+from bundlewalker.conventions import ConventionsStyle, load_conventions
 from bundlewalker.errors import WorkspaceError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.lint import has_errors, lint_bundle
@@ -54,9 +56,57 @@ def test_initialize_writes_exact_default_config_and_discovery_walks_upward(
     assert (workspace.root / "bundlewalker.toml").read_text(encoding="utf-8") == (
         DEFAULT_CONFIG_TEXT
     )
+    assert workspace.conventions_file.read_text(encoding="utf-8") == load_conventions(
+        ConventionsStyle.DEFAULT
+    )
     assert discovered == workspace
     assert discovered.config.version == 1
     assert discovered.config.max_source_characters == 100_000
+
+
+@pytest.mark.parametrize("style", list(ConventionsStyle))
+def test_initialize_writes_selected_conventions_and_remains_lint_clean(
+    tmp_path: Path,
+    style: ConventionsStyle,
+) -> None:
+    workspace = initialize_workspace(
+        tmp_path / style.value,
+        conventions_style=style,
+    )
+
+    assert workspace.conventions_file.read_text(encoding="utf-8") == load_conventions(style)
+    assert not has_errors(lint_bundle(workspace.wiki_dir, workspace.root))
+
+
+@pytest.mark.parametrize("preexisting_root", [False, True])
+def test_initialize_rolls_back_a_conventions_loader_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preexisting_root: bool,
+) -> None:
+    root = tmp_path / "knowledge"
+    if preexisting_root:
+        root.mkdir()
+    sibling = tmp_path / "keep.txt"
+    sibling.write_text("keep", encoding="utf-8")
+
+    def fail_loader(_style: ConventionsStyle) -> str:
+        raise WorkspaceError("could not load conventions style: research-agent")
+
+    monkeypatch.setattr(workspace_module, "load_conventions", fail_loader)
+
+    with pytest.raises(WorkspaceError, match="could not load conventions style"):
+        initialize_workspace(
+            root,
+            conventions_style=ConventionsStyle.RESEARCH_AGENT,
+        )
+
+    if preexisting_root:
+        assert root.is_dir()
+        assert list(root.iterdir()) == []
+    else:
+        assert not root.exists()
+    assert sibling.read_text(encoding="utf-8") == "keep"
 
 
 def test_discovery_rejects_paths_outside_a_workspace(tmp_path: Path) -> None:
