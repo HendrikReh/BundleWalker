@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import bundlewalker.workflows.ask as ask_workflow
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
 from bundlewalker.domain import (
@@ -32,6 +33,7 @@ from bundlewalker.workflows.ask import (
 from bundlewalker.workspace import Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
+REFRESHED_AT = datetime(2026, 7, 16, 14, 30, tzinfo=UTC)
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
@@ -75,19 +77,22 @@ def _write_refresh_target(
     *,
     concept_id: str = "syntheses/current-agent-framework",
     concept_type: str = "Synthesis",
+    description: str | None = "A maintained decision framework.",
+    timestamp: datetime | None = NOW,
 ) -> OkfDocument:
     target = workspace.wiki_dir / f"{concept_id}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    metadata = OkfMetadata.model_validate(
-        {
-            "type": concept_type,
-            "title": "Current Agent Framework",
-            "description": "A maintained decision framework.",
-            "tags": ["agents", "decision-framework"],
-            "timestamp": NOW,
-            "owner": "hendrik",
-        }
-    )
+    metadata_values: dict[str, object] = {
+        "type": concept_type,
+        "title": "Current Agent Framework",
+        "tags": ["agents", "decision-framework"],
+        "owner": "hendrik",
+    }
+    if description is not None:
+        metadata_values["description"] = description
+    if timestamp is not None:
+        metadata_values["timestamp"] = timestamp
+    metadata = OkfMetadata.model_validate(metadata_values)
     target.write_text(
         render_document(
             metadata,
@@ -188,6 +193,52 @@ async def test_answer_recovers_authenticated_swap_before_query_runner(tmp_path: 
 
     assert result.answer == _answer()
     assert result.read_ids == frozenset({"topics/agents"})
+    assert _tree_bytes(workspace.wiki_dir) == expected_wiki
+    assert not prepared.transaction_dir.exists()
+
+
+async def test_refresh_recovers_authenticated_swap_before_target_validation_and_runner(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    prepared = prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=_answer("Interrupted synthesis"),
+            read_ids=frozenset({"topics/agents"}),
+        ),
+        occurred_at=NOW,
+    )
+    expected_wiki = _tree_bytes(workspace.wiki_dir)
+    _set_swapping_after_old(prepared)
+    assert not workspace.wiki_dir.exists()
+    assert prepared.backup_wiki.is_dir()
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+        received_target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        assert workspace.wiki_dir.is_dir()
+        assert not prepared.transaction_dir.exists()
+        assert received_target == target
+        assert dependencies.repository.get(target.concept_id) == target
+        dependencies.read_ids.add("topics/agents")
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    result = await answer_synthesis_refresh(
+        workspace,
+        "Refresh after recovery.",
+        target.concept_id,
+        explicit_model="test:model",
+        environment={},
+        runner=runner,
+    )
+
+    assert result.target == target
+    assert result.answer == _refreshed_answer()
     assert _tree_bytes(workspace.wiki_dir) == expected_wiki
     assert not prepared.transaction_dir.exists()
 
@@ -479,6 +530,48 @@ async def test_answer_refresh_passes_exact_target_and_verifies_actual_reads(
     )
 
 
+async def test_answer_refresh_uses_default_refresh_query_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    calls = 0
+
+    async def default_runner(
+        model: AgentModel,
+        dependencies: AgentDependencies,
+        question: str,
+        received_target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        assert model == "test:model"
+        assert dependencies.repository.root == workspace.wiki_dir
+        assert question == "Use the default refresh route."
+        assert received_target == target
+        dependencies.read_ids.add("topics/agents")
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    monkeypatch.setattr(ask_workflow, "run_refresh_query_agent", default_runner)
+
+    result = await answer_synthesis_refresh(
+        workspace,
+        "Use the default refresh route.",
+        target.concept_id,
+        explicit_model="test:model",
+        environment={},
+        runner=None,
+    )
+
+    assert calls == 1
+    assert result == AnsweredSynthesisRefresh(
+        answer=_refreshed_answer(),
+        read_ids=frozenset({"topics/agents"}),
+        target=target,
+    )
+
+
 async def test_answer_refresh_rejects_runner_read_history_mismatch(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     target = _write_refresh_target(workspace)
@@ -501,6 +594,39 @@ async def test_answer_refresh_rejects_runner_read_history_mismatch(tmp_path: Pat
             environment={},
             runner=runner,
         )
+
+
+async def test_answer_refresh_independently_rejects_nonexistent_citation(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    invalid = CitedAnswer(
+        title="Unsupported refresh",
+        body="This claim has no live support [1].",
+        citations=[Citation(number=1, concept_id="topics/missing")],
+    )
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add("topics/missing")
+        return invalid, frozenset({"topics/missing"})
+
+    with pytest.raises(AgentRunError, match="citation target does not exist") as caught:
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target.concept_id,
+            explicit_model="test:model",
+            environment={},
+            runner=runner,
+        )
+
+    assert caught.value.__cause__ is None
 
 
 async def test_answer_refresh_rejects_self_citation_from_injected_runner(
@@ -564,7 +690,7 @@ async def test_prepare_refresh_builds_one_digest_protected_replace_without_secon
         runner=runner,
     )
 
-    transaction = prepare_synthesis_refresh(workspace, answered, occurred_at=NOW)
+    transaction = prepare_synthesis_refresh(workspace, answered, occurred_at=REFRESHED_AT)
 
     assert calls == 1
     assert isinstance(transaction, PreparedTransaction)
@@ -588,6 +714,56 @@ async def test_prepare_refresh_builds_one_digest_protected_replace_without_secon
     assert "owner: hendrik" in rendered
     assert "Current evidence supports tool use [1]." in rendered
     assert "[1] [Agents](/topics/agents.md)" in rendered
+    refreshed = OkfRepository(transaction.prospective_wiki).get(target.concept_id)
+    assert refreshed.metadata.timestamp == REFRESHED_AT
+    assert refreshed.metadata.model_extra == {"owner": "hendrik"}
+    log = (transaction.prospective_wiki / "log.md").read_text(encoding="utf-8")
+    assert "## 2026-07-16" in log
+    assert "Refreshed synthesis: Updated Agent Framework" in log
+    discard_transaction(transaction)
+
+
+def test_prepare_refresh_uses_default_description_when_target_omits_it(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace, description=None)
+    assert target.metadata.description is None
+    answered = AnsweredSynthesisRefresh(
+        answer=_refreshed_answer(),
+        read_ids=frozenset({"topics/agents"}),
+        target=target,
+    )
+
+    transaction = prepare_synthesis_refresh(workspace, answered, occurred_at=REFRESHED_AT)
+
+    assert isinstance(transaction, PreparedTransaction)
+    draft = transaction.change_set.drafts[0]
+    assert draft.description == "A saved answer to a knowledge query."
+    refreshed = OkfRepository(transaction.prospective_wiki).get(target.concept_id)
+    assert refreshed.metadata.description == "A saved answer to a knowledge query."
+    assert refreshed.metadata.model_extra == {"owner": "hendrik"}
+    discard_transaction(transaction)
+
+
+def test_prepare_refresh_uses_occurred_at_when_target_omits_timestamp(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace, timestamp=None)
+    assert target.metadata.timestamp is None
+    answered = AnsweredSynthesisRefresh(
+        answer=_refreshed_answer(),
+        read_ids=frozenset({"topics/agents"}),
+        target=target,
+    )
+
+    transaction = prepare_synthesis_refresh(workspace, answered, occurred_at=REFRESHED_AT)
+
+    assert isinstance(transaction, PreparedTransaction)
+    refreshed = OkfRepository(transaction.prospective_wiki).get(target.concept_id)
+    assert refreshed.metadata.timestamp == REFRESHED_AT
+    assert refreshed.metadata.model_extra == {"owner": "hendrik"}
     discard_transaction(transaction)
 
 
