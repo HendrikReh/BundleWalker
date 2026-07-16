@@ -344,6 +344,37 @@ def test_concept_without_inbound_concept_links_is_an_orphan_warning(tmp_path: Pa
     ]
 
 
+def test_synthesis_without_inbound_links_is_not_an_orphan(tmp_path: Path) -> None:
+    root = _copy_fixture(tmp_path)
+    _write_concept(
+        root,
+        "syntheses/terminal-answer",
+        {
+            "type": "Synthesis",
+            "title": "Terminal answer",
+            "description": "A saved cited answer.",
+        },
+        "\n# Terminal answer\n\n[Agents](/topics/agents.md)\n",
+    )
+    _write_concept(
+        root,
+        "topics/unreferenced",
+        {
+            "type": "Topic",
+            "title": "Unreferenced",
+            "description": "No inbound links.",
+        },
+        "\n# Unreferenced\n\n[Agents](/topics/agents.md)\n",
+    )
+    regenerate_indexes(root)
+
+    findings = _findings_with_code(lint_bundle(root), "ORPHAN001")
+
+    assert [(finding.path, finding.severity) for finding in findings] == [
+        ("topics/unreferenced.md", Severity.WARNING)
+    ]
+
+
 def test_unknown_types_and_extra_metadata_are_accepted(tmp_path: Path) -> None:
     root = _copy_fixture(tmp_path)
     agents = root / "topics" / "agents.md"

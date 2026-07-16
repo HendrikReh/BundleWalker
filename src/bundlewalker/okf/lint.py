@@ -17,6 +17,7 @@ from bundlewalker.domain import (
     MAX_CITATIONS,
     MAX_LINT_MESSAGE_CHARACTERS,
     MAX_LINT_PATH_CHARACTERS,
+    ConceptType,
     FindingOrigin,
     LintFinding,
     OkfDocument,
@@ -409,6 +410,7 @@ def _lint_orphans(
         )
         for document in documents
         if inbound_counts[document.concept_id] == 0
+        and document.metadata.type != ConceptType.SYNTHESIS.value
     ]
 
 
