@@ -55,6 +55,7 @@ class QualificationExpectation(BaseModel):
     scope_anchor_groups: list[list[str]] = Field(min_length=1)
     clause_boundary_patterns: list[str] = Field(min_length=1)
     concessive_markers: list[str] = Field(min_length=1)
+    coordinating_markers: list[str] = Field(min_length=1)
     concept_patterns: list[str] = Field(min_length=1)
     universal_scope_patterns: list[str] = Field(min_length=1)
     negation_patterns: list[str] = Field(min_length=1)
@@ -70,6 +71,8 @@ class QualificationExpectation(BaseModel):
             raise ValueError("qualification anchor groups must contain non-empty alternatives")
         if any(not marker.strip() for marker in self.concessive_markers):
             raise ValueError("qualification concessive markers must not be empty")
+        if any(not marker.strip() for marker in self.coordinating_markers):
+            raise ValueError("qualification coordinating markers must not be empty")
         patterns = (
             self.clause_boundary_patterns
             + self.concept_patterns
@@ -335,10 +338,15 @@ def _assert_refresh_qualification(
 ) -> None:
     normalized = " ".join(answer_body.casefold().split())
     clauses = _split_qualification_clauses(normalized, expectation.clause_boundary_patterns)
-    assertion_spans = [
+    concessive_spans = [
         assertion
         for clause in clauses
         for assertion in _split_concessive_assertions(clause, expectation.concessive_markers)
+    ]
+    assertion_spans = [
+        assertion
+        for span in concessive_spans
+        for assertion in _split_coordinated_assertions(span, expectation)
     ]
     assertion_states = [
         (assertion, _is_qualified_assertion(assertion, expectation))
@@ -412,6 +420,47 @@ def _starts_with_concessive(assertion: str, concessive_markers: list[str]) -> bo
         )
         for marker in sorted(concessive_markers, key=len, reverse=True)
     )
+
+
+def _split_coordinated_assertions(
+    assertion: str,
+    expectation: QualificationExpectation,
+) -> list[str]:
+    assertions = [assertion]
+    index = 0
+    while index < len(assertions):
+        split = _split_one_coordination(assertions[index], expectation)
+        if split is None:
+            index += 1
+        else:
+            assertions[index : index + 1] = split
+    return assertions
+
+
+def _split_one_coordination(
+    assertion: str,
+    expectation: QualificationExpectation,
+) -> tuple[str, str] | None:
+    marker_pattern = "|".join(
+        re.escape(marker.casefold())
+        for marker in sorted(expectation.coordinating_markers, key=len, reverse=True)
+    )
+    boundaries = re.compile(
+        rf"\s+(?:{marker_pattern})\b[:,]?\s*",
+        flags=re.IGNORECASE,
+    )
+    for boundary in boundaries.finditer(assertion):
+        left = assertion[: boundary.start()].strip()
+        right = assertion[boundary.end() :].strip()
+        if not left or not right:
+            continue
+        left_qualified = _is_qualified_assertion(left, expectation)
+        right_qualified = _is_qualified_assertion(right, expectation)
+        left_has_concept = _first_matching_pattern(left, expectation.concept_patterns) is not None
+        right_has_concept = _first_matching_pattern(right, expectation.concept_patterns) is not None
+        if (left_qualified and right_has_concept) or (right_qualified and left_has_concept):
+            return left, right
+    return None
 
 
 def _is_qualified_assertion(

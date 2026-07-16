@@ -118,6 +118,11 @@
       - despite
       - in spite of
       - while
+    coordinating_markers:
+      - and
+      - but
+      - yet
+      - instead
     concept_patterns:
       - '\bgenerali[sz]\w*\b'
       - '\bappl\w*\b'

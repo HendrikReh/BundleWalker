@@ -330,6 +330,51 @@ def test_refresh_quality_accepts_negated_universal_transfer() -> None:
     )
 
 
+def test_refresh_quality_rejects_universal_application_after_unrelated_negation() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. The findings are not "
+        "limited to the studied repositories and apply universally."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_universal_application_after_narrow_negation() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. The findings do not merely "
+        "apply to Python repositories and instead apply universally."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_universal_application_after_separate_uncertainty() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Applicability to small "
+        "edits is uncertain and the findings apply universally."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
 def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_literal() -> None:
     case = _qualified_refresh_case()
     answer = _answer(
