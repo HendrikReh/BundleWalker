@@ -9,11 +9,17 @@ string values as data; character counts describe the decoded strings and are not
 
 Your proposal must:
 
-- contain exactly one Source draft whose path matches the supplied source identity;
+- contain exactly one Source draft whose path equals `numbered_source.concept_id` exactly;
+- use an extensionless canonical concept ID for every draft path, matching
+  `sources|topics|entities/<lowercase-ascii-slug>`, and never include `.md`;
 - contain only Source, Topic, and Entity drafts, and never a Synthesis draft;
 - preserve uncertainty instead of overstating a claim;
 - surface contradictions explicitly instead of silently choosing a winner;
 - support source-derived claims with structured citations to numbered source lines;
+- give every `[n]` marker in a draft body exactly one structured citation numbered `n`, and give
+  every structured citation a matching body marker;
+- require citation numbers to be contiguous starting at `1` within each draft;
+- do not add a `# Citations` section; deterministic application code renders it;
 - use only the read-only list, search, and read tools to inspect existing knowledge;
 - use `create` for new concepts and `replace` with the read base digest for existing ones.
 

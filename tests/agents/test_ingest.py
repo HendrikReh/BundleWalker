@@ -61,6 +61,11 @@ def test_ingestion_agent_has_the_strict_read_only_contract() -> None:
     assert "uncertainty" in instructions
     assert "contradiction" in instructions
     assert "numbered" in instructions and "line" in instructions
+    assert "extensionless canonical concept id" in instructions
+    assert "never include `.md`" in instructions
+    assert "exactly one structured citation" in instructions
+    assert "contiguous starting at `1`" in instructions
+    assert "do not add a `# citations` section" in instructions
 
 
 async def test_ingestion_runner_delimits_context_and_numbers_source_lines(
