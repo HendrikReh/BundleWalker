@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
+from pydantic import ValidationError
+
 from bundlewalker.agents.common import AgentDependencies, resolve_model
 from bundlewalker.agents.query import (
     AgentModel,
@@ -25,7 +27,13 @@ from bundlewalker.domain import (
     DraftConcept,
     OkfDocument,
 )
-from bundlewalker.errors import AgentRunError, OkfError, UsageError, WorkspaceError
+from bundlewalker.errors import (
+    AgentRunError,
+    ChangeSetError,
+    OkfError,
+    UsageError,
+    WorkspaceError,
+)
 from bundlewalker.okf.documents import document_digest
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
@@ -208,6 +216,7 @@ def prepare_synthesis_refresh(
     comparison_time = refresh.target.metadata.timestamp or actual_occurred_at
     canonical = render_draft(draft, context, occurred_at=comparison_time)
     if document_digest(canonical.encode("utf-8")) == refresh.target.digest:
+        _require_current_refresh_target(repository, refresh.target)
         return SynthesisAlreadyCurrent(refresh.target.concept_id)
     return prepare_transaction(
         workspace,
@@ -296,9 +305,46 @@ def _load_refresh_target(repository: OkfRepository, concept_id: str) -> OkfDocum
         raise UsageError(f"refresh target does not exist: {concept_id}")
     if target.metadata.type != ConceptType.SYNTHESIS.value:
         raise UsageError(f"refresh target is not a Synthesis: {concept_id}")
+    _validate_refresh_target_metadata(target)
     return target
 
 
+def _validate_refresh_target_metadata(target: OkfDocument) -> None:
+    try:
+        DraftConcept(
+            operation=ChangeOperation.REPLACE,
+            path=target.concept_id,
+            type=ConceptType.SYNTHESIS,
+            title="Refresh target",
+            description=(
+                target.metadata.description
+                if target.metadata.description is not None
+                else _DEFAULT_SYNTHESIS_DESCRIPTION
+            ),
+            tags=list(target.metadata.tags),
+            body="Refresh target.",
+            base_digest=target.digest,
+        )
+    except ValidationError:
+        raise UsageError("refresh target metadata exceeds supported producer limits") from None
+
+
+def _require_current_refresh_target(
+    repository: OkfRepository,
+    target: OkfDocument,
+) -> None:
+    try:
+        current = repository.scan().get(target.concept_id)
+    except OkfError:
+        current = None
+    if current is None or current.digest != target.digest:
+        raise ChangeSetError(f"replace target has a stale base digest: {target.concept_id}")
+
+
 def _validate_no_refresh_self_citation(answer: CitedAnswer, concept_id: str) -> None:
-    if any(citation.concept_id == concept_id for citation in answer.citations):
+    try:
+        cites_self = any(citation.concept_id == concept_id for citation in answer.citations)
+    except Exception:
+        raise AgentRunError("query citations could not be checked") from None
+    if cites_self:
         raise AgentRunError(f"refreshed synthesis cannot cite itself: {concept_id}")

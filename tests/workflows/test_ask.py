@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -9,10 +10,12 @@ import pytest
 import bundlewalker.workflows.ask as ask_workflow
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
+from bundlewalker.changes import ChangeValidationContext
 from bundlewalker.domain import (
     MAX_ANSWER_BODY_CHARACTERS,
     Citation,
     CitedAnswer,
+    DraftConcept,
     OkfDocument,
     OkfMetadata,
 )
@@ -77,15 +80,17 @@ def _write_refresh_target(
     *,
     concept_id: str = "syntheses/current-agent-framework",
     concept_type: str = "Synthesis",
+    title: str = "Current Agent Framework",
     description: str | None = "A maintained decision framework.",
     timestamp: datetime | None = NOW,
+    tags: list[str] | None = None,
 ) -> OkfDocument:
     target = workspace.wiki_dir / f"{concept_id}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     metadata_values: dict[str, object] = {
         "type": concept_type,
-        "title": "Current Agent Framework",
-        "tags": ["agents", "decision-framework"],
+        "title": title,
+        "tags": tags if tags is not None else ["agents", "decision-framework"],
         "owner": "hendrik",
     }
     if description is not None:
@@ -494,6 +499,94 @@ async def test_refresh_rejects_non_synthesis_target_before_model_resolution(
     assert not (workspace.root / ".bundlewalker").exists()
 
 
+@pytest.mark.parametrize(
+    ("concept_id", "description", "tags"),
+    [
+        ("syntheses/oversized-description", "x" * 1_001, None),
+        ("syntheses/empty-tag", "A maintained decision framework.", [""]),
+        ("syntheses/oversized-tag", "A maintained decision framework.", ["x" * 81]),
+        (
+            "syntheses/too-many-tags",
+            "A maintained decision framework.",
+            [f"tag-{index}" for index in range(33)],
+        ),
+        (
+            f"syntheses/{'a' * 231}",
+            "A maintained decision framework.",
+            None,
+        ),
+    ],
+)
+async def test_refresh_rejects_preserved_metadata_outside_producer_limits_before_model(
+    tmp_path: Path,
+    concept_id: str,
+    description: str,
+    tags: list[str] | None,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(
+        workspace,
+        concept_id=concept_id,
+        description=description,
+        tags=tags,
+    )
+    before = _tree_bytes(workspace.root)
+    calls = 0
+
+    async def runner(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    with pytest.raises(UsageError, match="metadata exceeds supported producer limits") as caught:
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target.concept_id,
+            explicit_model=None,
+            environment={},
+            runner=runner,
+        )
+
+    assert caught.value.__cause__ is None
+    assert calls == 0
+    assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()
+
+
+async def test_refresh_prevalidation_allows_oversized_historical_title(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace, title="x" * 301)
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+        received_target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        assert received_target == target
+        dependencies.read_ids.add("topics/agents")
+        return _refreshed_answer(), frozenset({"topics/agents"})
+
+    result = await answer_synthesis_refresh(
+        workspace,
+        "Replace the historical title.",
+        target.concept_id,
+        explicit_model="test:model",
+        environment={},
+        runner=runner,
+    )
+
+    assert result.answer.title == "Updated Agent Framework"
+
+
 async def test_answer_refresh_passes_exact_target_and_verifies_actual_reads(
     tmp_path: Path,
 ) -> None:
@@ -617,6 +710,38 @@ async def test_answer_refresh_independently_rejects_nonexistent_citation(
         return invalid, frozenset({"topics/missing"})
 
     with pytest.raises(AgentRunError, match="citation target does not exist") as caught:
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target.concept_id,
+            explicit_model="test:model",
+            environment={},
+            runner=runner,
+        )
+
+    assert caught.value.__cause__ is None
+
+
+async def test_answer_refresh_sanitizes_malformed_injected_citation_shape(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    malformed = CitedAnswer.model_construct(
+        title="Malformed refresh",
+        body="Malformed citation [1].",
+        citations=[object()],
+    )
+
+    async def runner(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        return malformed, frozenset()
+
+    with pytest.raises(AgentRunError, match="query citations could not be checked") as caught:
         await answer_synthesis_refresh(
             workspace,
             "Refresh this synthesis.",
@@ -813,4 +938,52 @@ def test_prepare_equivalent_refresh_is_canonical_no_op(tmp_path: Path) -> None:
 
     assert result == SynthesisAlreadyCurrent(target.concept_id)
     assert _tree_bytes(workspace.root) == before
+    assert not (workspace.root / ".bundlewalker").exists()
+
+
+def test_prepare_no_op_rechecks_live_target_after_canonical_render(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    answered = AnsweredSynthesisRefresh(
+        answer=CitedAnswer(
+            title="Current Agent Framework",
+            body="# Current answer\n\nAgents can use tools [1].\n",
+            citations=[Citation(number=1, concept_id="topics/agents")],
+        ),
+        read_ids=frozenset({"topics/agents"}),
+        target=target,
+    )
+    original_render = ask_workflow.render_draft
+
+    def racing_render(
+        draft: DraftConcept,
+        context: ChangeValidationContext,
+        *,
+        occurred_at: datetime,
+        prospective_drafts: Iterable[DraftConcept] = (),
+    ) -> str:
+        canonical = original_render(
+            draft,
+            context,
+            occurred_at=occurred_at,
+            prospective_drafts=prospective_drafts,
+        )
+        target.path.write_text(
+            render_document(
+                target.metadata,
+                "# Concurrent edit\n\nAgents now use different tools [1].\n\n"
+                "# Citations\n\n[1] [Agents](/topics/agents.md)\n",
+            ),
+            encoding="utf-8",
+        )
+        return canonical
+
+    monkeypatch.setattr(ask_workflow, "render_draft", racing_render)
+
+    with pytest.raises(ChangeSetError, match="stale base digest"):
+        prepare_synthesis_refresh(workspace, answered, occurred_at=NOW)
+
     assert not (workspace.root / ".bundlewalker").exists()
