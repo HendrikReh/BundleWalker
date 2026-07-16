@@ -45,7 +45,7 @@ printf '%s\n' \
   'Reviewing a proposed change before persistence keeps durable knowledge inspectable.' \
   'Rejected proposals do not change the knowledge base.' > example-notes.txt
 
-uv run bundlewalker init ./my-knowledge
+uv run bundlewalker init ./my-knowledge --conventions-style personal-workbook
 cd ./my-knowledge
 
 uv run --project .. bundlewalker lint
@@ -65,12 +65,30 @@ answer; it does not make a second model call.
 ### Initialize a workspace
 
 ```bash
-uv run bundlewalker init PATH
+uv run bundlewalker init PATH [--conventions-style STYLE]
 ```
 
 `PATH` must be new or empty. Initialization creates the configuration, conventions, raw-source
 directory, four wiki categories, generated indexes, and initial log. The empty wiki is checked
 with deterministic lint before the command succeeds. Initialization never needs a model.
+
+`--conventions-style` chooses the initial, editable `conventions.md` template:
+
+- `default`: the original concise, neutral BundleWalker conventions; this remains the default.
+- `personal-workbook`: reflective, evidence-backed personal understanding and open questions.
+- `agent-context`: general operational context, authority, constraints, procedures, and recovery.
+- `software-agent`: repository maps, commands, architecture, invariants, validation, and traps.
+- `research-agent`: methods, evidence quality, competing claims, limitations, and research gaps.
+
+The choice is not stored as workspace metadata. After initialization, `conventions.md` is the sole
+authority and may be customized freely. Examples:
+
+```bash
+uv run bundlewalker init ./personal-notes --conventions-style personal-workbook
+uv run bundlewalker init ./operations --conventions-style agent-context
+uv run bundlewalker init ./repository-context --conventions-style software-agent
+uv run bundlewalker init ./research-context --conventions-style research-agent
+```
 
 ### Ingest one text source
 
@@ -143,6 +161,8 @@ source-size limit, but no model or credential settings.
 `conventions.md` is the human-editable instruction and schema layer supplied to every agent. Use
 it to state local writing style, naming, emphasis, and wiki conventions. Agents may read this
 file but cannot propose edits to it.
+The initialization presets are starting points only. BundleWalker does not remember, enforce, or
+upgrade the selected style after creating the workspace.
 
 `.bundlewalker/` contains only temporary transaction journals and a coordination lock. It is not
 knowledge content and is safe to delete when no BundleWalker command or interrupted transaction

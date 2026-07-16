@@ -6,6 +6,7 @@ from typing import NoReturn
 
 import typer
 
+from bundlewalker.conventions import ConventionsStyle
 from bundlewalker.errors import BundleWalkerError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import PreparedTransaction, commit_transaction, discard_transaction
@@ -33,10 +34,20 @@ def main(context: typer.Context) -> None:
 
 
 @app.command("init")
-def init_command(path: Path) -> None:
+def init_command(
+    path: Path,
+    conventions_style: ConventionsStyle = typer.Option(  # noqa: B008
+        ConventionsStyle.DEFAULT,
+        "--conventions-style",
+        help=(
+            "Initial conventions template. Styles: default, personal-workbook, "
+            "agent-context, software-agent, research-agent."
+        ),
+    ),
+) -> None:
     """Create a BundleWalker workspace at PATH."""
     try:
-        workspace = initialize_workspace(path)
+        workspace = initialize_workspace(path, conventions_style=conventions_style)
     except BundleWalkerError as exc:
         _exit_for_error(exc)
     typer.echo(f"Initialized BundleWalker workspace at {workspace.root}")

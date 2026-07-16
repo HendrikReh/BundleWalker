@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from bundlewalker import workspace as workspace_module
 from bundlewalker.cli import app, confirm_changes
+from bundlewalker.conventions import ConventionsStyle, load_conventions
 from bundlewalker.okf.lint import has_errors, lint_bundle
 
 runner = CliRunner()
@@ -30,6 +31,48 @@ def test_init_creates_a_lint_clean_workspace(tmp_path: Path) -> None:
     log = (root / "wiki" / "log.md").read_text(encoding="utf-8")
     assert log.count("**Initialization**") == 1
     assert not has_errors(lint_bundle(root / "wiki", root))
+
+
+@pytest.mark.parametrize("style", list(ConventionsStyle))
+def test_init_selects_the_requested_conventions_style(
+    tmp_path: Path,
+    style: ConventionsStyle,
+) -> None:
+    root = tmp_path / style.value
+
+    result = runner.invoke(
+        app,
+        ["init", str(root), "--conventions-style", style.value],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output == f"Initialized BundleWalker workspace at {root.resolve()}\n"
+    assert (root / "conventions.md").read_text(encoding="utf-8") == load_conventions(style)
+    assert not has_errors(lint_bundle(root / "wiki", root))
+
+
+def test_init_help_lists_all_conventions_styles() -> None:
+    result = runner.invoke(app, ["init", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--conventions-style" in result.output
+    for style in ConventionsStyle:
+        assert style.value in result.output
+
+
+def test_init_rejects_an_unknown_conventions_style_before_creating_target(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "knowledge"
+
+    result = runner.invoke(
+        app,
+        ["init", str(root), "--conventions-style", "unknown-style"],
+    )
+
+    assert result.exit_code == 2
+    assert "--conventions-style" in result.output
+    assert not root.exists()
 
 
 def test_init_rejects_a_non_empty_target_with_usage_exit_code(tmp_path: Path) -> None:
