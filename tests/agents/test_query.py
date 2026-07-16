@@ -300,20 +300,8 @@ async def test_refresh_query_runner_rejects_self_citation(tmp_path: Path) -> Non
     dependencies = _dependencies(tmp_path)
     target = _refresh_target(dependencies)
     answer = _answer(concept_id=target.concept_id)
-    calls = 0
 
     def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name="read_concept",
-                        args={"concept_id": target.concept_id},
-                    )
-                ]
-            )
         return ModelResponse(
             parts=[
                 ToolCallPart(

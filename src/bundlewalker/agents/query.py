@@ -117,9 +117,9 @@ async def _run_query_agent(
         pass
     else:
         run_reads = frozenset(dependencies.read_ids).difference(previous_reads)
-        validate_cited_answer(result.output, dependencies.repository, run_reads)
         if refresh_target is not None:
             _validate_no_refresh_self_citation(result.output, refresh_target.concept_id)
+        validate_cited_answer(result.output, dependencies.repository, run_reads)
         return result.output, frozenset(run_reads)
     raise AgentRunError("query agent could not produce an answer") from None
 
