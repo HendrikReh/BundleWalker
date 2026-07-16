@@ -127,15 +127,16 @@ the accepted bundle without making a provider call.
 
 ## 6. Ask and save a Synthesis
 
-First ask the workbook a question without changing it:
+First ask the workbook a question without proposing or persisting a knowledge change:
 
 ```bash
 uv run --project "$PROJECT_ROOT" bundlewalker ask \
   'What does this workspace currently establish about review before persistence?'
 ```
 
-Plain `ask` is model-backed and may incur a provider charge, but it is read-only: it prints one
-validated, cited answer and does not open a review prompt or edit the workbook.
+Plain `ask` is model-backed and may incur a provider charge. It prints one validated, cited answer,
+but does not propose or persist new model output and opens no review prompt. Before querying,
+however, it may complete or roll back an already-reviewed interrupted transaction.
 
 Now ask the same question and save its answer:
 
@@ -216,8 +217,9 @@ uv run --project "$PROJECT_ROOT" bundlewalker lint --semantic
 ```
 
 Plain lint is offline and provider-free. `lint --semantic` is optional, model-backed, and may incur
-a provider charge. Its findings vary by model and remain advisory; they do not edit knowledge or
-approve a refresh.
+a provider charge. Its findings vary by model and remain advisory. Neither lint mode proposes or
+persists knowledge changes, opens a review, or approves a refresh. Before linting, either mode may
+complete or roll back an already-reviewed interrupted transaction.
 
 ## 10. Optional Git checkpoint
 

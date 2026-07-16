@@ -28,6 +28,21 @@ cd BundleWalker
 uv sync --locked
 PROJECT_ROOT="$(pwd)"
 export BUNDLEWALKER_MODEL='<pydantic-ai-model-string>'
+# Export the provider-specific credential required by that model.
+```
+
+Before any model-backed command, export the credential required by the selected provider. Use the
+[provider setup guide](docs/user-guide.md#model-and-provider-setup) to choose the correct model
+prefix and credential variable for your provider.
+
+### OpenAI example
+
+This labelled example is not a default or a model-availability claim. Replace both placeholders
+with your own secret and a current model ID; never commit the key:
+
+```bash
+export OPENAI_API_KEY='replace-with-your-openai-api-key'
+export BUNDLEWALKER_MODEL='openai:<current-openai-model-id>'
 ```
 
 Create a small source note, initialize a personal workbook, and enter it:
@@ -60,19 +75,7 @@ uv run --project "$PROJECT_ROOT" bundlewalker lint --semantic
 `ingest` and `ask --save` show a complete prospective diff. Answer `y` to apply it; answer `n`,
 press Ctrl-C, or end input to discard it and exit successfully with live knowledge unchanged.
 Model-backed commands use your configured provider and may incur network use or cost. Follow the
-[tutorial](docs/tutorial.md) for the complete ingest, save, newer-evidence, and refresh journey, or
-use the [provider setup guide](docs/user-guide.md#model-and-provider-setup) for configuration
-details.
-
-### OpenAI example
-
-This labelled example is not a default or a model-availability claim. Replace both placeholders
-with your own secret and a current model ID; never commit the key:
-
-```bash
-export OPENAI_API_KEY='replace-with-your-openai-api-key'
-export BUNDLEWALKER_MODEL='openai:<current-openai-model-id>'
-```
+[tutorial](docs/tutorial.md) for the complete ingest, save, newer-evidence, and refresh journey.
 
 ## Choose what you are building
 

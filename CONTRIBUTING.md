@@ -28,14 +28,15 @@ design decision, not an incidental implementation change.
 | Changes | `src/bundlewalker/changes.py` | Operation validation, citation validation, rendering, and prospective wiki construction |
 | OKF | `src/bundlewalker/okf/` | Document parsing/rendering, repository reads, indexes/logs/diffs, and deterministic lint |
 | Retrieval | `src/bundlewalker/retrieval.py` | Local lexical concept ranking used by read-only agent tools |
-| Transactions | `src/bundlewalker/transactions.py` | Locked staging, digest revalidation, commit/discard, and authenticated recovery |
+| Transactions | `src/bundlewalker/transactions.py` | Transaction staging, locked commit/discard/recovery, digest revalidation, and authenticated recovery |
 | Workspace | `src/bundlewalker/workspace.py` | Initialization, discovery, configuration, source identities, and safe paths |
 
 The write flow is `CLI -> workflow -> agent proposal -> deterministic validation -> prospective tree -> review -> transaction commit`.
 The model supplies a typed proposal; application code owns path handling, validation, rendering,
-the complete diff, confirmation, and persistence. Plain `ask` and `lint` remain read-only with
-respect to new model output. `lint` may recover an already reviewed transaction whose commit was
-interrupted, but it does not authorize a new write.
+the complete diff, confirmation, and persistence. Plain `ask` and both lint modes do not authorize
+persistence of new model output or open a new review. Before their normal work, each may complete
+or roll back an already-reviewed transaction interrupted after acceptance; that recovery does not
+authorize persistence of new model output.
 
 ## Repository map
 
@@ -145,7 +146,8 @@ output before persistence instead.
 - [ ] The full offline suite passes.
 - [ ] `uv run ruff format --check .` and `uv run ruff check .` pass.
 - [ ] `uv run pyright` reports no errors or warnings.
-- [ ] `git diff --check` is silent.
+- [ ] `git diff --check` is silent for the working tree.
+- [ ] `git diff --check origin/master...HEAD` is silent for the branch range.
 - [ ] Documentation matches live help, links resolve, and the embedded user guide is synchronized.
 - [ ] No credentials, private source material, or sensitive provider output appears in the diff.
 - [ ] The pull request explicitly discloses whether any live provider evaluation was run, and

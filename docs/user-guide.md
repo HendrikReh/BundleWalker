@@ -209,21 +209,23 @@ fresh ingestion; never repair transaction staging by hand.
 
 ### Ask a cited question
 
-Ask the compiled wiki without changing it:
+Ask the compiled wiki without proposing a new knowledge change:
 
 ```bash
 uv run --project "$PROJECT_ROOT" bundlewalker ask \
   'What evidence supports review before persistence?'
 ```
 
-Plain `ask` is model-backed but read-only. The query can search and read live concepts, and a
-read ledger records which concepts it actually opened. The returned Markdown answer is accepted
-only when every citation targets an existing concept in that ledger. Query answers cite concepts,
-not raw-source line spans; raw line spans belong to ingestion-created evidence citations.
+Plain `ask` is model-backed. It does not propose or persist new model output and opens no review
+prompt. Before querying, however, it may complete or roll back an already-reviewed interrupted
+transaction. The query can search and read live concepts, and a read ledger records which concepts
+it actually opened. The returned Markdown answer is accepted only when every citation targets an
+existing concept in that ledger. Query answers cite concepts, not raw-source line spans; raw line
+spans belong to ingestion-created evidence citations.
 
-The command prints the validated answer and citations, opens no review prompt, and writes no
-knowledge. A missing model is a configuration error; an invalid or unread citation is a model or
-validation failure, also without a write.
+After any recovery, the command prints the validated answer and citations without persisting the
+answer as knowledge. A missing model is a configuration error; an invalid or unread citation is a
+model or validation failure, with no new model output persisted.
 
 ### Save a Synthesis
 
@@ -446,7 +448,8 @@ my-knowledge/
 | End input at the prompt | Exit `0`; print `No changes applied.` | Discard staging; live knowledge stays unchanged |
 
 `init` writes deterministic scaffolding without review. Plain `ask` and both lint modes do not
-propose knowledge changes. Lint may only recover a write reviewed before an interruption.
+propose or persist new knowledge changes and open no review prompt. Before their normal work, each
+may complete or roll back an already-reviewed interrupted transaction.
 
 ### Exit codes
 
