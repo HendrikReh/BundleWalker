@@ -339,7 +339,11 @@ def _assert_refresh_qualification(
     expectation: QualificationExpectation,
 ) -> None:
     normalized = " ".join(answer_body.casefold().split())
-    clauses = _split_qualification_clauses(normalized, expectation.clause_boundary_patterns)
+    clauses = _split_qualification_clauses(
+        normalized,
+        expectation.clause_boundary_patterns,
+        expectation.coordinating_markers,
+    )
     concessive_spans = [
         assertion
         for clause in clauses
@@ -383,9 +387,18 @@ def _assert_refresh_qualification(
     )
 
 
-def _split_qualification_clauses(text: str, boundary_patterns: list[str]) -> list[str]:
+def _split_qualification_clauses(
+    text: str,
+    boundary_patterns: list[str],
+    coordinating_markers: list[str],
+) -> list[str]:
+    marker_pattern = "|".join(
+        re.escape(marker.casefold())
+        for marker in sorted(coordinating_markers, key=len, reverse=True)
+    )
+    comma_coordination_pattern = rf",\s+(?:{marker_pattern})\b[:,]?\s*"
     boundaries = re.compile(
-        "|".join(f"(?:{pattern})" for pattern in boundary_patterns),
+        "|".join(f"(?:{pattern})" for pattern in [*boundary_patterns, comma_coordination_pattern]),
         flags=re.IGNORECASE,
     )
     clauses: list[str] = []

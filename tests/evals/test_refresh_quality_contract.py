@@ -403,6 +403,21 @@ def test_refresh_quality_accepts_whether_uncertainty_governing_coordinated_predi
     )
 
 
+def test_refresh_quality_rejects_overclaim_after_qualified_comma_clause() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Whether the findings "
+        "generalize to all languages is uncertain, and the findings apply universally."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
 def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_literal() -> None:
     case = _qualified_refresh_case()
     answer = _answer(
