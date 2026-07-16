@@ -111,22 +111,31 @@
     clause_boundary_patterns:
       - '(?<=[.!?;])\s+'
       - '\s+(?:but|however|nevertheless|nonetheless|yet)\b[:,]?\s*'
-    concessive_prefixes:
+    concessive_markers:
       - although
       - though
       - even though
       - despite
       - in spite of
       - while
+    concept_patterns:
+      - '\bgenerali[sz]\w*\b'
+      - '\bappl\w*\b'
+      - '\btransfer\w*\b'
+      - '\bexten(?:d|s)\w*\b'
+    universal_scope_patterns:
+      - '\buniversal\w*\b'
+      - '\b(?:to|across)\s+(?:all|every)\b'
+      - '\b(?:all|every)\s+(?:repository|repositories|repo|repos|language|languages|time\s+horizons?|contexts?|cases?|domains?)\b'
+    negation_patterns:
+      - '\bnot\b'
+      - '\b(?:cannot|can''t|don''t|doesn''t|isn''t|aren''t|wasn''t|weren''t|never)\b'
+      - '\bno\s+(?:evidence|basis|support)\b'
     uncertainty_patterns:
       - '\b(?:not|cannot|uncertain|unknown|insufficient|unclear)\b.{0,100}\b(?:generali[sz]|transfer|appl|exten(?:d|s))'
       - '\b(?:generali[sz]|transfer|appl|exten(?:d|s))\w*.{0,100}\b(?:not|uncertain|unknown|unsupported|unestablished|unclear)\b'
-    forbidden_overclaim_patterns:
+    direct_forbidden_patterns:
       - '\bno (?:meaningful )?limitations?\b'
-      - '\bproves?.{0,40}\buniversal(?:ly)?\b'
-      - '\b(?:generali[sz]\w*|transfer\w*|exten(?:d|s)\w*)\s+(?:universally|to\s+(?:all|every)|across\s+(?:all|every))\b'
-      - '\b(?:apply|applies|applicable)\s+to\s+(?:all|every)\b'
-      - '\b(?:universally\s+appl\w*|appl\w*\s+universally)(?:\s+(?:to|across)\s+(?:all|every))?\b'
   question: >-
     Refresh this decision framework with the newer controlled comparison. Explain its explicit
     limitation and do not overstate generalization beyond the studied repositories, task types,

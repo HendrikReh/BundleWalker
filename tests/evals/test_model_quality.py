@@ -54,9 +54,12 @@ class QualificationExpectation(BaseModel):
 
     scope_anchor_groups: list[list[str]] = Field(min_length=1)
     clause_boundary_patterns: list[str] = Field(min_length=1)
-    concessive_prefixes: list[str] = Field(min_length=1)
+    concessive_markers: list[str] = Field(min_length=1)
+    concept_patterns: list[str] = Field(min_length=1)
+    universal_scope_patterns: list[str] = Field(min_length=1)
+    negation_patterns: list[str] = Field(min_length=1)
     uncertainty_patterns: list[str] = Field(min_length=1)
-    forbidden_overclaim_patterns: list[str] = Field(min_length=1)
+    direct_forbidden_patterns: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_expectation(self) -> Self:
@@ -65,12 +68,15 @@ class QualificationExpectation(BaseModel):
             for group in self.scope_anchor_groups
         ):
             raise ValueError("qualification anchor groups must contain non-empty alternatives")
-        if any(not prefix.strip() for prefix in self.concessive_prefixes):
-            raise ValueError("qualification concessive prefixes must not be empty")
+        if any(not marker.strip() for marker in self.concessive_markers):
+            raise ValueError("qualification concessive markers must not be empty")
         patterns = (
             self.clause_boundary_patterns
+            + self.concept_patterns
+            + self.universal_scope_patterns
+            + self.negation_patterns
             + self.uncertainty_patterns
-            + self.forbidden_overclaim_patterns
+            + self.direct_forbidden_patterns
         )
         if any(not pattern.strip() for pattern in patterns):
             raise ValueError("qualification patterns must not be empty")
@@ -332,19 +338,17 @@ def _assert_refresh_qualification(
     assertion_spans = [
         assertion
         for clause in clauses
-        for assertion in _split_concessive_assertions(clause, expectation.concessive_prefixes)
+        for assertion in _split_concessive_assertions(clause, expectation.concessive_markers)
     ]
     assertion_states = [
-        (assertion, _is_uncertainty_assertion(assertion, expectation.uncertainty_patterns))
+        (assertion, _is_qualified_assertion(assertion, expectation))
         for assertion in assertion_spans
     ]
     forbidden = next(
         (
-            pattern
-            for assertion, is_uncertain in assertion_states
-            if not is_uncertain
-            for pattern in expectation.forbidden_overclaim_patterns
-            if re.search(pattern, assertion, flags=re.IGNORECASE)
+            reason
+            for assertion, _ in assertion_states
+            if (reason := _forbidden_overclaim_reason(assertion, expectation)) is not None
         ),
         None,
     )
@@ -364,7 +368,7 @@ def _assert_refresh_qualification(
     assert not missing_anchor_groups, (
         f"refresh answer is missing evidence-scope anchor groups: {missing_anchor_groups}"
     )
-    assert any(is_uncertain for _, is_uncertain in assertion_states), (
+    assert any(is_qualified for _, is_qualified in assertion_states), (
         "refresh answer does not express the required uncertainty boundary"
     )
 
@@ -385,27 +389,69 @@ def _split_qualification_clauses(text: str, boundary_patterns: list[str]) -> lis
     return clauses
 
 
-def _split_concessive_assertions(clause: str, concessive_prefixes: list[str]) -> list[str]:
-    for prefix in sorted(concessive_prefixes, key=len, reverse=True):
-        match = re.match(
-            rf"{re.escape(prefix.casefold())}(?=\W|$)",
-            clause,
-            flags=re.IGNORECASE,
-        )
-        if match is None:
+def _split_concessive_assertions(clause: str, concessive_markers: list[str]) -> list[str]:
+    for comma in (match.start() for match in re.finditer(",", clause)):
+        left = clause[:comma].strip()
+        right = clause[comma + 1 :].strip()
+        if not left or not right:
             continue
-        comma = clause.find(",", match.end())
-        if comma == -1:
-            return [clause]
-        concession = clause[:comma].strip()
-        assertion = clause[comma + 1 :].strip()
-        if concession and assertion:
-            return [concession, assertion]
-        return [clause]
+        if _starts_with_concessive(left, concessive_markers) or _starts_with_concessive(
+            right,
+            concessive_markers,
+        ):
+            return [left, right]
     return [clause]
 
 
-def _is_uncertainty_assertion(assertion: str, uncertainty_patterns: list[str]) -> bool:
-    return assertion.endswith("?") or any(
-        re.search(pattern, assertion, flags=re.IGNORECASE) for pattern in uncertainty_patterns
+def _starts_with_concessive(assertion: str, concessive_markers: list[str]) -> bool:
+    return any(
+        re.match(
+            rf"{re.escape(marker.casefold())}(?=\W|$)",
+            assertion,
+            flags=re.IGNORECASE,
+        )
+        for marker in sorted(concessive_markers, key=len, reverse=True)
+    )
+
+
+def _is_qualified_assertion(
+    assertion: str,
+    expectation: QualificationExpectation,
+) -> bool:
+    return (
+        assertion.endswith("?")
+        or _first_matching_pattern(assertion, expectation.uncertainty_patterns) is not None
+        or _first_matching_pattern(assertion, expectation.negation_patterns) is not None
+    )
+
+
+def _is_affirmative_universal_overclaim(
+    assertion: str,
+    expectation: QualificationExpectation,
+) -> bool:
+    if _is_qualified_assertion(assertion, expectation):
+        return False
+    return (
+        _first_matching_pattern(assertion, expectation.concept_patterns) is not None
+        and _first_matching_pattern(assertion, expectation.universal_scope_patterns) is not None
+    )
+
+
+def _forbidden_overclaim_reason(
+    assertion: str,
+    expectation: QualificationExpectation,
+) -> str | None:
+    if _is_qualified_assertion(assertion, expectation):
+        return None
+    if direct := _first_matching_pattern(assertion, expectation.direct_forbidden_patterns):
+        return direct
+    if _is_affirmative_universal_overclaim(assertion, expectation):
+        return "affirmative universal-scope assertion"
+    return None
+
+
+def _first_matching_pattern(text: str, patterns: list[str]) -> str | None:
+    return next(
+        (pattern for pattern in patterns if re.search(pattern, text, flags=re.IGNORECASE)),
+        None,
     )

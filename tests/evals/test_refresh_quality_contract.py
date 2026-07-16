@@ -227,6 +227,109 @@ def test_refresh_quality_accepts_extension_uncertainty() -> None:
     )
 
 
+def test_refresh_quality_scopes_uncertainty_in_a_suffix_although_clause() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. The findings apply to all "
+        "repositories, although broader applicability remains uncertain."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_scopes_uncertainty_in_a_suffix_though_clause() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. The findings apply to all, "
+        "though whether they transfer is unclear."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_universally_transferable_after_a_caveat() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader transfer remains "
+        "uncertain. Nevertheless, the findings are universally transferable."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_universally_extendable_after_a_caveat() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader extension remains "
+        "uncertain. Nevertheless, the findings are universally extendable."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_rejects_universal_applicability_after_a_caveat() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. Broader applicability "
+        "remains uncertain. Nevertheless, the result has universal applicability."
+    )
+
+    with pytest.raises(AssertionError, match="forbidden overclaim"):
+        quality.assert_refresh_answer_quality(
+            case,
+            answer,
+            frozenset({CONTROLLED_EVIDENCE}),
+        )
+
+
+def test_refresh_quality_accepts_negated_application() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. The findings do not apply "
+        "to all repositories."
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
+def test_refresh_quality_accepts_negated_universal_transfer() -> None:
+    case = _qualified_refresh_case()
+    answer = _answer(
+        "Only three Python repositories were observed for four weeks. The findings are not "
+        "universally transferable."
+    )
+
+    quality.assert_refresh_answer_quality(
+        case,
+        answer,
+        frozenset({CONTROLLED_EVIDENCE}),
+    )
+
+
 def test_refresh_quality_accepts_concrete_boundary_paraphrase_without_magic_literal() -> None:
     case = _qualified_refresh_case()
     answer = _answer(
