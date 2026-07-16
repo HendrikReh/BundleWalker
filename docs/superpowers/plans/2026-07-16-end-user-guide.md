@@ -580,6 +580,7 @@ assert documented_styles == {style.value for style in ConventionsStyle}
 headings = {
     re.sub(r"[^a-z0-9 -]", "", heading.lower()).replace(" ", "-")
     for heading in re.findall(r"^## (.+)$", guide, re.MULTILINE)
+    if heading != "Contents"
 }
 contents_links = re.findall(r"^- \[[^]]+\]\(#([^)]+)\)$", guide, re.MULTILINE)
 assert set(contents_links) == headings
