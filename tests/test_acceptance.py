@@ -27,6 +27,7 @@ from bundlewalker.domain import (
     DraftConcept,
     FindingOrigin,
     LintFinding,
+    OkfDocument,
     Severity,
 )
 from bundlewalker.okf.lint import has_errors, lint_bundle
@@ -101,6 +102,14 @@ def _answer() -> CitedAnswer:
     return CitedAnswer(
         title="Why review knowledge changes?",
         body="# Answer\n\nReview keeps durable knowledge changes inspectable [1].\n",
+        citations=[Citation(number=1, concept_id="topics/review-first-knowledge")],
+    )
+
+
+def _refreshed_answer() -> CitedAnswer:
+    return CitedAnswer(
+        title="Why review knowledge changes now?",
+        body=("# Updated answer\n\nCurrent evidence still supports inspectable review [1].\n"),
         citations=[Citation(number=1, concept_id="topics/review-first-knowledge")],
     )
 
@@ -246,7 +255,73 @@ def test_complete_offline_review_first_workflow_and_recovery(
     )
     assert accepted_save.exit_code == 0, accepted_save.output
     assert len(query_calls) == 3
-    assert (root / "wiki" / "syntheses" / "why-review-knowledge-changes.md").is_file()
+    synthesis_path = root / "wiki" / "syntheses" / "why-review-knowledge-changes.md"
+    assert synthesis_path.is_file()
+
+    refresh_calls: list[str] = []
+
+    async def fake_refresh_runner(
+        model: QueryModel,
+        dependencies: AgentDependencies,
+        question: str,
+        target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        refresh_calls.append(f"{model}:{question}")
+        assert target.concept_id == "syntheses/why-review-knowledge-changes"
+        assert "Review keeps durable knowledge changes inspectable" in target.body
+        read_result = read_concept(
+            RunContext(deps=dependencies, model=TestModel(), usage=RunUsage()),
+            "topics/review-first-knowledge",
+        )
+        assert "error" not in read_result
+        return _refreshed_answer(), frozenset({"topics/review-first-knowledge"})
+
+    monkeypatch.setattr(ask_workflow, "run_refresh_query_agent", fake_refresh_runner)
+
+    before_refresh_decline = _knowledge_bytes(root)
+    declined_refresh = runner.invoke(
+        app,
+        [
+            "ask",
+            "Refresh the saved synthesis with current evidence.",
+            "--model",
+            "test:model",
+            "--refresh",
+            "syntheses/why-review-knowledge-changes",
+        ],
+        input="n\n",
+        catch_exceptions=False,
+    )
+    assert declined_refresh.exit_code == 0, declined_refresh.output
+    assert "--- wiki/syntheses/why-review-knowledge-changes.md" in declined_refresh.output
+    assert "+++ wiki/syntheses/why-review-knowledge-changes.md" in declined_refresh.output
+    assert "No changes applied." in declined_refresh.output
+    assert refresh_calls == ["test:model:Refresh the saved synthesis with current evidence."]
+    assert _knowledge_bytes(root) == before_refresh_decline
+
+    accepted_refresh = runner.invoke(
+        app,
+        [
+            "ask",
+            "Refresh the saved synthesis with current evidence.",
+            "--model",
+            "test:model",
+            "--refresh",
+            "syntheses/why-review-knowledge-changes",
+        ],
+        input="y\n",
+        catch_exceptions=False,
+    )
+    assert accepted_refresh.exit_code == 0, accepted_refresh.output
+    assert len(refresh_calls) == 2
+    refreshed_text = synthesis_path.read_text(encoding="utf-8")
+    assert "title: Why review knowledge changes now?" in refreshed_text
+    assert "Current evidence still supports inspectable review [1]." in refreshed_text
+    assert "[1] [Review-first knowledge](/topics/review-first-knowledge.md)" in refreshed_text
+    assert "Refreshed synthesis: Why review knowledge changes now?" in (
+        root / "wiki" / "log.md"
+    ).read_text(encoding="utf-8")
+    assert not has_errors(lint_bundle(root / "wiki", root))
 
     semantic_calls: list[str] = []
 

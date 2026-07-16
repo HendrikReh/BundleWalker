@@ -7,10 +7,17 @@ from typing import NoReturn
 import typer
 
 from bundlewalker.conventions import ConventionsStyle
-from bundlewalker.errors import BundleWalkerError
+from bundlewalker.errors import BundleWalkerError, UsageError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import PreparedTransaction, commit_transaction, discard_transaction
-from bundlewalker.workflows.ask import answer_question, prepare_synthesis, render_cited_answer
+from bundlewalker.workflows.ask import (
+    SynthesisAlreadyCurrent,
+    answer_question,
+    answer_synthesis_refresh,
+    prepare_synthesis,
+    prepare_synthesis_refresh,
+    render_cited_answer,
+)
 from bundlewalker.workflows.ingest import DuplicateIngestion, prepare_ingestion
 from bundlewalker.workflows.lint import run_lint
 from bundlewalker.workspace import Workspace, discover_workspace, initialize_workspace
@@ -85,21 +92,41 @@ def ask_command(
     question: str,
     model: str | None = typer.Option(None, "--model"),
     save: bool = typer.Option(False, "--save"),
+    refresh: str | None = typer.Option(None, "--refresh", metavar="SYNTHESIS_ID"),
 ) -> None:
-    """Answer a cited knowledge question and optionally save a reviewed synthesis."""
+    """Answer a cited question, save it, or review an in-place Synthesis refresh."""
+    if save and refresh is not None:
+        _exit_for_error(UsageError("--save and --refresh are mutually exclusive"))
+
     workspace = current_workspace(context)
     try:
-        answered = asyncio.run(
-            answer_question(
-                workspace,
-                question,
-                explicit_model=model,
+        if refresh is not None:
+            refreshed = asyncio.run(
+                answer_synthesis_refresh(
+                    workspace,
+                    question,
+                    refresh,
+                    explicit_model=model,
+                )
             )
-        )
-        typer.echo(render_cited_answer(answered.answer, OkfRepository(workspace.wiki_dir)))
-        if not save:
-            return
-        transaction = prepare_synthesis(workspace, answered)
+            typer.echo(render_cited_answer(refreshed.answer, OkfRepository(workspace.wiki_dir)))
+            outcome = prepare_synthesis_refresh(workspace, refreshed)
+            if isinstance(outcome, SynthesisAlreadyCurrent):
+                typer.echo("Synthesis is already current; no changes applied.")
+                return
+            transaction = outcome
+        else:
+            answered = asyncio.run(
+                answer_question(
+                    workspace,
+                    question,
+                    explicit_model=model,
+                )
+            )
+            typer.echo(render_cited_answer(answered.answer, OkfRepository(workspace.wiki_dir)))
+            if not save:
+                return
+            transaction = prepare_synthesis(workspace, answered)
     except BundleWalkerError as exc:
         _exit_for_error(exc)
 
