@@ -21,6 +21,9 @@ uv sync --locked
 uv run bundlewalker --help
 ```
 
+For installation, model setup, complete command examples, and conventions preset guidance, see
+the [BundleWalker User Guide](docs/user-guide.md).
+
 `init` and deterministic `lint` need no model. Agent-backed commands resolve a model in this
 order:
 
