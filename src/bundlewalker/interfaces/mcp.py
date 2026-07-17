@@ -21,6 +21,7 @@ from bundlewalker.application import (
     WorkspaceApplication,
 )
 from bundlewalker.domain import MAX_CONCEPT_ID_CHARACTERS
+from bundlewalker.interfaces.mcp_tools import register_mcp_tools
 
 _CONCEPT_AUTHORITY = "concept"
 _INVALID_RESOURCE_URI = "bundlewalker://invalid/resource-uri"
@@ -138,6 +139,7 @@ def create_mcp_server(application: WorkspaceApplication) -> Server[None]:
     server.list_resources()(_list_resources)
     server.list_resource_templates()(_list_resource_templates)
     server.read_resource()(_read_resource)
+    register_mcp_tools(server, application)
     return server
 
 
