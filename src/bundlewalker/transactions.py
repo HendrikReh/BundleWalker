@@ -432,7 +432,7 @@ def _recover_transactions_locked(workspace: Workspace, transactions_root: Path) 
             if (
                 manifest.schema_version == _SCHEMA_VERSION
                 and manifest.phase == "prepared"
-                and _has_normal_pending_topology(workspace, transaction_dir, manifest)
+                and _has_preservable_pending_topology(workspace, transaction_dir, manifest)
             ):
                 pending = _pending_review_from_manifest(
                     workspace,
@@ -450,7 +450,7 @@ def _recover_transactions_locked(workspace: Workspace, transactions_root: Path) 
             ) from exc
 
 
-def _has_normal_pending_topology(
+def _has_preservable_pending_topology(
     workspace: Workspace,
     transaction_dir: Path,
     manifest: _Manifest,
@@ -458,8 +458,7 @@ def _has_normal_pending_topology(
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
     backup = _recovery_backup_path(transaction_dir, backup)
     return (
-        _directory_exists(workspace.wiki_dir, "live wiki")
-        and _directory_exists(prospective, "prospective wiki")
+        _directory_exists(prospective, "prospective wiki")
         and not _directory_exists(backup, "transaction backup")
     )
 
@@ -512,7 +511,7 @@ def _pending_review_from_manifest(
     _verify_pending_raw_payload(transaction_dir, manifest)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
 
-    live_matches_base = (
+    live_matches_base = _directory_exists(workspace.wiki_dir, "live wiki") and (
         _materialized_tree_digest(workspace.wiki_dir, transaction_dir)
         == identity.base_wiki_digest
     )

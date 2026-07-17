@@ -388,6 +388,19 @@ def test_pending_review_becomes_stale_after_live_edit(tmp_path: Path) -> None:
     assert loaded.status is ReviewStatus.STALE
 
 
+def test_missing_live_wiki_preserves_pending_review_as_stale(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    shutil.rmtree(prepared.workspace.wiki_dir)
+
+    recover_transactions(prepared.workspace)
+    loaded = get_pending_review(prepared.workspace)
+
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.status is ReviewStatus.STALE
+    assert prepared.transaction_dir.is_dir()
+
+
 def test_second_preparation_is_rejected_without_removing_first(tmp_path: Path) -> None:
     first, _source = _prepare(tmp_path)
 
