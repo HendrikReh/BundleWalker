@@ -23,8 +23,8 @@ design decision, not an incidental implementation change.
 
 | Layer | Main paths | Responsibility |
 | --- | --- | --- |
-| CLI | `src/bundlewalker/cli.py` | Typer parsing, display, confirmation, and bounded exit behavior |
-| Interfaces | `src/bundlewalker/interfaces/` | CLI compatibility adapter and local `stdio` MCP resources, strict tool schemas, dispatch, and transport |
+| CLI compatibility | `src/bundlewalker/cli.py` | Re-export `app` and `main` for existing imports and the `bundlewalker` console entry point. |
+| Delivery adapters | `src/bundlewalker/interfaces/cli.py`, `src/bundlewalker/interfaces/mcp.py`, `src/bundlewalker/interfaces/mcp_schemas.py`, `src/bundlewalker/interfaces/mcp_tools.py` | Typer parsing, display, confirmation, and bounded exits; plus local `stdio` MCP resources, strict tool schemas, and dispatch. |
 | Application | `src/bundlewalker/application/` | Workspace-bound async facade, serializable contracts, and bounded error translation shared by delivery adapters |
 | Workflows | `src/bundlewalker/workflows/` | Recovery, orchestration, pre-model checks, dependency construction, and transaction preparation |
 | Agents | `src/bundlewalker/agents/` | PydanticAI prompts, read-only tools, typed model output, and output validation |

@@ -470,10 +470,11 @@ prepare_ingestion | prepare_synthesis | prepare_refresh
 Preparation creates at most one durable, private pending transaction under `.bundlewalker/`; it
 does not change live `raw/` or `wiki/` content. The review and exact diff survive an MCP server
 restart and can also be recovered with `bundlewalker review show`, `bundlewalker review apply
-REVIEW_ID`, or `bundlewalker review discard REVIEW_ID`. A second preparation is rejected while a
-review is pending, even before provider work starts. A stale review remains inspectable but cannot
-apply; an incorrect ID leaves the pending review untouched. Explicit discard is the way to free
-the slot.
+REVIEW_ID`, or `bundlewalker review discard REVIEW_ID`. A preparation that could create a new
+review is rejected while one is pending, before provider work starts. Duplicate ingestion is the
+pre-model exception: it may still return `duplicate` while an unrelated review is pending, but it
+creates no review and calls no provider. A stale review remains inspectable but cannot apply; an
+incorrect ID leaves the pending review untouched. Explicit discard is the way to free the slot.
 
 MCP progress is deliberately coarse: model-backed question and preparation calls, and semantic
 lint, may send one start and one completion notification when the client provides a progress token.
@@ -497,7 +498,7 @@ pending-or-stale status, summary, complete diff, changed paths, creation time, a
 | Tool | Strict input fields | Structured result | Provider use | State effect |
 | --- | --- | --- | --- | --- |
 | `workspace_status` | none | `WorkspaceStatus` (name, config version, concept counts, optional review summary) | Never | Read-only. |
-| `search_concepts` | `query`; optional `concept_type`; `limit` 1–10 | `ConceptSearchResult` (concept summaries and resource URIs) | Never | Read-only lexical search. |
+| `search_concepts` | `query`; optional `concept_type`; optional `limit` 1–10 (default 10) | `ConceptSearchResult` (concept summaries and resource URIs) | Never | Read-only lexical search. |
 | `ask` | `question`; optional `model` | `AnswerResult` (validated cited answer and rendered Markdown) | Yes | Read-only. |
 | `lint` | optional `semantic` and `model` | `LintResult` (findings and deterministic-error flag) | Only when `semantic` is true | Read-only. |
 | `prepare_ingestion` | `source_name`, `content`; optional `model` | `IngestionResult` (`duplicate` or `pending` with optional `ReviewResult`) | For a new source; duplicates are pre-model | Creates only private pending state. |
