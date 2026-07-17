@@ -1,16 +1,20 @@
 """Low-level MCP resources bound to one BundleWalker workspace application."""
 
+import argparse
+import asyncio
+import sys
 import unicodedata
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 import anyio
+import mcp.server.stdio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import types
 from mcp.server.lowlevel.helper_types import ReadResourceContents
-from mcp.server.lowlevel.server import Server
+from mcp.server.lowlevel.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.shared.message import SessionMessage
 from pydantic import AnyUrl
@@ -19,9 +23,12 @@ from bundlewalker.application import (
     ApplicationError,
     ReviewResult,
     WorkspaceApplication,
+    translate_error,
 )
 from bundlewalker.domain import MAX_CONCEPT_ID_CHARACTERS
+from bundlewalker.errors import BundleWalkerError
 from bundlewalker.interfaces.mcp_tools import register_mcp_tools
+from bundlewalker.workspace import discover_workspace
 
 _CONCEPT_AUTHORITY = "concept"
 _INVALID_RESOURCE_URI = "bundlewalker://invalid/resource-uri"
@@ -143,6 +150,37 @@ def create_mcp_server(application: WorkspaceApplication) -> Server[None]:
     return server
 
 
+async def serve_stdio(application: WorkspaceApplication) -> None:
+    """Serve ``application`` over the SDK's local standard-I/O transport."""
+    server = create_mcp_server(application)
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(
+                notification_options=NotificationOptions(
+                    prompts_changed=False,
+                    resources_changed=False,
+                    tools_changed=False,
+                ),
+                experimental_capabilities={},
+            ),
+        )
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """Run one MCP stdio server bound to one discovered workspace."""
+    parser = argparse.ArgumentParser(prog="bundlewalker-mcp")
+    parser.add_argument("--workspace", type=Path)
+    arguments = parser.parse_args(argv)
+    try:
+        workspace = discover_workspace(arguments.workspace)
+    except BundleWalkerError as error:
+        print(f"Error: {translate_error(error).safe_message}", file=sys.stderr)
+        raise SystemExit(error.exit_code) from None
+    asyncio.run(serve_stdio(WorkspaceApplication(workspace)))
+
+
 async def _forward_validated_messages(
     read_stream: MemoryObjectReceiveStream[SessionMessage | Exception],
     write_stream: MemoryObjectSendStream[SessionMessage | Exception],
@@ -217,3 +255,7 @@ def _render_pending_review(review: ReviewResult) -> str:
 
 def _resource_error(error: ApplicationError) -> ValueError:
     return ValueError(f"BundleWalker resource error: {error.code.value}")
+
+
+if __name__ == "__main__":
+    main()
