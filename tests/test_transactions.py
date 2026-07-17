@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import multiprocessing
 import os
 import shutil
 import uuid
 from dataclasses import fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -44,7 +46,13 @@ from bundlewalker.transactions import (
     prepare_transaction,
     recover_transactions,
 )
-from bundlewalker.workspace import RawSource, Workspace, initialize_workspace, load_raw_source
+from bundlewalker.workspace import (
+    RawSource,
+    Workspace,
+    discover_workspace,
+    initialize_workspace,
+    load_raw_source,
+)
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 
@@ -263,6 +271,32 @@ def _persist_raw(prepared: PreparedTransaction, source: RawSource) -> None:
     destination = prepared.workspace.root / source.stored_relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(source.content)
+
+
+def _concurrent_prepare_worker(
+    workspace_root: str,
+    source_directory: str,
+    barrier: Any,
+    results: Any,
+) -> None:
+    workspace = discover_workspace(Path(workspace_root))
+    source, change_set, context = _ingestion_in_workspace(Path(source_directory), workspace)
+    barrier.wait(timeout=10)
+    try:
+        prepared = prepare_transaction(
+            workspace,
+            change_set,
+            context,
+            source,
+            NOW,
+            kind=ReviewKind.INGESTION,
+        )
+    except ReviewPendingError as error:
+        results.put(("pending", error.review_id))
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}: {error}"))
+    else:
+        results.put(("prepared", prepared.transaction_id))
 
 
 def test_prepare_stages_a_complete_review_without_live_writes(tmp_path: Path) -> None:
@@ -503,6 +537,55 @@ def test_second_preparation_is_rejected_without_removing_first(tmp_path: Path) -
     assert loaded.review_id == first.transaction_id
 
 
+def test_simultaneous_public_preparations_create_exactly_one_review(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    source_directories = [tmp_path / "worker-one", tmp_path / "worker-two"]
+    for directory in source_directories:
+        directory.mkdir()
+    process_context = multiprocessing.get_context("spawn")
+    barrier = process_context.Barrier(2)
+    results = process_context.Queue()
+    processes = [
+        process_context.Process(
+            target=_concurrent_prepare_worker,
+            args=(str(workspace.root), str(directory), barrier, results),
+        )
+        for directory in source_directories
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=15)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        outcomes = [cast(tuple[str, str], results.get(timeout=2)) for _ in processes]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=2)
+        results.close()
+        results.join_thread()
+
+    assert sorted(kind for kind, _review_id in outcomes) == ["pending", "prepared"]
+    prepared_id = next(review_id for kind, review_id in outcomes if kind == "prepared")
+    pending_id = next(review_id for kind, review_id in outcomes if kind == "pending")
+    assert pending_id == prepared_id
+    durable = get_pending_review(workspace)
+    assert durable is not None
+    assert durable.review_id == prepared_id
+    transaction_dirs = [
+        path
+        for path in (workspace.root / ".bundlewalker" / "transactions").iterdir()
+        if path.is_dir()
+    ]
+    assert [path.name for path in transaction_dirs] == [prepared_id]
+
+
 def test_recovery_rejects_more_than_one_valid_pending_review(tmp_path: Path) -> None:
     first, _source = _prepare(tmp_path)
     source, change_set, context = _ingestion_in_workspace(tmp_path, first.workspace)
@@ -538,6 +621,33 @@ def test_recovery_cleans_legacy_schema_v1_prepared_transaction(tmp_path: Path) -
 
     assert _tree_bytes(prepared.workspace.wiki_dir) == live_wiki
     assert not prepared.transaction_dir.exists()
+
+
+def test_schema_v2_pending_recovery_rejects_missing_prospective_and_retains_journal(
+    tmp_path: Path,
+) -> None:
+    prepared, _source = _prepare(tmp_path)
+    shutil.rmtree(prepared.prospective_wiki)
+
+    with pytest.raises(TransactionError, match="prospective"):
+        get_pending_review(prepared.workspace)
+
+    assert prepared.transaction_dir.is_dir()
+    assert _manifest(prepared)["phase"] == "prepared"
+
+
+def test_schema_v2_pending_recovery_rejects_unexpected_backup_and_retains_journal(
+    tmp_path: Path,
+) -> None:
+    prepared, _source = _prepare(tmp_path)
+    prepared.backup_wiki.mkdir()
+
+    with pytest.raises(TransactionError, match="backup"):
+        get_pending_review(prepared.workspace)
+
+    assert prepared.transaction_dir.is_dir()
+    assert prepared.backup_wiki.is_dir()
+    assert _manifest(prepared)["phase"] == "prepared"
 
 
 def test_discard_removes_only_the_prepared_transaction(tmp_path: Path) -> None:
@@ -933,6 +1043,73 @@ def test_commit_rejects_an_existing_raw_file_with_different_bytes(tmp_path: Path
     assert hashlib.sha256(destination.read_bytes()).hexdigest() != source.sha256
 
 
+def test_pending_status_rejects_conflicting_raw_destination_and_allows_discard(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    destination = prepared.workspace.root / source.stored_relative_path
+    destination.write_bytes(b"conflicting bytes\n")
+
+    with pytest.raises(TransactionError, match="raw destination"):
+        get_pending_review(prepared.workspace)
+
+    assert _manifest(prepared)["phase"] == "prepared"
+    discard_pending_review(prepared.workspace, prepared.transaction_id)
+    assert destination.read_bytes() == b"conflicting bytes\n"
+    assert not prepared.transaction_dir.exists()
+
+
+def test_pending_status_rejects_raw_destination_symlink_and_allows_discard(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    outside = tmp_path / "outside-raw.txt"
+    outside.write_bytes(source.content)
+    destination = prepared.workspace.root / source.stored_relative_path
+    destination.symlink_to(outside)
+
+    with pytest.raises(TransactionError, match="raw destination"):
+        get_pending_review(prepared.workspace)
+
+    assert _manifest(prepared)["phase"] == "prepared"
+    discard_pending_review(prepared.workspace, prepared.transaction_id)
+    assert destination.is_symlink()
+    assert outside.read_bytes() == source.content
+    assert not prepared.transaction_dir.exists()
+
+
+def test_apply_revalidates_raw_destination_changed_after_status_before_acceptance(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    destination = prepared.workspace.root / source.stored_relative_path
+    destination.write_bytes(b"raced conflicting bytes\n")
+
+    with pytest.raises(TransactionError, match="raw destination"):
+        apply_pending_review(prepared.workspace, pending.review_id)
+
+    assert _manifest(prepared)["phase"] == "prepared"
+    discard_pending_review(prepared.workspace, pending.review_id)
+    assert destination.read_bytes() == b"raced conflicting bytes\n"
+
+
+def test_exact_preexisting_raw_destination_is_compatible_with_pending_apply(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    destination = prepared.workspace.root / source.stored_relative_path
+    destination.write_bytes(source.content)
+
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    apply_pending_review(prepared.workspace, pending.review_id)
+
+    assert destination.read_bytes() == source.content
+    assert get_pending_review(prepared.workspace) is None
+
+
 def test_manifest_update_does_not_follow_a_planted_fixed_temp_symlink(
     tmp_path: Path,
 ) -> None:
@@ -947,16 +1124,11 @@ def test_manifest_update_does_not_follow_a_planted_fixed_temp_symlink(
     assert sentinel.read_text(encoding="utf-8") == "outside stays unchanged\n"
 
 
-@pytest.mark.parametrize("phase", ["prepared", "raw-persisted"])
-def test_early_phase_recovery_restores_the_only_wiki_copy(
-    tmp_path: Path,
-    phase: str,
-) -> None:
+def test_raw_persisted_recovery_restores_the_only_wiki_copy(tmp_path: Path) -> None:
     prepared, source = _prepare(tmp_path)
     old_tree = _tree_bytes(prepared.workspace.wiki_dir)
-    if phase == "raw-persisted":
-        _persist_raw(prepared, source)
-    _set_phase(prepared, phase)
+    _persist_raw(prepared, source)
+    _set_phase(prepared, "raw-persisted")
     prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
 
     recover_transactions(prepared.workspace)

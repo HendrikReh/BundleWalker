@@ -404,7 +404,11 @@ def discard_transaction(prepared: PreparedTransaction) -> None:
 def discard_pending_review(workspace: Workspace, review_id: str) -> None:
     """Discard the current durable review selected by its opaque identity."""
     with _workspace_transaction_lock(workspace):
-        transaction_dir, manifest = _require_pending_manifest_locked(workspace, review_id)
+        transaction_dir, manifest = _require_pending_manifest_locked(
+            workspace,
+            review_id,
+            verify_raw_destination=False,
+        )
         _discard_pending_manifest_locked(workspace, transaction_dir, manifest)
 
 
@@ -447,13 +451,19 @@ def ensure_no_pending_review(workspace: Workspace) -> None:
 def _require_pending_manifest_locked(
     workspace: Workspace,
     review_id: object,
+    *,
+    verify_raw_destination: bool = True,
 ) -> tuple[Path, _Manifest]:
     if not isinstance(review_id, str) or _REVIEW_ID.fullmatch(review_id) is None:
         raise ReviewMismatchError("review ID does not match the pending review")
     transactions_root = workspace.root.joinpath(*_TRANSACTIONS_PATH.parts)
     if not transactions_root.exists():
         raise ReviewNotFoundError("workspace has no pending review")
-    _recover_transactions_locked(workspace, transactions_root)
+    _recover_transactions_locked(
+        workspace,
+        transactions_root,
+        verify_raw_destination=verify_raw_destination,
+    )
 
     found: tuple[Path, _Manifest] | None = None
     try:
@@ -489,7 +499,12 @@ def _load_transaction_review(
     return _pending_review_from_manifest(workspace, transaction_dir, manifest)
 
 
-def _recover_transactions_locked(workspace: Workspace, transactions_root: Path) -> None:
+def _recover_transactions_locked(
+    workspace: Workspace,
+    transactions_root: Path,
+    *,
+    verify_raw_destination: bool = True,
+) -> None:
     if transactions_root.is_symlink() or not transactions_root.is_dir():
         raise TransactionError("transaction storage is not a regular directory")
     if not transactions_root.resolve(strict=False).is_relative_to(
@@ -511,15 +526,13 @@ def _recover_transactions_locked(workspace: Workspace, transactions_root: Path) 
             except _IncompleteManifestError:
                 _recover_transaction(workspace, transaction_dir)
                 continue
-            if (
-                manifest.schema_version == _SCHEMA_VERSION
-                and manifest.phase == "prepared"
-                and _has_preservable_pending_topology(workspace, transaction_dir, manifest)
-            ):
+            if manifest.schema_version == _SCHEMA_VERSION and manifest.phase == "prepared":
+                _validate_pending_topology(workspace, transaction_dir, manifest)
                 pending = _pending_review_from_manifest(
                     workspace,
                     transaction_dir,
                     manifest,
+                    verify_raw_destination=verify_raw_destination,
                 )
                 pending_review_ids.append(pending.review_id)
                 if len(pending_review_ids) > 1:
@@ -532,16 +545,17 @@ def _recover_transactions_locked(workspace: Workspace, transactions_root: Path) 
             ) from exc
 
 
-def _has_preservable_pending_topology(
+def _validate_pending_topology(
     workspace: Workspace,
     transaction_dir: Path,
     manifest: _Manifest,
-) -> bool:
+) -> None:
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
     backup = _recovery_backup_path(transaction_dir, backup)
-    return _directory_exists(prospective, "prospective wiki") and not _directory_exists(
-        backup, "transaction backup"
-    )
+    if not _directory_exists(prospective, "prospective wiki"):
+        raise TransactionError("pending transaction prospective wiki is missing")
+    if _directory_exists(backup, "transaction backup"):
+        raise TransactionError("pending transaction unexpectedly contains a backup wiki")
 
 
 def _get_pending_review_locked(
@@ -573,6 +587,8 @@ def _pending_review_from_manifest(
     workspace: Workspace,
     transaction_dir: Path,
     manifest: _Manifest,
+    *,
+    verify_raw_destination: bool = True,
 ) -> TransactionReview:
     try:
         identity = _load_identity(transaction_dir)
@@ -591,6 +607,8 @@ def _pending_review_from_manifest(
     prospective, _backup = _manifest_paths(workspace, transaction_dir, manifest)
     _verify_pending_raw_payload(transaction_dir, manifest)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
+    if verify_raw_destination:
+        _verify_pending_raw_destination(workspace, manifest)
 
     live_matches_base = _directory_exists(workspace.wiki_dir, "live wiki") and (
         _materialized_tree_digest(workspace.wiki_dir, transaction_dir) == identity.base_wiki_digest
@@ -657,6 +675,7 @@ def _verify_pending_transaction(
     identity = _load_authenticated_identity(transaction_dir, manifest)
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
     _verify_pending_raw_payload(transaction_dir, manifest)
+    _verify_pending_raw_destination(workspace, manifest)
     _validate_configured_wiki(workspace)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
     _revalidate_operations(workspace, manifest.drafts)
@@ -665,6 +684,38 @@ def _verify_pending_transaction(
         raise TransactionError(f"transaction backup already exists: {backup}")
     if workspace.wiki_dir.is_symlink() or not workspace.wiki_dir.is_dir():
         raise TransactionError("live wiki is not a regular directory")
+
+
+def _verify_pending_raw_destination(
+    workspace: Workspace,
+    manifest: _Manifest,
+) -> None:
+    if manifest.raw_path is None:
+        return
+    if manifest.raw_sha256 is None:
+        raise TransactionError("transaction raw identity is incomplete")
+
+    relative_value = _validated_raw_relative(workspace, Path(manifest.raw_path))
+    relative = PurePosixPath(relative_value)
+    with _open_workspace_directory(
+        workspace,
+        relative.parts[:-1],
+        label="raw destination parent",
+    ) as parent_descriptor:
+        try:
+            metadata = os.stat(
+                relative.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise TransactionError("raw destination could not be authenticated") from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            raise TransactionError("raw destination is not a regular file")
+        if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
+            raise TransactionError("raw destination has a different digest")
 
 
 def _draft_preconditions_match(
