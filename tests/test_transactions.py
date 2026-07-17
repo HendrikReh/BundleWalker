@@ -256,6 +256,7 @@ def _set_legacy_schema(prepared: PreparedTransaction) -> None:
         json.dumps(identity, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    (prepared.transaction_dir / "review.json").unlink()
 
 
 def _persist_raw(prepared: PreparedTransaction, source: RawSource) -> None:
@@ -816,6 +817,58 @@ def test_accepted_recovery_blocks_when_raw_persistence_is_ambiguous(tmp_path: Pa
     assert prepared.transaction_dir.is_dir()
 
 
+def test_accepted_raw_link_with_unreadable_identity_preserves_journal(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    live_wiki = _tree_bytes(prepared.workspace.wiki_dir)
+    _set_phase(prepared, "accepted")
+    manifest = transactions._load_manifest(  # pyright: ignore[reportPrivateUsage]
+        prepared.workspace,
+        prepared.transaction_dir,
+    )
+    transactions._persist_raw_source(  # pyright: ignore[reportPrivateUsage]
+        prepared.workspace,
+        prepared.transaction_dir,
+        manifest,
+    )
+    raw_path = prepared.workspace.root / source.stored_relative_path
+    (prepared.transaction_dir / "identity.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(TransactionError, match="schema-v2 transaction identity"):
+        recover_transactions(prepared.workspace)
+
+    assert raw_path.read_bytes() == source.content
+    assert _tree_bytes(prepared.workspace.wiki_dir) == live_wiki
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_accepted_raw_link_with_unreadable_manifest_preserves_journal(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    live_wiki = _tree_bytes(prepared.workspace.wiki_dir)
+    _set_phase(prepared, "accepted")
+    manifest = transactions._load_manifest(  # pyright: ignore[reportPrivateUsage]
+        prepared.workspace,
+        prepared.transaction_dir,
+    )
+    transactions._persist_raw_source(  # pyright: ignore[reportPrivateUsage]
+        prepared.workspace,
+        prepared.transaction_dir,
+        manifest,
+    )
+    raw_path = prepared.workspace.root / source.stored_relative_path
+    (prepared.transaction_dir / "manifest.json").write_text("{\n", encoding="utf-8")
+
+    with pytest.raises(TransactionError, match="schema-v2 transaction manifest"):
+        recover_transactions(prepared.workspace)
+
+    assert raw_path.read_bytes() == source.content
+    assert _tree_bytes(prepared.workspace.wiki_dir) == live_wiki
+    assert prepared.transaction_dir.is_dir()
+
+
 def test_new_live_recovery_restores_the_backup_when_the_new_tree_is_invalid(
     tmp_path: Path,
 ) -> None:
@@ -833,9 +886,12 @@ def test_new_live_recovery_restores_the_backup_when_the_new_tree_is_invalid(
     assert not prepared.transaction_dir.exists()
 
 
-def test_recovery_restores_a_backup_when_the_manifest_is_incomplete(tmp_path: Path) -> None:
+def test_legacy_recovery_restores_a_backup_when_the_manifest_is_incomplete(
+    tmp_path: Path,
+) -> None:
     prepared, _ = _prepare(tmp_path)
     old_tree = _tree_bytes(prepared.workspace.wiki_dir)
+    _set_legacy_schema(prepared)
     prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
     (prepared.transaction_dir / "manifest.json").unlink()
 
@@ -1017,7 +1073,8 @@ def test_recovery_refuses_a_lint_valid_backup_with_the_wrong_identity(
     if not manifest_present:
         (prepared.transaction_dir / "manifest.json").unlink()
 
-    with pytest.raises(TransactionError, match=r"backup.*identity"):
+    expected_error = r"backup.*identity" if manifest_present else "schema-v2 transaction manifest"
+    with pytest.raises(TransactionError, match=expected_error):
         recover_transactions(prepared.workspace)
 
     assert prepared.backup_wiki.is_dir()

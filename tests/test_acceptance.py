@@ -469,6 +469,7 @@ def test_complete_offline_review_first_workflow_and_recovery(
         json.dumps(legacy_identity, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    (legacy.transaction_dir / "review.json").unlink()
 
     recover_transactions(workspace)
 

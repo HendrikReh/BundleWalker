@@ -695,6 +695,21 @@ def _recover_transaction(
         identity = _load_identity(transaction_dir)
     except _IncompleteManifestError:
         if expected_identity is None:
+            try:
+                manifest_without_identity = _load_manifest(workspace, transaction_dir)
+            except _IncompleteManifestError:
+                if _has_durable_transaction_state(transaction_dir):
+                    raise TransactionError(
+                        "schema-v2 transaction authentication state is unavailable"
+                    ) from None
+            else:
+                if (
+                    manifest_without_identity.schema_version == _SCHEMA_VERSION
+                    or _has_review_artifact(transaction_dir)
+                ):
+                    raise TransactionError(
+                        "schema-v2 transaction identity is unavailable"
+                    ) from None
             _recover_without_identity(workspace, transaction_dir)
             return
         identity = expected_identity
@@ -704,6 +719,10 @@ def _recover_transaction(
     try:
         manifest = _load_manifest(workspace, transaction_dir)
     except _IncompleteManifestError:
+        if transaction_dir.exists() and (
+            identity.review_digest is not None or _has_review_artifact(transaction_dir)
+        ):
+            raise TransactionError("schema-v2 transaction manifest is unavailable") from None
         _recover_known_topology(
             workspace,
             transaction_dir,
@@ -713,6 +732,11 @@ def _recover_transaction(
             identity,
         )
         return
+
+    if manifest.schema_version == 1 and (
+        identity.review_digest is not None or _has_review_artifact(transaction_dir)
+    ):
+        raise TransactionError("legacy transaction contains schema-v2 authentication state")
 
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
     if (
@@ -732,6 +756,30 @@ def _recover_transaction(
         backup,
         identity,
     )
+
+
+def _has_review_artifact(transaction_dir: Path) -> bool:
+    review_path = transaction_dir / _REVIEW_NAME
+    return review_path.exists() or review_path.is_symlink()
+
+
+def _has_durable_transaction_state(transaction_dir: Path) -> bool:
+    fixed_artifacts = (
+        transaction_dir / _MANIFEST_NAME,
+        transaction_dir / _IDENTITY_NAME,
+        transaction_dir / _REVIEW_NAME,
+        transaction_dir / _PROSPECTIVE_NAME,
+        transaction_dir / _BACKUP_NAME,
+        transaction_dir / _RAW_PAYLOAD_NAME,
+    )
+    if any(path.exists() or path.is_symlink() for path in fixed_artifacts):
+        return True
+    try:
+        return any(
+            path.name.startswith(_QUARANTINE_PREFIX) for path in transaction_dir.iterdir()
+        )
+    except OSError as exc:
+        raise TransactionError("could not inspect incomplete transaction state") from exc
 
 
 def _recover_accepted_transaction(
