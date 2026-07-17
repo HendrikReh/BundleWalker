@@ -31,6 +31,7 @@ _SOURCE_CATEGORIES = ("sources", "topics", "entities", "syntheses")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _MINIMUM_DIGEST_PREFIX = 12
+_INLINE_SOURCE_NAME_MAX = 255
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,19 +181,43 @@ def load_raw_source(path: Path, workspace: Workspace) -> RawSource:
     candidate = path.expanduser()
     if candidate.is_symlink() or not candidate.is_file():
         raise WorkspaceError(f"source must be a regular file: {candidate}")
-    extension_value = candidate.suffix
-    if extension_value not in {".md", ".txt"}:
-        raise WorkspaceError("source extension must be .md or .txt")
-    extension = cast(Literal[".md", ".txt"], extension_value)
 
     try:
         content = candidate.read_bytes()
     except OSError as exc:
         raise WorkspaceError(f"could not read source file: {candidate}") from exc
+    return _raw_source_from_content(candidate.resolve(strict=True), content, workspace)
+
+
+def load_inline_source(source_name: str, content: str, workspace: Workspace) -> RawSource:
+    if (
+        not source_name
+        or len(source_name) > _INLINE_SOURCE_NAME_MAX
+        or source_name in {".", ".."}
+        or "/" in source_name
+        or "\\" in source_name
+        or any(unicodedata.category(character) == "Cc" for character in source_name)
+    ):
+        raise WorkspaceError("inline source name must be one safe filename")
+    name = Path(source_name)
+    if name.suffix not in {".md", ".txt"}:
+        raise WorkspaceError("source extension must be .md or .txt")
+    return _raw_source_from_content(name, content.encode("utf-8"), workspace)
+
+
+def _raw_source_from_content(
+    input_path: Path,
+    content: bytes,
+    workspace: Workspace,
+) -> RawSource:
+    extension_value = input_path.suffix
+    if extension_value not in {".md", ".txt"}:
+        raise WorkspaceError("source extension must be .md or .txt")
+    extension = cast(Literal[".md", ".txt"], extension_value)
     try:
         text = content.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise WorkspaceError(f"source must contain valid UTF-8: {candidate}") from exc
+        raise WorkspaceError(f"source must contain valid UTF-8: {input_path}") from exc
     if len(text) > workspace.config.max_source_characters:
         raise WorkspaceError(
             "source exceeds the configured limit of "
@@ -200,7 +225,7 @@ def load_raw_source(path: Path, workspace: Workspace) -> RawSource:
         )
 
     digest = hashlib.sha256(content).hexdigest()
-    slug = _slugify(candidate.stem)
+    slug = _slugify(input_path.stem)
     stored_path, concept_id = stable_source_paths(
         workspace,
         digest,
@@ -208,7 +233,7 @@ def load_raw_source(path: Path, workspace: Workspace) -> RawSource:
         extension,
     )
     return RawSource(
-        input_path=candidate.resolve(strict=True),
+        input_path=input_path,
         content=content,
         text=text,
         sha256=digest,

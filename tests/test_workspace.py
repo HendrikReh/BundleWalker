@@ -14,6 +14,7 @@ from bundlewalker.workspace import (
     DEFAULT_CONFIG_TEXT,
     discover_workspace,
     initialize_workspace,
+    load_inline_source,
     load_raw_source,
     stable_source_paths,
 )
@@ -183,6 +184,75 @@ def test_load_raw_source_hashes_exact_bytes_and_derives_stable_identity(
     assert loaded.slug == "uber-agents"
     assert loaded.stored_relative_path == Path(f"raw/{digest[:12]}-uber-agents.md")
     assert loaded.concept_id == f"sources/{digest[:12]}-uber-agents"
+
+
+def test_load_inline_source_builds_the_same_identity_from_supplied_utf8(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge")
+
+    source = load_inline_source("Überblick.md", "Grüße\n", workspace)
+
+    assert source.content == "Grüße\n".encode("utf-8")
+    assert source.text == "Grüße\n"
+    assert source.extension == ".md"
+    assert source.slug == "uberblick"
+    assert source.line_count == 1
+    assert source.sha256 == hashlib.sha256(source.content).hexdigest()
+    assert source.input_path == Path("Überblick.md")
+    assert source.stored_relative_path.parent == Path("raw")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../notes.md",
+        "folder/notes.md",
+        r"folder\\notes.md",
+        "bad\x7fname.md",
+        ".",
+        "..",
+        "notes.pdf",
+    ],
+)
+def test_load_inline_source_rejects_paths_and_unsupported_names(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge")
+
+    with pytest.raises(WorkspaceError):
+        load_inline_source(name, "content\n", workspace)
+
+
+def test_load_inline_source_enforces_configured_character_limit(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge")
+    config_path = workspace.root / "bundlewalker.toml"
+    config_path.write_text(
+        DEFAULT_CONFIG_TEXT.replace("max_source_characters = 100000", "max_source_characters = 2"),
+        encoding="utf-8",
+    )
+    workspace = discover_workspace(workspace.root)
+
+    assert load_inline_source("accepted.txt", "éé", workspace).text == "éé"
+    with pytest.raises(WorkspaceError, match="2"):
+        load_inline_source("rejected.txt", "ééé", workspace)
+
+
+def test_load_inline_source_does_not_read_a_filesystem_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge")
+
+    def fail_read_bytes(_path: Path) -> bytes:
+        raise AssertionError("inline sources must not read from the filesystem")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    assert load_inline_source("notes.md", "content\n", workspace).text == "content\n"
 
 
 def test_stable_source_paths_resolves_duplicate_by_full_digest(tmp_path: Path) -> None:
