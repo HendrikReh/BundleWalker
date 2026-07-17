@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from base64 import urlsafe_b64decode
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -230,13 +231,15 @@ async def test_list_concepts_rejects_tampered_cursor(
     "cursor",
     [
         "ZW50aXRpZXMvdG9vbHM=",
-        "ZW50aXRpZXMvdG9vbHt",
+        "ZW50aXRpZXMvdG9vbHN",
     ],
 )
 async def test_list_concepts_rejects_noncanonical_cursor_encodings(
     application: WorkspaceApplication,
     cursor: str,
 ) -> None:
+    assert urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)) == b"entities/tools"
+
     with pytest.raises(ApplicationError) as raised:
         await application.list_concepts(cursor=cursor)
 
