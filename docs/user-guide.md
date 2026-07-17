@@ -21,6 +21,7 @@ and resolving common failures.
 - [Ask, save, and refresh](#ask-save-and-refresh)
 - [Maintain and recover the bundle](#maintain-and-recover-the-bundle)
 - [Complete CLI reference](#complete-cli-reference)
+- [Use BundleWalker through a local MCP host](#use-bundlewalker-through-a-local-mcp-host)
 - [Workspace and process reference](#workspace-and-process-reference)
 - [Troubleshooting and safety](#troubleshooting-and-safety)
 
@@ -316,10 +317,10 @@ unsupported claims, missing concepts, and knowledge gaps. Semantic findings may 
 `WARNING`, or `INFO` display severities, but all are advisory. They do not control process status;
 only deterministic errors do. Semantic lint proposes and writes no knowledge.
 
-Before `ingest`, `ask`, or either lint mode continues, BundleWalker inspects interrupted
-transactions. It authenticates the reviewed base and prospective trees, then safely completes or
-rolls back the interrupted operation. Recovery preserves an operation that was already reviewed;
-it never authorizes new model output.
+Before normal work, BundleWalker authenticates and completes or rolls back an accepted operation
+interrupted during its commit. This recovery never authorizes new model output. A prepared pending
+review is different: it remains inspectable and blocks another write preparation until an explicit
+apply or discard. Read-only work remains available while it is pending.
 
 `.bundlewalker/` appears when the first reviewed write is staged. Completed and discarded work
 removes its per-operation transaction directory. In an idle workspace, `transaction.lock` may be
@@ -332,7 +333,7 @@ for diagnosis rather than editing its manifests or staged trees.
 ## Complete CLI reference
 
 Live `--help` output is authoritative for command names, arguments, and options. The public CLI
-contains only `init`, `ingest`, `ask`, and `lint`:
+contains `init`, `ingest`, `ask`, `lint`, and `review`:
 
 ```bash
 uv run bundlewalker --help
@@ -400,6 +401,127 @@ bundlewalker lint [OPTIONS]
 
 See [Maintain and recover the bundle](#maintain-and-recover-the-bundle) for deterministic status,
 semantic advisories, and authenticated recovery.
+
+### `review`
+
+```text
+bundlewalker review [OPTIONS] COMMAND [ARGS]...
+```
+
+| Command | Arguments | Meaning |
+| --- | --- | --- |
+| `show` | none | Print the single pending review ID, summary, and complete persisted diff. |
+| `apply` | `REVIEW_ID` | Apply that exact current review after durable state revalidation. |
+| `discard` | `REVIEW_ID` | Remove that exact pending review without changing live knowledge. |
+
+Use these commands when an MCP host or an earlier process prepared a review, or when a process
+ended before it resolved one. A wrong review ID never resolves the current review. If live content
+changed after preparation, the review becomes stale: it remains inspectable but cannot apply;
+discard it explicitly and prepare a new review.
+
+## Use BundleWalker through a local MCP host
+
+The MCP adapter is a local `stdio` server, not a hosted or remote service. It fixes one workspace
+when the host starts it; no tool can select another workspace or accept a workspace path. Configure
+the host with this exact command, replacing the placeholders with local absolute paths:
+
+```text
+uv run --project PROJECT_ROOT bundlewalker-mcp --workspace WORKSPACE
+```
+
+For a command-and-arguments MCP configuration, the same launch is:
+
+```json
+{
+  "command": "uv",
+  "args": [
+    "run",
+    "--project",
+    "PROJECT_ROOT",
+    "bundlewalker-mcp",
+    "--workspace",
+    "WORKSPACE"
+  ]
+}
+```
+
+The optional `--workspace` is resolved once at startup; omitting it uses normal workspace discovery
+from the server process's current directory. After startup, only MCP protocol messages use stdout.
+Diagnostics use stderr or MCP logging. A local web UI is not implemented; it is a separate next
+plan.
+
+### Resources and review lifecycle
+
+The server exposes Markdown concept resources through the template
+`bundlewalker://concept/{+concept_id}`. Resource listing is ordered and paginated in pages of at
+most 100 concepts: follow `nextCursor` to continue, and do not expect the stable pending-review
+resource on later pages. When one exists, `bundlewalker://review/pending` is listed on the first
+page and returns its exact persisted complete diff, review ID, kind, status, and summary. Raw
+sources, arbitrary workspace files, transaction paths, and credentials are not resources.
+
+The required write sequence is:
+
+```text
+prepare_ingestion | prepare_synthesis | prepare_refresh
+    -> inspect get_pending_review or bundlewalker://review/pending
+    -> apply_review REVIEW_ID | discard_review REVIEW_ID
+```
+
+Preparation creates at most one durable, private pending transaction under `.bundlewalker/`; it
+does not change live `raw/` or `wiki/` content. The review and exact diff survive an MCP server
+restart and can also be recovered with `bundlewalker review show`, `bundlewalker review apply
+REVIEW_ID`, or `bundlewalker review discard REVIEW_ID`. A second preparation is rejected while a
+review is pending, even before provider work starts. A stale review remains inspectable but cannot
+apply; an incorrect ID leaves the pending review untouched. Explicit discard is the way to free
+the slot.
+
+MCP progress is deliberately coarse: model-backed question and preparation calls, and semantic
+lint, may send one start and one completion notification when the client provides a progress token.
+Cancellation before persistence leaves no review or accepted source. If
+cancellation reaches the client after persistence, the durable review remains discoverable through
+the pending-review tool, resource, or CLI recovery commands; inspect it before choosing apply or
+discard.
+
+### Tool reference
+
+Every MCP input and output schema is a strict JSON object: unknown fields and invalid scalar types
+are rejected, and successful calls return both structured content and a bounded text rendering.
+`model`, where accepted, is an optional PydanticAI model string. The table lists the exact accepted
+fields, structured result type, provider boundary, and state effect.
+
+String limits are part of those schemas: `query` is 1–2,000 characters; `question` and
+`instruction` are 1–20,000; `model` is 1–255; `source_name` is 1–255; inline `content` is at most
+1,000,000; and `concept_id` is 1–4,096. Every complete `ReviewResult` includes its ID, kind,
+pending-or-stale status, summary, complete diff, changed paths, creation time, and resource URI.
+
+| Tool | Strict input fields | Structured result | Provider use | State effect |
+| --- | --- | --- | --- | --- |
+| `workspace_status` | none | `WorkspaceStatus` (name, config version, concept counts, optional review summary) | Never | Read-only. |
+| `search_concepts` | `query`; optional `concept_type`; `limit` 1–10 | `ConceptSearchResult` (concept summaries and resource URIs) | Never | Read-only lexical search. |
+| `ask` | `question`; optional `model` | `AnswerResult` (validated cited answer and rendered Markdown) | Yes | Read-only. |
+| `lint` | optional `semantic` and `model` | `LintResult` (findings and deterministic-error flag) | Only when `semantic` is true | Read-only. |
+| `prepare_ingestion` | `source_name`, `content`; optional `model` | `IngestionResult` (`duplicate` or `pending` with optional `ReviewResult`) | For a new source; duplicates are pre-model | Creates only private pending state. |
+| `prepare_synthesis` | `question`; optional `model` | `SynthesisResult` (answer plus required `ReviewResult`) | Yes | Creates only private pending state. |
+| `prepare_refresh` | `instruction`, `concept_id`; optional `model` | `RefreshResult` (`current` or `pending`, answer, optional review) | Yes | Creates private pending state when changed; a current result creates none. |
+| `get_pending_review` | none | `PendingReviewResult` (optional complete `ReviewResult`) | Never | Read-only. |
+| `apply_review` | lowercase 32-hex-character `review_id` | `MutationResult` (`applied`) | Never | Mutates live content after revalidation. |
+| `discard_review` | lowercase 32-hex-character `review_id` | `MutationResult` (`discarded`) | Never | Removes private pending state; never applies content. |
+
+The annotations distinguish these boundaries too: `workspace_status`, `search_concepts`, and
+`get_pending_review` are read-only, idempotent, closed-world tools; `ask` and `lint` are read-only
+but non-idempotent, open-world tools; the three `prepare_*` tools are non-destructive,
+non-idempotent, open-world private-state operations; and `apply_review` and `discard_review` are
+non-idempotent, closed-world destructive operations. Annotations are hints, not authority: the
+bound workspace, review ID, persisted review state, and digest revalidation enforce the boundary.
+
+MCP ingestion is intentionally inline only. `source_name` must be one simple `.md` or `.txt`
+filename, with no path separators or control characters; `content` is Unicode text whose UTF-8
+encoding becomes the immutable accepted source. There is no `path`, local-file, batch, or
+workspace-selection field in an MCP tool call.
+
+The default test suite remains offline and needs no model credentials or network access:
+`uv run pytest -m 'not eval' -q`. Provider access belongs only to the runtime model-backed tools
+listed above (and to explicit opt-in evaluations), not to deterministic tests or MCP transport.
 
 ## Workspace and process reference
 

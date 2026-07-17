@@ -9,7 +9,9 @@ deterministic code, and must keep the default test suite offline.
 
 BundleWalker v1 ingests one UTF-8 Markdown or text source at a time and produces only four
 concept types: Source, Topic, Entity, and Synthesis. Agents never write files directly. The
-project does not perform automatic Git operations and does not run a background service.
+project does not perform automatic Git operations and does not run a background, hosted, or remote
+service. Its MCP adapter is a foreground local `stdio` process bound to one workspace at startup;
+the local web UI remains a separate next plan.
 
 Before proposing an expansion of that scope, read the accepted
 [v1 design](docs/superpowers/specs/2026-07-15-bundlewalker-v1-design.md) and the relevant records
@@ -22,21 +24,25 @@ design decision, not an incidental implementation change.
 | Layer | Main paths | Responsibility |
 | --- | --- | --- |
 | CLI | `src/bundlewalker/cli.py` | Typer parsing, display, confirmation, and bounded exit behavior |
+| Interfaces | `src/bundlewalker/interfaces/` | CLI compatibility adapter and local `stdio` MCP resources, strict tool schemas, dispatch, and transport |
+| Application | `src/bundlewalker/application/` | Workspace-bound async facade, serializable contracts, and bounded error translation shared by delivery adapters |
 | Workflows | `src/bundlewalker/workflows/` | Recovery, orchestration, pre-model checks, dependency construction, and transaction preparation |
 | Agents | `src/bundlewalker/agents/` | PydanticAI prompts, read-only tools, typed model output, and output validation |
 | Domain | `src/bundlewalker/domain.py` | Pydantic models and bounded proposal/answer/finding types |
 | Changes | `src/bundlewalker/changes.py` | Operation validation, citation validation, rendering, and prospective wiki construction |
 | OKF | `src/bundlewalker/okf/` | Document parsing/rendering, repository reads, indexes/logs/diffs, and deterministic lint |
 | Retrieval | `src/bundlewalker/retrieval.py` | Local lexical concept ranking used by read-only agent tools |
-| Transactions | `src/bundlewalker/transactions.py` | Transaction staging, locked commit/discard/recovery, digest revalidation, and authenticated recovery |
+| Transactions | `src/bundlewalker/transactions.py` | Durable one-at-a-time pending reviews, staging, locked apply/discard/recovery, digest revalidation, and authenticated recovery |
 | Workspace | `src/bundlewalker/workspace.py` | Initialization, discovery, configuration, source identities, and safe paths |
 
-The write flow is `CLI -> workflow -> agent proposal -> deterministic validation -> prospective tree -> review -> transaction commit`.
-The model supplies a typed proposal; application code owns path handling, validation, rendering,
-the complete diff, confirmation, and persistence. Plain `ask` and both lint modes do not authorize
-persistence of new model output or open a new review. Before their normal work, each may complete
-or roll back an already-reviewed transaction interrupted after acceptance; that recovery does not
-authorize persistence of new model output.
+The write flow is `CLI or MCP -> application facade -> workflow -> agent proposal -> deterministic
+validation -> prospective tree -> durable review -> explicit apply/discard`. The model supplies a
+typed proposal; application code owns path handling, validation, rendering, the complete diff,
+review state, and persistence. A preparation may change only private `.bundlewalker/` transaction
+state; applying its exact review ID is the operation that can change live `raw/` or `wiki/`
+content. Plain `ask` and both lint modes do not authorize persistence of new model output or open
+a new review. Read operations preserve a pending review; accepted interrupted transactions may be
+completed or rolled back by authenticated recovery without authorizing new model output.
 
 ## Repository map
 
@@ -73,8 +79,8 @@ run the full offline verification. Review the diff and create an intentional com
 and message match the change.
 
 Documentation-only changes still require validation against live command help and checks for
-broken or stale links. Do not infer CLI syntax from prose when Typer can provide the current
-interface.
+broken or stale links. Do not infer CLI or MCP syntax from prose when live help and `TOOL_SPECS`
+can provide the current interface.
 
 ## Test layers
 
@@ -82,6 +88,9 @@ interface.
 - `tests/agents/`: tool boundaries, prompt framing, model-output validation, and sanitized errors;
 - `tests/workflows/`: orchestration, preconditions, no-ops, and transaction preparation;
 - `tests/cli/`: Typer arguments, output, prompts, exit codes, and routing;
+- `tests/application/`: facade contracts, workspace confinement, and adapter-neutral use cases;
+- `tests/interfaces/`: local MCP resources, strict schemas, tool dispatch, progress/cancellation,
+  and `stdio` process behavior;
 - `tests/test_acceptance.py`: complete offline user workflows and recovery;
 - remaining `tests/test_*.py`: domain, workspace, retrieval, changes, conventions, and
   transactions; and

@@ -103,8 +103,9 @@ and `lint --semantic` do not propose knowledge writes; semantic lint is model-ba
 
 Re-ingesting identical source bytes is a successful pre-model no-op. A refresh whose complete
 canonical replacement is unchanged is also a successful no-op, without a review prompt or log
-entry. Reviewed commits use authenticated transaction state so a later `ingest`, `ask`, or `lint`
-can safely complete or roll back an interrupted write. The [user guide](docs/user-guide.md#maintain-and-recover-the-bundle)
+entry. Reviewed commits use authenticated transaction state so a later command can safely complete
+or roll back an interrupted accepted write. A prepared review instead stays pending until it is
+explicitly applied or discarded. The [user guide](docs/user-guide.md#maintain-and-recover-the-bundle)
 documents the full recovery and process behavior.
 
 ## Common next steps
@@ -128,10 +129,41 @@ Synthesis. Model proposals, answers, paths, metadata, and citations are bounded;
 
 V1 does not ingest URLs, PDFs, images, audio, video, or OCR; batch or watch directories; chunk
 book-sized sources; use embeddings, vector databases, or background indexes; provide a web UI,
-plugin, MCP server, or hosted service; let agents delete, rename, edit conventions, or resolve
-contradictions automatically; or perform multi-user synchronization and Git operations. The
+plugin, hosted or remote service; let agents delete, rename, edit conventions, or resolve
+contradictions automatically; or perform multi-user synchronization and Git operations. The local
+web UI remains unimplemented and is a separate next plan. The
 [user guide](docs/user-guide.md#ingest-and-review-a-source) covers source validation and the
 operating boundary in detail.
+
+## Local MCP server
+
+BundleWalker also exposes one workspace through a local MCP `stdio` server. Configure your MCP
+host to launch this command, replacing the two placeholders with absolute local paths:
+
+```text
+uv run --project PROJECT_ROOT bundlewalker-mcp --workspace WORKSPACE
+```
+
+For example, a host that accepts a command plus argument array can use:
+
+```json
+{
+  "command": "uv",
+  "args": [
+    "run",
+    "--project",
+    "PROJECT_ROOT",
+    "bundlewalker-mcp",
+    "--workspace",
+    "WORKSPACE"
+  ]
+}
+```
+
+The server fixes that workspace at startup. MCP tools never accept a workspace path or a local
+source path, and it does not provide a hosted, remote, HTTP, or web-server transport. See the
+[local MCP guide](docs/user-guide.md#use-bundlewalker-through-a-local-mcp-host) for resources,
+tools, review recovery, provider behavior, and the inline-ingestion boundary.
 
 ## Documentation
 
