@@ -333,7 +333,10 @@ def _accept_and_commit_locked(
 ) -> None:
     if manifest.phase != "prepared":
         raise TransactionError(f"transaction is not pending: {manifest.phase}")
-    _verify_pending_transaction(workspace, transaction_dir, manifest)
+    try:
+        _verify_pending_transaction(workspace, transaction_dir, manifest)
+    except _RawDestinationCompatibilityError as exc:
+        raise ReviewStaleError(f"pending review is stale because {exc}") from exc
     manifest = replace(manifest, phase="accepted")
     _write_manifest(transaction_dir, manifest)
     _resume_accepted_commit_locked(workspace, transaction_dir, manifest)
@@ -349,7 +352,15 @@ def _resume_accepted_commit_locked(
     identity = _load_authenticated_identity(transaction_dir, manifest)
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
 
-    _persist_raw_source(workspace, transaction_dir, manifest)
+    try:
+        _persist_raw_source(workspace, transaction_dir, manifest)
+    except _RawDestinationCompatibilityError as exc:
+        _restore_accepted_review_after_raw_conflict(
+            workspace,
+            transaction_dir,
+            manifest,
+        )
+        raise ReviewStaleError(f"pending review is stale because {exc}") from exc
     manifest = replace(manifest, phase="raw-persisted")
     _write_manifest(transaction_dir, manifest)
     _verify_prospective(
@@ -748,6 +759,13 @@ def _require_compatible_raw_destination(
     manifest: _Manifest,
 ) -> None:
     compatibility = _raw_destination_compatibility(workspace, manifest)
+    if compatibility is not _RawDestinationCompatibility.COMPATIBLE:
+        raise _raw_destination_compatibility_error(compatibility)
+
+
+def _raw_destination_compatibility_error(
+    compatibility: _RawDestinationCompatibility,
+) -> _RawDestinationCompatibilityError:
     messages = {
         _RawDestinationCompatibility.DIFFERENT_DIGEST: ("raw destination has a different digest"),
         _RawDestinationCompatibility.INVALID_PARENT: (
@@ -756,8 +774,9 @@ def _require_compatible_raw_destination(
         _RawDestinationCompatibility.NON_REGULAR: ("raw destination is not a regular file"),
         _RawDestinationCompatibility.UNREADABLE: ("raw destination could not be authenticated"),
     }
-    if compatibility is not _RawDestinationCompatibility.COMPATIBLE:
-        raise _RawDestinationCompatibilityError(messages[compatibility])
+    if compatibility is _RawDestinationCompatibility.COMPATIBLE:
+        raise AssertionError("compatible raw destination has no compatibility error")
+    return _RawDestinationCompatibilityError(messages[compatibility])
 
 
 def _draft_preconditions_match(
@@ -892,6 +911,16 @@ def _recover_accepted_transaction(
     if live_identity == "base":
         _validate_configured_wiki(workspace)
         _revalidate_operations(workspace, manifest.drafts)
+        if (
+            _raw_destination_compatibility(workspace, manifest)
+            is not _RawDestinationCompatibility.COMPATIBLE
+        ):
+            _restore_accepted_review_after_raw_conflict(
+                workspace,
+                transaction_dir,
+                manifest,
+            )
+            return
         _resume_accepted_commit_locked(workspace, transaction_dir, manifest)
         return
     if live_identity == "new" and _new_tree_lints(workspace.wiki_dir, workspace):
@@ -906,6 +935,33 @@ def _recover_accepted_transaction(
     if _raw_destination_exists(workspace, manifest):
         raise TransactionError("accepted transaction raw persistence is ambiguous")
     _cleanup_transaction(workspace, transaction_dir)
+
+
+def _restore_accepted_review_after_raw_conflict(
+    workspace: Workspace,
+    transaction_dir: Path,
+    manifest: _Manifest,
+) -> None:
+    if manifest.schema_version != _SCHEMA_VERSION or manifest.phase != "accepted":
+        raise TransactionError("only an accepted schema-v2 review can be restored")
+    identity = _load_authenticated_identity(transaction_dir, manifest)
+    prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
+    backup = _recovery_backup_path(transaction_dir, backup)
+    _verify_pending_raw_payload(transaction_dir, manifest)
+    _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
+    if _directory_exists(backup, "transaction backup"):
+        raise TransactionError("accepted transaction unexpectedly contains a backup wiki")
+    _validate_configured_wiki(workspace)
+    if not _directory_exists(workspace.wiki_dir, "live wiki"):
+        raise TransactionError("accepted transaction has no authenticated live wiki")
+    _verify_live_base(workspace, transaction_dir, manifest)
+    _revalidate_operations(workspace, manifest.drafts)
+    if (
+        _raw_destination_compatibility(workspace, manifest)
+        is _RawDestinationCompatibility.COMPATIBLE
+    ):
+        raise TransactionError("accepted transaction raw persistence is ambiguous")
+    _write_manifest(transaction_dir, replace(manifest, phase="prepared"))
 
 
 def _recover_known_topology(
@@ -1193,51 +1249,62 @@ def _persist_raw_source(
         raise TransactionError("transaction raw payload is missing")
     if _file_digest(payload) != manifest.raw_sha256:
         raise TransactionError("transaction raw payload has a different digest")
-    relative_value = _validated_raw_relative(workspace, Path(manifest.raw_path))
+    relative_value = _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
     relative = PurePosixPath(relative_value)
     configured = PurePosixPath(workspace.config.raw_dir)
     parent_parts = relative.parts[:-1]
-    with _open_workspace_directory(
-        workspace,
-        parent_parts,
-        create_from=len(configured.parts),
-        label="raw destination parent",
-    ) as parent_descriptor:
-        try:
+    try:
+        with _open_workspace_directory(
+            workspace,
+            parent_parts,
+            create_from=len(configured.parts),
+            label="raw destination parent",
+        ) as parent_descriptor:
             try:
-                os.link(
-                    payload,
-                    relative.name,
-                    dst_dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileExistsError:
-                metadata = os.stat(
-                    relative.name,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-                if not stat.S_ISREG(metadata.st_mode):
-                    raise TransactionError(
-                        f"raw destination is occupied: {manifest.raw_path}"
-                    ) from None
+                try:
+                    os.link(
+                        payload,
+                        relative.name,
+                        dst_dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    metadata = os.stat(
+                        relative.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise _RawDestinationCompatibilityError(
+                            "raw destination is not a regular file"
+                        ) from None
+                    if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
+                        raise _RawDestinationCompatibilityError(
+                            "raw destination has a different digest"
+                        ) from None
                 if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
-                    raise TransactionError(
-                        f"raw destination has a different digest: {manifest.raw_path}"
-                    ) from None
-            if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
-                raise TransactionError(
-                    f"persisted raw source failed digest verification: {manifest.raw_path}"
-                )
-            os.fsync(parent_descriptor)
-        except OSError as exc:
-            raise TransactionError(f"could not create raw source: {manifest.raw_path}") from exc
-    with _open_workspace_directory(
-        workspace,
-        configured.parts,
-        label="configured raw path",
-    ):
-        pass
+                    raise _RawDestinationCompatibilityError(
+                        "persisted raw source failed digest verification"
+                    )
+                os.fsync(parent_descriptor)
+            except _RawDestinationCompatibilityError:
+                raise
+            except (OSError, TransactionError) as exc:
+                raise _RawDestinationCompatibilityError(
+                    "raw destination could not be safely persisted"
+                ) from exc
+        with _open_workspace_directory(
+            workspace,
+            configured.parts,
+            label="configured raw path",
+        ):
+            pass
+    except _RawDestinationCompatibilityError:
+        raise
+    except TransactionError as exc:
+        raise _RawDestinationCompatibilityError(
+            "raw destination could not be safely persisted"
+        ) from exc
 
 
 def _raw_destination_exists(workspace: Workspace, manifest: _Manifest) -> bool:

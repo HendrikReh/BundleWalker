@@ -1145,6 +1145,144 @@ def test_apply_revalidates_raw_destination_changed_after_status_before_acceptanc
     assert destination.read_bytes() == b"raced conflicting bytes\n"
 
 
+def test_final_raw_check_runs_after_live_checks_and_preserves_prepared_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    destination = prepared.workspace.root / source.stored_relative_path
+    events: list[str] = []
+    original_verify_live = transactions._verify_live_base  # pyright: ignore[reportPrivateUsage]
+    original_require_raw = transactions._require_compatible_raw_destination  # pyright: ignore[reportPrivateUsage]
+
+    def observe_live_check(
+        workspace: Workspace,
+        transaction_dir: Path,
+        manifest: transactions._Manifest,  # pyright: ignore[reportPrivateUsage]
+    ) -> None:
+        events.append("live-base")
+        original_verify_live(workspace, transaction_dir, manifest)
+
+    def inject_at_final_raw_check(
+        workspace: Workspace,
+        manifest: transactions._Manifest,  # pyright: ignore[reportPrivateUsage]
+    ) -> None:
+        events.append("raw-destination")
+        destination.write_bytes(b"boundary conflicting bytes\n")
+        original_require_raw(workspace, manifest)
+
+    monkeypatch.setattr(transactions, "_verify_live_base", observe_live_check)
+    monkeypatch.setattr(
+        transactions,
+        "_require_compatible_raw_destination",
+        inject_at_final_raw_check,
+    )
+
+    with pytest.raises(ReviewStaleError, match="raw destination"):
+        apply_pending_review(prepared.workspace, pending.review_id)
+
+    assert events == ["live-base", "raw-destination"]
+    assert _manifest(prepared)["phase"] == "prepared"
+    assert destination.read_bytes() == b"boundary conflicting bytes\n"
+
+
+def test_raw_conflict_after_accepted_rolls_back_to_stale_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    destination = prepared.workspace.root / source.stored_relative_path
+    original_persist = transactions._persist_raw_source  # pyright: ignore[reportPrivateUsage]
+
+    def race_after_acceptance(
+        workspace: Workspace,
+        transaction_dir: Path,
+        manifest: transactions._Manifest,  # pyright: ignore[reportPrivateUsage]
+    ) -> None:
+        assert manifest.phase == "accepted"
+        assert _manifest(prepared)["phase"] == "accepted"
+        destination.write_bytes(b"post-accept conflicting bytes\n")
+        original_persist(workspace, transaction_dir, manifest)
+
+    monkeypatch.setattr(transactions, "_persist_raw_source", race_after_acceptance)
+
+    with pytest.raises(ReviewStaleError, match="raw destination"):
+        apply_pending_review(prepared.workspace, pending.review_id)
+
+    assert _manifest(prepared)["phase"] == "prepared"
+    loaded = get_pending_review(discover_workspace(prepared.workspace.root))
+    assert loaded is not None
+    assert loaded.review_id == pending.review_id
+    assert loaded.diff == pending.diff
+    assert loaded.status is ReviewStatus.STALE
+    discard_pending_review(prepared.workspace, loaded.review_id)
+    assert destination.read_bytes() == b"post-accept conflicting bytes\n"
+    assert not prepared.transaction_dir.exists()
+
+
+def test_accepted_restart_with_raw_conflict_recovers_stale_review(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    destination = prepared.workspace.root / source.stored_relative_path
+    _set_phase(prepared, "accepted")
+    destination.write_bytes(b"restart conflicting bytes\n")
+
+    restarted = discover_workspace(prepared.workspace.root)
+    loaded = get_pending_review(restarted)
+
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.diff == prepared.diff
+    assert loaded.status is ReviewStatus.STALE
+    assert _manifest(prepared)["phase"] == "prepared"
+    with pytest.raises(ReviewStaleError):
+        apply_pending_review(restarted, loaded.review_id)
+    discard_pending_review(restarted, loaded.review_id)
+    assert destination.read_bytes() == b"restart conflicting bytes\n"
+    assert not prepared.transaction_dir.exists()
+
+
+def test_accepted_raw_conflict_with_corrupt_payload_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    destination = prepared.workspace.root / source.stored_relative_path
+    _set_phase(prepared, "accepted")
+    destination.write_bytes(b"external conflicting bytes\n")
+    (prepared.transaction_dir / "raw-source").write_bytes(b"corrupt staged bytes\n")
+
+    with pytest.raises(TransactionError, match="raw payload has a different digest"):
+        get_pending_review(discover_workspace(prepared.workspace.root))
+
+    assert _manifest(prepared)["phase"] == "accepted"
+    assert destination.read_bytes() == b"external conflicting bytes\n"
+    with pytest.raises(TransactionError):
+        discard_pending_review(prepared.workspace, prepared.transaction_id)
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_accepted_raw_conflict_with_backup_remains_fail_closed(tmp_path: Path) -> None:
+    prepared, source = _prepare(tmp_path)
+    destination = prepared.workspace.root / source.stored_relative_path
+    _set_phase(prepared, "accepted")
+    destination.write_bytes(b"external conflicting bytes\n")
+    prepared.backup_wiki.mkdir()
+
+    with pytest.raises(TransactionError, match="unexpectedly contains a backup"):
+        get_pending_review(discover_workspace(prepared.workspace.root))
+
+    assert _manifest(prepared)["phase"] == "accepted"
+    assert destination.read_bytes() == b"external conflicting bytes\n"
+    with pytest.raises(TransactionError):
+        discard_pending_review(prepared.workspace, prepared.transaction_id)
+    assert prepared.transaction_dir.is_dir()
+
+
 def test_exact_preexisting_raw_destination_is_compatible_with_pending_apply(
     tmp_path: Path,
 ) -> None:
