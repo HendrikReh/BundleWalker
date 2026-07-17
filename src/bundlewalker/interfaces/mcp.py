@@ -6,9 +6,13 @@ from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
+import anyio
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import types
 from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.lowlevel.server import Server
+from mcp.server.models import InitializationOptions
+from mcp.shared.message import SessionMessage
 from pydantic import AnyUrl
 
 from bundlewalker.application import (
@@ -19,6 +23,7 @@ from bundlewalker.application import (
 from bundlewalker.domain import MAX_CONCEPT_ID_CHARACTERS
 
 _CONCEPT_AUTHORITY = "concept"
+_INVALID_RESOURCE_URI = "bundlewalker://invalid/resource-uri"
 _PENDING_REVIEW_URI = "bundlewalker://review/pending"
 _REVIEW_AUTHORITY = "review"
 
@@ -28,9 +33,33 @@ async def _lifespan(_: Server[None]) -> AsyncGenerator[None]:
     yield None
 
 
+class _RawUriValidatingServer(Server[None]):
+    async def run(
+        self,
+        read_stream: MemoryObjectReceiveStream[SessionMessage | Exception],
+        write_stream: MemoryObjectSendStream[SessionMessage],
+        initialization_options: InitializationOptions,
+        raise_exceptions: bool = False,
+        stateless: bool = False,
+    ) -> None:
+        forwarded_send, forwarded_receive = anyio.create_memory_object_stream[
+            SessionMessage | Exception
+        ](0)
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(_forward_validated_messages, read_stream, forwarded_send)
+            await super().run(
+                forwarded_receive,
+                write_stream,
+                initialization_options,
+                raise_exceptions=raise_exceptions,
+                stateless=stateless,
+            )
+            task_group.cancel_scope.cancel()
+
+
 def create_mcp_server(application: WorkspaceApplication) -> Server[None]:
     """Create a transport-free MCP server backed by ``application``."""
-    server: Server[None] = Server("bundlewalker", lifespan=_lifespan)
+    server: Server[None] = _RawUriValidatingServer("bundlewalker", lifespan=_lifespan)
 
     async def _list_resources(request: types.ListResourcesRequest) -> types.ListResourcesResult:
         cursor = request.params.cursor if request.params is not None else None
@@ -66,10 +95,13 @@ def create_mcp_server(application: WorkspaceApplication) -> Server[None]:
         ]
 
     async def _read_resource(uri: AnyUrl) -> list[ReadResourceContents]:
-        parsed = urlsplit(str(uri))
+        uri_text = str(uri)
+        parsed = urlsplit(uri_text)
         if (
             parsed.scheme != "bundlewalker"
             or parsed.netloc not in {_CONCEPT_AUTHORITY, _REVIEW_AUTHORITY}
+            or "?" in uri_text
+            or "#" in uri_text
             or parsed.query
             or parsed.fragment
         ):
@@ -107,6 +139,44 @@ def create_mcp_server(application: WorkspaceApplication) -> Server[None]:
     server.list_resource_templates()(_list_resource_templates)
     server.read_resource()(_read_resource)
     return server
+
+
+async def _forward_validated_messages(
+    read_stream: MemoryObjectReceiveStream[SessionMessage | Exception],
+    write_stream: MemoryObjectSendStream[SessionMessage | Exception],
+) -> None:
+    async with read_stream, write_stream:
+        async for message in read_stream:
+            await write_stream.send(_guard_raw_resource_uri(message))
+
+
+def _guard_raw_resource_uri(message: SessionMessage | Exception) -> SessionMessage | Exception:
+    if isinstance(message, Exception):
+        return message
+    request = message.message.root
+    if not isinstance(request, types.JSONRPCRequest) or request.method != "resources/read":
+        return message
+    params = request.params
+    if not isinstance(params, dict):
+        return message
+    uri = params.get("uri")
+    if not isinstance(uri, str) or not _has_dot_path_segment(uri):
+        return message
+    guarded_request = request.model_copy(
+        update={"params": {**params, "uri": _INVALID_RESOURCE_URI}}
+    )
+    return SessionMessage(
+        message=types.JSONRPCMessage(guarded_request),
+        metadata=message.metadata,
+    )
+
+
+def _has_dot_path_segment(uri: str) -> bool:
+    try:
+        raw_segments = urlsplit(uri).path.split("/")
+        return any(unquote(segment, errors="strict") in {".", ".."} for segment in raw_segments)
+    except (UnicodeDecodeError, ValueError):
+        return False
 
 
 def _pending_review_resource() -> types.Resource:

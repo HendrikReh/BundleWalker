@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, cast
 
 import pytest
 from mcp import types
+from mcp.client.session import ClientSession
 from mcp.shared.exceptions import McpError
 from mcp.shared.memory import create_connected_server_and_client_session
-from pydantic import AnyUrl
+from pydantic import AnyUrl, BaseModel
 
 from bundlewalker.application import WorkspaceApplication
 from bundlewalker.domain import Citation, CitedAnswer, OkfMetadata
@@ -18,6 +20,23 @@ from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
 from bundlewalker.workspace import Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
+
+
+class _RawReadResourceParams(BaseModel):
+    uri: str
+
+
+class _RawReadResourceRequest(BaseModel):
+    method: Literal["resources/read"] = "resources/read"
+    params: _RawReadResourceParams
+
+
+async def _read_raw_resource(session: ClientSession, uri: str) -> types.ReadResourceResult:
+    request = _RawReadResourceRequest(params=_RawReadResourceParams(uri=uri))
+    return await session.send_request(
+        cast(types.ClientRequest, request),
+        types.ReadResourceResult,
+    )
 
 
 def _workspace(tmp_path: Path, *, concept_count: int = 2) -> Workspace:
@@ -191,6 +210,50 @@ async def test_mcp_rejects_invalid_resource_uris(
     async with create_connected_server_and_client_session(server) as session:
         with pytest.raises(McpError, match="invalid resource URI"):
             await session.read_resource(AnyUrl(uri))
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "bundlewalker://concept/topics/./agents",
+        "bundlewalker://concept/junk/../topics/agents",
+        "bundlewalker://concept/topics/%2E/agents",
+        "bundlewalker://concept/junk/%2E%2E/topics/agents",
+        "bundlewalker://review/./pending",
+        "bundlewalker://review/other/../pending",
+        "bundlewalker://review/%2E/pending",
+        "bundlewalker://review/other/%2E%2E/pending",
+    ],
+)
+async def test_mcp_rejects_raw_dot_segments_before_uri_normalization(
+    application_with_pending_review: WorkspaceApplication,
+    uri: str,
+) -> None:
+    server = create_mcp_server(application_with_pending_review)
+
+    async with create_connected_server_and_client_session(server) as session:
+        with pytest.raises(McpError, match="invalid resource URI"):
+            await _read_raw_resource(session, uri)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "bundlewalker://concept/topics/agents?",
+        "bundlewalker://concept/topics/agents#",
+        "bundlewalker://review/pending?",
+        "bundlewalker://review/pending#",
+    ],
+)
+async def test_mcp_rejects_empty_query_and_fragment_delimiters(
+    application_with_pending_review: WorkspaceApplication,
+    uri: str,
+) -> None:
+    server = create_mcp_server(application_with_pending_review)
+
+    async with create_connected_server_and_client_session(server) as session:
+        with pytest.raises(McpError, match="invalid resource URI"):
+            await _read_raw_resource(session, uri)
 
 
 async def test_mcp_reports_a_bounded_error_for_a_missing_concept(
