@@ -289,6 +289,41 @@ def test_prepare_persists_exact_review_record_and_identity(tmp_path: Path) -> No
     assert identity["review_digest"] == hashlib.sha256(review_path.read_bytes()).hexdigest()
 
 
+def test_load_review_authenticates_the_same_bytes_it_parses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _source = _prepare(tmp_path)
+    review_path = prepared.transaction_dir / "review.json"
+    expected_digest = hashlib.sha256(review_path.read_bytes()).hexdigest()
+    original_read_text = Path.read_text
+
+    def replace_after_text_read(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        content = original_read_text(
+            path,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+        if path == review_path:
+            path.write_text('{"replacement": true}\n', encoding="utf-8")
+        return content
+
+    monkeypatch.setattr(Path, "read_text", replace_after_text_read)
+
+    review = transactions._load_review(  # pyright: ignore[reportPrivateUsage]
+        prepared.transaction_dir,
+        expected_digest,
+    )
+
+    assert review.transaction_id == prepared.transaction_id
+
+
 def test_discard_removes_only_the_prepared_transaction(tmp_path: Path) -> None:
     prepared, _ = _prepare(tmp_path)
     live_wiki = _tree_bytes(prepared.workspace.wiki_dir)

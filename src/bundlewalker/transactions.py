@@ -1165,11 +1165,15 @@ def _load_review(transaction_dir: Path, expected_digest: str) -> _ReviewRecord:
         raise TransactionError("transaction review digest is invalid")
     path = transaction_dir / _REVIEW_NAME
     try:
-        parsed: object = json.loads(path.read_text(encoding="utf-8"))
+        content = path.read_bytes()
+    except OSError as exc:
+        raise TransactionError("transaction review is unavailable") from exc
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise TransactionError("transaction review digest does not match its identity")
+    try:
+        parsed: object = json.loads(content.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TransactionError("transaction review is unavailable") from exc
-    if _review_digest(transaction_dir) != expected_digest:
-        raise TransactionError("transaction review digest does not match its identity")
     if not isinstance(parsed, dict):
         raise TransactionError("transaction review is malformed")
     untyped_values = cast(dict[object, object], parsed)
