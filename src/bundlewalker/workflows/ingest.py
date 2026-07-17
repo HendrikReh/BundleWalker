@@ -13,7 +13,12 @@ from bundlewalker.changes import ChangeValidationContext, validate_change_set
 from bundlewalker.domain import ChangeSet
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
-from bundlewalker.transactions import PreparedTransaction, prepare_transaction, recover_transactions
+from bundlewalker.transactions import (
+    PreparedTransaction,
+    ReviewKind,
+    prepare_transaction,
+    recover_transactions,
+)
 from bundlewalker.workflows.context import read_context, validate_repository_path
 from bundlewalker.workspace import RawSource, Workspace, load_raw_source
 
@@ -86,6 +91,7 @@ async def prepare_ingestion(
         context,
         source,
         occurred_at or datetime.now(UTC),
+        kind=ReviewKind.INGESTION,
     )
     return PreparedIngestion(transaction=transaction)
 

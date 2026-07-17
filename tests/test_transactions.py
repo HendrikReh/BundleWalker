@@ -27,6 +27,7 @@ from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import (
     PreparedTransaction,
+    ReviewKind,
     commit_transaction,
     discard_transaction,
     prepare_transaction,
@@ -131,6 +132,7 @@ def _prepare(tmp_path: Path) -> tuple[PreparedTransaction, RawSource]:
         context,
         source,
         NOW,
+        kind=ReviewKind.INGESTION,
     )
     return prepared, source
 
@@ -230,6 +232,7 @@ def test_prepare_stages_a_complete_review_without_live_writes(tmp_path: Path) ->
         context,
         source,
         NOW,
+        kind=ReviewKind.INGESTION,
     )
 
     added_files = set(_tree_bytes(workspace.root)) - files_before
@@ -247,7 +250,7 @@ def test_prepare_stages_a_complete_review_without_live_writes(tmp_path: Path) ->
     assert prepared.summary == change_set.summary
 
     values = _manifest(prepared)
-    assert values["schema_version"] == 1
+    assert values["schema_version"] == 2
     assert values["transaction_id"] == prepared.transaction_id
     assert values["phase"] == "prepared"
     assert values["raw_path"] == source.stored_relative_path.as_posix()
@@ -264,6 +267,26 @@ def test_prepare_stages_a_complete_review_without_live_writes(tmp_path: Path) ->
     ]
     assert (prepared.transaction_dir / "raw-source").read_bytes() == source.content
     assert not (prepared.transaction_dir / "validation-workspace").exists()
+
+
+def test_prepare_persists_exact_review_record_and_identity(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    review_path = prepared.transaction_dir / "review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    identity = json.loads(
+        (prepared.transaction_dir / "identity.json").read_text(encoding="utf-8")
+    )
+
+    assert review == {
+        "changed_paths": [prepared.change_set.drafts[0].path],
+        "created_at": NOW.isoformat(),
+        "diff": prepared.diff,
+        "kind": "ingestion",
+        "schema_version": 1,
+        "summary": prepared.summary,
+        "transaction_id": prepared.transaction_id,
+    }
+    assert identity["review_digest"] == hashlib.sha256(review_path.read_bytes()).hexdigest()
 
 
 def test_discard_removes_only_the_prepared_transaction(tmp_path: Path) -> None:
@@ -309,7 +332,14 @@ def test_transaction_without_a_raw_source_commits_a_synthesis(tmp_path: Path) ->
         readable_concepts=frozenset(),
     )
 
-    prepared = prepare_transaction(workspace, change_set, context, None, NOW)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        None,
+        NOW,
+        kind=ReviewKind.SYNTHESIS,
+    )
 
     values = _manifest(prepared)
     assert values["raw_path"] is None
@@ -352,7 +382,14 @@ def test_commit_rechecks_replacement_digest_before_any_persistence(tmp_path: Pat
         base_digest=existing.digest,
     )
     change_set = change_set.model_copy(update={"drafts": [*change_set.drafts, replacement]})
-    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
     topic_path.write_text(
         topic_path.read_text(encoding="utf-8") + "external edit\n",
         encoding="utf-8",
@@ -575,7 +612,14 @@ def test_prepare_fsyncs_the_transactions_parent_after_directory_creation(
 
     monkeypatch.setattr(transactions, "_sync_directory", recording_sync)
 
-    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
 
     assert prepared.transaction_dir.is_dir()
     assert True in observations
@@ -862,7 +906,14 @@ def test_uuid_collision_does_not_delete_an_unowned_transaction_directory(
     monkeypatch.setattr(transactions.uuid, "uuid4", return_fixed_uuid)
 
     with pytest.raises(TransactionError, match="prepare transaction"):
-        prepare_transaction(workspace, change_set, context, source, NOW)
+        prepare_transaction(
+            workspace,
+            change_set,
+            context,
+            source,
+            NOW,
+            kind=ReviewKind.INGESTION,
+        )
 
     assert sentinel.read_text(encoding="utf-8") == "pre-existing\n"
 
@@ -872,7 +923,14 @@ def test_commit_rejects_a_linked_configured_wiki_ancestor_without_touching_outsi
 ) -> None:
     workspace = _nested_workspace(tmp_path, nested_wiki=True)
     source, change_set, context = _ingestion_in_workspace(tmp_path, workspace)
-    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
     outside = tmp_path / "outside-wiki-parent"
     outside.mkdir()
     shutil.copytree(workspace.wiki_dir, outside / "wiki")
@@ -894,7 +952,14 @@ def test_raw_persistence_never_follows_an_intermediate_directory_swap(
 ) -> None:
     workspace = _nested_workspace(tmp_path, nested_raw=True)
     source, change_set, context = _ingestion_in_workspace(tmp_path, workspace)
-    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
     outside = tmp_path / "outside-raw-parent"
     (outside / "raw").mkdir(parents=True)
     configured = workspace.root / "configured"
@@ -1001,7 +1066,14 @@ def test_nested_wiki_commit_syncs_live_parent_after_each_rename(
 ) -> None:
     workspace = _nested_workspace(tmp_path, nested_wiki=True)
     source, change_set, context = _ingestion_in_workspace(tmp_path, workspace)
-    prepared = prepare_transaction(workspace, change_set, context, source, NOW)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
     events: list[tuple[str, str, str | None]] = []
     original_rename = os.rename
     original_sync = transactions._sync_directory  # pyright: ignore[reportPrivateUsage]

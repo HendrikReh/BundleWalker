@@ -37,7 +37,12 @@ from bundlewalker.errors import (
 from bundlewalker.okf.documents import document_digest
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
-from bundlewalker.transactions import PreparedTransaction, prepare_transaction, recover_transactions
+from bundlewalker.transactions import (
+    PreparedTransaction,
+    ReviewKind,
+    prepare_transaction,
+    recover_transactions,
+)
 from bundlewalker.workflows.context import (
     open_workspace_directory,
     read_context,
@@ -174,6 +179,7 @@ def prepare_synthesis(
         context,
         None,
         occurred_at or datetime.now(UTC),
+        kind=ReviewKind.SYNTHESIS,
     )
 
 
@@ -224,6 +230,7 @@ def prepare_synthesis_refresh(
         context,
         None,
         actual_occurred_at,
+        kind=ReviewKind.REFRESH,
     )
 
 

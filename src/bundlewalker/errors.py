@@ -31,3 +31,21 @@ class AgentRunError(BundleWalkerError):
 
 class TransactionError(BundleWalkerError):
     pass
+
+
+class ReviewPendingError(TransactionError):
+    def __init__(self, review_id: str) -> None:
+        self.review_id = review_id
+        super().__init__(f"workspace already has a pending review: {review_id}")
+
+
+class ReviewNotFoundError(TransactionError):
+    pass
+
+
+class ReviewMismatchError(TransactionError):
+    pass
+
+
+class ReviewStaleError(TransactionError):
+    pass

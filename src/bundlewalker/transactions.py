@@ -13,21 +13,29 @@ from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from bundlewalker.changes import ChangeValidationContext, build_prospective_wiki
-from bundlewalker.domain import ChangeOperation, ChangeSet
+from bundlewalker.domain import (
+    MAX_CHANGESET_DRAFTS,
+    MAX_CHANGESET_SUMMARY_CHARACTERS,
+    ChangeOperation,
+    ChangeSet,
+)
 from bundlewalker.errors import OkfError, TransactionError
 from bundlewalker.okf.derived import tree_diff
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.workspace import RawSource, Workspace
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _TRANSACTIONS_PATH = PurePosixPath(".bundlewalker/transactions")
 _MANIFEST_NAME = "manifest.json"
 _IDENTITY_NAME = "identity.json"
+_REVIEW_NAME = "review.json"
+_REVIEW_SCHEMA_VERSION = 1
 _PROSPECTIVE_NAME = "prospective-wiki"
 _BACKUP_NAME = "backup-wiki"
 _VALIDATION_WORKSPACE_NAME = "validation-workspace"
@@ -36,6 +44,8 @@ _LOCK_NAME = "transaction.lock"
 _QUARANTINE_PREFIX = ".retired-backup-"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _Phase = Literal["prepared", "raw-persisted", "swapping", "new-live"]
+_SCHEMA_V1_PHASES = frozenset({"prepared", "raw-persisted", "swapping", "new-live"})
+_SCHEMA_V2_PHASES = frozenset({"prepared", "raw-persisted", "swapping", "new-live"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +68,43 @@ class PreparedTransaction:
     @property
     def base_wiki_digest(self) -> str:
         return self._identity.base_wiki_digest
+
+    @property
+    def review_digest(self) -> str | None:
+        return self._identity.review_digest
+
+
+class ReviewKind(StrEnum):
+    INGESTION = "ingestion"
+    SYNTHESIS = "synthesis"
+    REFRESH = "refresh"
+
+
+class ReviewStatus(StrEnum):
+    PENDING = "pending"
+    STALE = "stale"
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionReview:
+    review_id: str
+    kind: ReviewKind
+    status: ReviewStatus
+    summary: str
+    diff: str
+    changed_paths: tuple[str, ...]
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewRecord:
+    schema_version: int
+    transaction_id: str
+    kind: ReviewKind
+    summary: str
+    diff: str
+    changed_paths: tuple[str, ...]
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +133,7 @@ class _Manifest:
 class _Identity:
     base_wiki_digest: str
     prospective_digest: str
+    review_digest: str | None = None
 
 
 class _IncompleteManifestError(Exception):
@@ -102,6 +150,8 @@ def prepare_transaction(
     context: ChangeValidationContext,
     raw_source: RawSource | None,
     occurred_at: datetime,
+    *,
+    kind: ReviewKind,
 ) -> PreparedTransaction:
     """Build a reviewed wiki tree and durable journal without changing live knowledge."""
     _validate_source_pair(context, raw_source)
@@ -130,6 +180,15 @@ def prepare_transaction(
         diff = tree_diff(workspace.wiki_dir, prospective_wiki)
         prospective_digest = _tree_digest(prospective_wiki)
         base_wiki_digest = _tree_digest(validation_workspace.wiki_dir)
+        review = _ReviewRecord(
+            schema_version=_REVIEW_SCHEMA_VERSION,
+            transaction_id=transaction_id,
+            kind=kind,
+            summary=change_set.summary,
+            diff=diff,
+            changed_paths=tuple(_canonical_concept_id(draft.path) for draft in change_set.drafts),
+            created_at=occurred_at,
+        )
         manifest = _Manifest(
             schema_version=_SCHEMA_VERSION,
             transaction_id=transaction_id,
@@ -156,11 +215,13 @@ def prepare_transaction(
         )
         _write_raw_payload(transaction_dir, raw_source)
         _remove_tree(validation_root)
+        _write_review(transaction_dir, review)
         _write_identity(
             transaction_dir,
             _Identity(
                 base_wiki_digest=base_wiki_digest,
                 prospective_digest=prospective_digest,
+                review_digest=_review_digest(transaction_dir),
             ),
         )
         _write_manifest(transaction_dir, manifest)
@@ -190,6 +251,7 @@ def prepare_transaction(
         _Identity(
             base_wiki_digest=base_wiki_digest,
             prospective_digest=prospective_digest,
+            review_digest=_review_digest(transaction_dir),
         ),
     )
     return prepared
@@ -359,6 +421,7 @@ def _recover_transaction(
         or manifest.prospective_digest != identity.prospective_digest
     ):
         raise TransactionError("manifest identities do not match transaction identity")
+    _validate_manifest_review(transaction_dir, manifest)
     _recover_known_topology(
         workspace,
         transaction_dir,
@@ -822,6 +885,7 @@ def _validate_prepared_handle(
             or manifest.raw_sha256 != prepared.raw_source.sha256
         ):
             raise TransactionError("prepared raw path does not match its source")
+    _validate_manifest_review(prepared.transaction_dir, manifest)
 
 
 def _ensure_transactions_root(workspace: Workspace) -> Path:
@@ -899,9 +963,10 @@ def _load_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
         drafts_value = raw_values["drafts"]
     except (KeyError, TypeError, ValueError) as exc:
         raise _IncompleteManifestError from exc
-    if schema_version != _SCHEMA_VERSION:
+    if schema_version not in {1, _SCHEMA_VERSION}:
         raise TransactionError(f"unsupported transaction schema version: {schema_version}")
-    if phase_value not in {"prepared", "raw-persisted", "swapping", "new-live"}:
+    valid_phases = _SCHEMA_V1_PHASES if schema_version == 1 else _SCHEMA_V2_PHASES
+    if phase_value not in valid_phases:
         raise TransactionError(f"invalid transaction phase: {phase_value}")
     if not isinstance(drafts_value, list):
         raise _IncompleteManifestError
@@ -999,15 +1064,14 @@ def _write_manifest(transaction_dir: Path, manifest: _Manifest) -> None:
 
 def _write_identity(transaction_dir: Path, identity: _Identity) -> None:
     path = transaction_dir / _IDENTITY_NAME
+    values: dict[str, object] = {
+        "base_wiki_digest": identity.base_wiki_digest,
+        "prospective_digest": identity.prospective_digest,
+    }
+    if identity.review_digest is not None:
+        values["review_digest"] = identity.review_digest
     content = (
-        json.dumps(
-            {
-                "base_wiki_digest": identity.base_wiki_digest,
-                "prospective_digest": identity.prospective_digest,
-            },
-            indent=2,
-            sort_keys=True,
-        )
+        json.dumps(values, indent=2, sort_keys=True)
         + "\n"
     ).encode()
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -1033,14 +1097,147 @@ def _load_identity(transaction_dir: Path) -> _Identity:
     values = cast(dict[object, object], parsed)
     base = values.get("base_wiki_digest")
     prospective = values.get("prospective_digest")
+    review_digest = values.get("review_digest")
     if (
         not isinstance(base, str)
         or _SHA256.fullmatch(base) is None
         or not isinstance(prospective, str)
         or _SHA256.fullmatch(prospective) is None
+        or (review_digest is not None and not isinstance(review_digest, str))
+        or (isinstance(review_digest, str) and _SHA256.fullmatch(review_digest) is None)
     ):
         raise _IncompleteManifestError
-    return _Identity(base_wiki_digest=base, prospective_digest=prospective)
+    return _Identity(
+        base_wiki_digest=base,
+        prospective_digest=prospective,
+        review_digest=review_digest,
+    )
+
+
+def _validate_manifest_review(transaction_dir: Path, manifest: _Manifest) -> None:
+    if manifest.schema_version == 1:
+        return
+    identity = _load_identity(transaction_dir)
+    if identity.review_digest is None:
+        raise TransactionError("schema-v2 transaction identity is missing its review digest")
+    review = _load_review(transaction_dir, identity.review_digest)
+    if review.transaction_id != manifest.transaction_id:
+        raise TransactionError("transaction review ID does not match its manifest")
+    if review.summary != manifest.summary:
+        raise TransactionError("transaction review summary does not match its manifest")
+    if review.changed_paths != tuple(draft.path for draft in manifest.drafts):
+        raise TransactionError("transaction review paths do not match its manifest")
+
+
+def _review_values(record: _ReviewRecord) -> dict[str, object]:
+    return {
+        "changed_paths": list(record.changed_paths),
+        "created_at": record.created_at.isoformat(),
+        "diff": record.diff,
+        "kind": record.kind.value,
+        "schema_version": record.schema_version,
+        "summary": record.summary,
+        "transaction_id": record.transaction_id,
+    }
+
+
+def _review_digest(transaction_dir: Path) -> str:
+    return _file_digest(transaction_dir / _REVIEW_NAME)
+
+
+def _write_review(transaction_dir: Path, record: _ReviewRecord) -> None:
+    path = transaction_dir / _REVIEW_NAME
+    content = (json.dumps(_review_values(record), indent=2, sort_keys=True) + "\n").encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as review_file:
+            review_file.write(content)
+            review_file.flush()
+            os.fsync(review_file.fileno())
+        _sync_directory(transaction_dir)
+    except OSError as exc:
+        raise TransactionError("could not persist transaction review") from exc
+
+
+def _load_review(transaction_dir: Path, expected_digest: str) -> _ReviewRecord:
+    if _SHA256.fullmatch(expected_digest) is None:
+        raise TransactionError("transaction review digest is invalid")
+    path = transaction_dir / _REVIEW_NAME
+    try:
+        parsed: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransactionError("transaction review is unavailable") from exc
+    if _review_digest(transaction_dir) != expected_digest:
+        raise TransactionError("transaction review digest does not match its identity")
+    if not isinstance(parsed, dict):
+        raise TransactionError("transaction review is malformed")
+    untyped_values = cast(dict[object, object], parsed)
+    if not all(isinstance(key, str) for key in untyped_values):
+        raise TransactionError("transaction review is malformed")
+    values = cast(dict[str, object], untyped_values)
+    expected_keys = {
+        "changed_paths",
+        "created_at",
+        "diff",
+        "kind",
+        "schema_version",
+        "summary",
+        "transaction_id",
+    }
+    if set(values) != expected_keys:
+        raise TransactionError("transaction review has unexpected fields")
+    try:
+        schema_version = _required_int(values, "schema_version")
+        transaction_id = _required_string(values, "transaction_id")
+        kind = ReviewKind(_required_string(values, "kind"))
+        summary = _required_string(values, "summary")
+        diff = _required_string(values, "diff")
+        created_at = datetime.fromisoformat(_required_string(values, "created_at"))
+        changed_paths_value = values["changed_paths"]
+    except (TypeError, ValueError) as exc:
+        raise TransactionError("transaction review is malformed") from exc
+    if schema_version != _REVIEW_SCHEMA_VERSION:
+        raise TransactionError(f"unsupported review schema version: {schema_version}")
+    try:
+        parsed_uuid = uuid.UUID(transaction_id)
+    except ValueError as exc:
+        raise TransactionError("transaction review ID is not UUID-safe") from exc
+    if parsed_uuid.hex != transaction_id:
+        raise TransactionError("transaction review ID is not UUID-safe")
+    if not 1 <= len(summary) <= MAX_CHANGESET_SUMMARY_CHARACTERS:
+        raise TransactionError("transaction review summary is outside supported bounds")
+    if not isinstance(changed_paths_value, list):
+        raise TransactionError("transaction review changed paths are malformed")
+    changed_paths_values = cast(list[object], changed_paths_value)
+    if not 1 <= len(changed_paths_values) <= MAX_CHANGESET_DRAFTS:
+        raise TransactionError("transaction review changed paths are outside supported bounds")
+    try:
+        changed_paths = tuple(
+            _canonical_review_concept_id(value) for value in changed_paths_values
+        )
+    except (TypeError, TransactionError) as exc:
+        raise TransactionError("transaction review changed paths are malformed") from exc
+    if len(changed_paths) != len(set(changed_paths)):
+        raise TransactionError("transaction review changed paths are not unique")
+    return _ReviewRecord(
+        schema_version=schema_version,
+        transaction_id=transaction_id,
+        kind=kind,
+        summary=summary,
+        diff=diff,
+        changed_paths=changed_paths,
+        created_at=created_at,
+    )
+
+
+def _canonical_review_concept_id(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("review changed path")
+    canonical = _canonical_concept_id(value)
+    if canonical != value:
+        raise TransactionError("review changed path is not canonical")
+    return canonical
 
 
 def _required_string(values: dict[str, object], key: str) -> str:
@@ -1418,6 +1615,7 @@ def _recover_after_commit_error(
     identity = _Identity(
         base_wiki_digest=prepared.base_wiki_digest,
         prospective_digest=prepared.prospective_digest,
+        review_digest=prepared.review_digest,
     )
     try:
         _recover_transaction(
