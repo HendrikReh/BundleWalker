@@ -1283,18 +1283,146 @@ def test_accepted_raw_conflict_with_backup_remains_fail_closed(tmp_path: Path) -
     assert prepared.transaction_dir.is_dir()
 
 
+def test_link_then_raw_parent_move_retains_accepted_journal_and_parked_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    payload = prepared.transaction_dir / "raw-source"
+    destination = prepared.workspace.root / source.stored_relative_path
+    parked_raw = prepared.workspace.root / "parked-raw"
+    original_link = os.link
+
+    def link_then_move_parent(*args: object, **kwargs: object) -> None:
+        original_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        prepared.workspace.raw_dir.rename(parked_raw)
+
+    monkeypatch.setattr(transactions.os, "link", link_then_move_parent)
+
+    with pytest.raises(TransactionError):
+        apply_pending_review(prepared.workspace, pending.review_id)
+
+    parked_destination = parked_raw / destination.name
+    payload_stat = payload.stat()
+    parked_stat = parked_destination.stat()
+    assert (parked_stat.st_dev, parked_stat.st_ino) == (
+        payload_stat.st_dev,
+        payload_stat.st_ino,
+    )
+    assert payload_stat.st_nlink >= 2
+    assert _manifest(prepared)["phase"] == "accepted"
+    with pytest.raises(TransactionError):
+        get_pending_review(discover_workspace(prepared.workspace.root))
+    with pytest.raises(TransactionError):
+        discard_pending_review(prepared.workspace, pending.review_id)
+    assert parked_destination.read_bytes() == source.content
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_link_then_exact_parent_replacement_retains_accepted_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    payload = prepared.transaction_dir / "raw-source"
+    destination = prepared.workspace.root / source.stored_relative_path
+    parked_raw = prepared.workspace.root / "parked-raw"
+    original_link = os.link
+
+    def link_then_replace_parent(*args: object, **kwargs: object) -> None:
+        original_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        prepared.workspace.raw_dir.rename(parked_raw)
+        prepared.workspace.raw_dir.mkdir()
+        destination.write_bytes(source.content)
+
+    monkeypatch.setattr(transactions.os, "link", link_then_replace_parent)
+
+    with pytest.raises(TransactionError):
+        apply_pending_review(prepared.workspace, pending.review_id)
+
+    parked_destination = parked_raw / destination.name
+    payload_stat = payload.stat()
+    parked_stat = parked_destination.stat()
+    canonical_stat = destination.stat()
+    assert (parked_stat.st_dev, parked_stat.st_ino) == (
+        payload_stat.st_dev,
+        payload_stat.st_ino,
+    )
+    assert (canonical_stat.st_dev, canonical_stat.st_ino) != (
+        payload_stat.st_dev,
+        payload_stat.st_ino,
+    )
+    assert destination.read_bytes() == source.content
+    assert _manifest(prepared)["phase"] == "accepted"
+    with pytest.raises(TransactionError):
+        discard_pending_review(prepared.workspace, pending.review_id)
+    assert parked_destination.read_bytes() == source.content
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_accepted_restart_with_parked_payload_link_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    payload = prepared.transaction_dir / "raw-source"
+    destination = prepared.workspace.root / source.stored_relative_path
+    parked_raw = prepared.workspace.root / "parked-raw"
+    _set_phase(prepared, "accepted")
+    os.link(payload, destination)
+    prepared.workspace.raw_dir.rename(parked_raw)
+    prepared.workspace.raw_dir.mkdir()
+
+    with pytest.raises(TransactionError):
+        get_pending_review(discover_workspace(prepared.workspace.root))
+
+    parked_destination = parked_raw / destination.name
+    payload_stat = payload.stat()
+    parked_stat = parked_destination.stat()
+    assert (parked_stat.st_dev, parked_stat.st_ino) == (
+        payload_stat.st_dev,
+        payload_stat.st_ino,
+    )
+    assert payload_stat.st_nlink >= 2
+    assert _manifest(prepared)["phase"] == "accepted"
+    with pytest.raises(TransactionError):
+        discard_pending_review(prepared.workspace, prepared.transaction_id)
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_accepted_restart_with_canonical_payload_link_resumes_commit(tmp_path: Path) -> None:
+    prepared, source = _prepare(tmp_path)
+    payload = prepared.transaction_dir / "raw-source"
+    destination = prepared.workspace.root / source.stored_relative_path
+    _set_phase(prepared, "accepted")
+    os.link(payload, destination)
+
+    recover_transactions(discover_workspace(prepared.workspace.root))
+
+    assert destination.read_bytes() == source.content
+    assert not prepared.transaction_dir.exists()
+
+
 def test_exact_preexisting_raw_destination_is_compatible_with_pending_apply(
     tmp_path: Path,
 ) -> None:
     prepared, source = _prepare(tmp_path)
+    payload = prepared.transaction_dir / "raw-source"
     destination = prepared.workspace.root / source.stored_relative_path
     destination.write_bytes(source.content)
+    payload_identity = (payload.stat().st_dev, payload.stat().st_ino)
+    destination_identity = (destination.stat().st_dev, destination.stat().st_ino)
+    assert destination_identity != payload_identity
 
     pending = get_pending_review(prepared.workspace)
     assert pending is not None
     apply_pending_review(prepared.workspace, pending.review_id)
 
     assert destination.read_bytes() == source.content
+    assert (destination.stat().st_dev, destination.stat().st_ino) == destination_identity
     assert get_pending_review(prepared.workspace) is None
 
 

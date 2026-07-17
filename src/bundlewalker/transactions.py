@@ -164,6 +164,10 @@ class _RawDestinationCompatibilityError(TransactionError):
     pass
 
 
+class _RawPersistenceAmbiguityError(TransactionError):
+    pass
+
+
 def prepare_transaction(
     workspace: Workspace,
     change_set: ChangeSet,
@@ -961,6 +965,7 @@ def _restore_accepted_review_after_raw_conflict(
         is _RawDestinationCompatibility.COMPATIBLE
     ):
         raise TransactionError("accepted transaction raw persistence is ambiguous")
+    _require_authenticated_raw_payload_links(transaction_dir, manifest, expected_links=1)
     _write_manifest(transaction_dir, replace(manifest, phase="prepared"))
 
 
@@ -1229,6 +1234,87 @@ def _validate_source_pair(
         raise TransactionError("raw source content does not match its SHA-256 digest")
 
 
+def _authenticated_raw_payload_stat(
+    transaction_dir: Path,
+    manifest: _Manifest,
+) -> os.stat_result:
+    if manifest.raw_path is None or manifest.raw_sha256 is None:
+        raise TransactionError("transaction does not have an authenticated raw payload")
+    _verify_pending_raw_payload(transaction_dir, manifest)
+    payload = transaction_dir / _RAW_PAYLOAD_NAME
+    try:
+        metadata = os.stat(payload, follow_symlinks=False)
+    except OSError as exc:
+        raise TransactionError("transaction raw payload could not be authenticated") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise TransactionError("transaction raw payload is not a regular file")
+    return metadata
+
+
+def _require_authenticated_raw_payload_links(
+    transaction_dir: Path,
+    manifest: _Manifest,
+    *,
+    expected_links: int,
+) -> os.stat_result:
+    metadata = _authenticated_raw_payload_stat(transaction_dir, manifest)
+    if metadata.st_nlink != expected_links:
+        raise TransactionError("transaction raw payload link state is ambiguous")
+    return metadata
+
+
+def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
+def _compatible_raw_destination_stat_at(
+    parent_descriptor: int,
+    name: str,
+    expected_digest: str,
+) -> os.stat_result | None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _RawDestinationCompatibilityError(
+            "raw destination could not be authenticated"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise _RawDestinationCompatibilityError("raw destination is not a regular file")
+    try:
+        digest = _file_digest_at(parent_descriptor, name)
+    except TransactionError as exc:
+        raise _RawDestinationCompatibilityError(
+            "raw destination could not be authenticated"
+        ) from exc
+    if digest != expected_digest:
+        raise _RawDestinationCompatibilityError("raw destination has a different digest")
+    return metadata
+
+
+def _raw_persistence_live_error(
+    transaction_dir: Path,
+    manifest: _Manifest,
+    *,
+    mutation_may_exist: bool,
+) -> TransactionError:
+    if not mutation_may_exist:
+        try:
+            _require_authenticated_raw_payload_links(
+                transaction_dir,
+                manifest,
+                expected_links=1,
+            )
+        except TransactionError:
+            mutation_may_exist = True
+    if mutation_may_exist:
+        return _RawPersistenceAmbiguityError(
+            "raw persistence may have created an unaccounted hard link"
+        )
+    return _RawDestinationCompatibilityError("raw destination could not be safely persisted")
+
+
 def _persist_raw_source(
     workspace: Workspace,
     transaction_dir: Path,
@@ -1245,14 +1331,13 @@ def _persist_raw_source(
         raise TransactionError("transaction raw identity is incomplete")
 
     payload = transaction_dir / _RAW_PAYLOAD_NAME
-    if payload.is_symlink() or not payload.is_file():
-        raise TransactionError("transaction raw payload is missing")
-    if _file_digest(payload) != manifest.raw_sha256:
-        raise TransactionError("transaction raw payload has a different digest")
+    initial_payload = _authenticated_raw_payload_stat(transaction_dir, manifest)
     relative_value = _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
     relative = PurePosixPath(relative_value)
     configured = PurePosixPath(workspace.config.raw_dir)
     parent_parts = relative.parts[:-1]
+    link_created = False
+    destination_uses_payload = False
     try:
         with _open_workspace_directory(
             workspace,
@@ -1260,7 +1345,21 @@ def _persist_raw_source(
             create_from=len(configured.parts),
             label="raw destination parent",
         ) as parent_descriptor:
-            try:
+            destination_stat = _compatible_raw_destination_stat_at(
+                parent_descriptor,
+                relative.name,
+                manifest.raw_sha256,
+            )
+            if destination_stat is None:
+                current_payload = _require_authenticated_raw_payload_links(
+                    transaction_dir,
+                    manifest,
+                    expected_links=1,
+                )
+                if not _same_file_identity(initial_payload, current_payload):
+                    raise _RawPersistenceAmbiguityError(
+                        "transaction raw payload identity changed during persistence"
+                    )
                 try:
                     os.link(
                         payload,
@@ -1269,42 +1368,96 @@ def _persist_raw_source(
                         follow_symlinks=False,
                     )
                 except FileExistsError:
-                    metadata = os.stat(
+                    destination_stat = _compatible_raw_destination_stat_at(
+                        parent_descriptor,
                         relative.name,
-                        dir_fd=parent_descriptor,
-                        follow_symlinks=False,
+                        manifest.raw_sha256,
                     )
-                    if not stat.S_ISREG(metadata.st_mode):
+                    if destination_stat is None:
                         raise _RawDestinationCompatibilityError(
-                            "raw destination is not a regular file"
+                            "raw destination disappeared during persistence"
                         ) from None
-                    if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
-                        raise _RawDestinationCompatibilityError(
-                            "raw destination has a different digest"
-                        ) from None
-                if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
+                except OSError as exc:
                     raise _RawDestinationCompatibilityError(
-                        "persisted raw source failed digest verification"
+                        "raw destination could not be linked"
+                    ) from exc
+                else:
+                    link_created = True
+                    destination_stat = _compatible_raw_destination_stat_at(
+                        parent_descriptor,
+                        relative.name,
+                        manifest.raw_sha256,
                     )
-                os.fsync(parent_descriptor)
-            except _RawDestinationCompatibilityError:
-                raise
-            except (OSError, TransactionError) as exc:
-                raise _RawDestinationCompatibilityError(
-                    "raw destination could not be safely persisted"
-                ) from exc
+                    if destination_stat is None:
+                        raise _RawPersistenceAmbiguityError(
+                            "created raw destination is no longer reachable"
+                        )
+
+            destination_uses_payload = _same_file_identity(
+                initial_payload,
+                destination_stat,
+            )
+            if link_created and not destination_uses_payload:
+                raise _RawPersistenceAmbiguityError(
+                    "created raw destination identity changed during persistence"
+                )
+            expected_links = 2 if destination_uses_payload else 1
+            current_payload = _require_authenticated_raw_payload_links(
+                transaction_dir,
+                manifest,
+                expected_links=expected_links,
+            )
+            if not _same_file_identity(initial_payload, current_payload):
+                raise _RawPersistenceAmbiguityError(
+                    "transaction raw payload identity changed during persistence"
+                )
+            os.fsync(parent_descriptor)
+
         with _open_workspace_directory(
             workspace,
-            configured.parts,
-            label="configured raw path",
-        ):
-            pass
-    except _RawDestinationCompatibilityError:
+            parent_parts,
+            label="current raw destination parent",
+        ) as current_parent_descriptor:
+            canonical_stat = _compatible_raw_destination_stat_at(
+                current_parent_descriptor,
+                relative.name,
+                manifest.raw_sha256,
+            )
+            if canonical_stat is None:
+                raise _RawDestinationCompatibilityError(
+                    "raw destination is missing from its canonical path"
+                )
+            canonical_uses_payload = _same_file_identity(initial_payload, canonical_stat)
+            if canonical_uses_payload != destination_uses_payload:
+                raise _RawPersistenceAmbiguityError(
+                    "canonical raw destination identity changed during persistence"
+                )
+            expected_links = 2 if canonical_uses_payload else 1
+            current_payload = _require_authenticated_raw_payload_links(
+                transaction_dir,
+                manifest,
+                expected_links=expected_links,
+            )
+            if not _same_file_identity(initial_payload, current_payload):
+                raise _RawPersistenceAmbiguityError(
+                    "transaction raw payload identity changed during persistence"
+                )
+            os.fsync(current_parent_descriptor)
+    except _RawPersistenceAmbiguityError:
         raise
-    except TransactionError as exc:
-        raise _RawDestinationCompatibilityError(
-            "raw destination could not be safely persisted"
-        ) from exc
+    except (OSError, TransactionError) as exc:
+        if isinstance(exc, _RawDestinationCompatibilityError):
+            compatibility_error = exc
+        else:
+            compatibility_error = _RawDestinationCompatibilityError(
+                "raw destination could not be safely persisted"
+            )
+        failure = _raw_persistence_live_error(
+            transaction_dir,
+            manifest,
+            mutation_may_exist=link_created or destination_uses_payload,
+        )
+        raise failure from compatibility_error
 
 
 def _raw_destination_exists(workspace: Workspace, manifest: _Manifest) -> bool:
