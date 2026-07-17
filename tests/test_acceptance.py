@@ -31,7 +31,7 @@ from bundlewalker.domain import (
     Severity,
 )
 from bundlewalker.okf.lint import has_errors, lint_bundle
-from bundlewalker.transactions import PreparedTransaction
+from bundlewalker.transactions import PreparedTransaction, recover_transactions
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
 from bundlewalker.workspace import RawSource, discover_workspace
 
@@ -362,6 +362,39 @@ def test_complete_offline_review_first_workflow_and_recovery(
     assert _knowledge_bytes(root) == before_semantic_lint
 
     workspace = discover_workspace(root)
+    legacy = prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=CitedAnswer(
+                title="Legacy prepared synthesis",
+                body="# Legacy prepared synthesis\n\nReview is inspectable [1].\n",
+                citations=[Citation(number=1, concept_id="topics/review-first-knowledge")],
+            ),
+            read_ids=frozenset({"topics/review-first-knowledge"}),
+        ),
+        occurred_at=NOW,
+    )
+    legacy_knowledge = _knowledge_bytes(root)
+    legacy_manifest_path = legacy.transaction_dir / "manifest.json"
+    legacy_manifest = json.loads(legacy_manifest_path.read_text(encoding="utf-8"))
+    legacy_manifest["schema_version"] = 1
+    legacy_manifest_path.write_text(
+        json.dumps(legacy_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    legacy_identity_path = legacy.transaction_dir / "identity.json"
+    legacy_identity = json.loads(legacy_identity_path.read_text(encoding="utf-8"))
+    legacy_identity.pop("review_digest")
+    legacy_identity_path.write_text(
+        json.dumps(legacy_identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    recover_transactions(workspace)
+
+    assert _knowledge_bytes(root) == legacy_knowledge
+    assert not legacy.transaction_dir.exists()
+
     interrupted = prepare_synthesis(
         workspace,
         AnsweredQuestion(

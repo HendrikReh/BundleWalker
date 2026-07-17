@@ -21,15 +21,18 @@ from bundlewalker.domain import (
     ConceptType,
     DraftConcept,
 )
-from bundlewalker.errors import TransactionError
+from bundlewalker.errors import ReviewPendingError, TransactionError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import (
     PreparedTransaction,
     ReviewKind,
+    ReviewStatus,
     commit_transaction,
     discard_transaction,
+    ensure_no_pending_review,
+    get_pending_review,
     prepare_transaction,
     recover_transactions,
 )
@@ -137,6 +140,22 @@ def _prepare(tmp_path: Path) -> tuple[PreparedTransaction, RawSource]:
     return prepared, source
 
 
+def _prepare_in_workspace(
+    workspace: Workspace,
+    input_path: Path,
+) -> tuple[PreparedTransaction, RawSource]:
+    source, change_set, context = _ingestion_in_workspace(input_path.parent, workspace)
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
+    return prepared, source
+
+
 def _ingestion_in_workspace(
     tmp_path: Path,
     workspace: Workspace,
@@ -214,6 +233,23 @@ def _set_phase(prepared: PreparedTransaction, phase: str) -> None:
     )
 
 
+def _set_legacy_schema(prepared: PreparedTransaction) -> None:
+    manifest_path = prepared.transaction_dir / "manifest.json"
+    manifest = _manifest(prepared)
+    manifest["schema_version"] = 1
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    identity_path = prepared.transaction_dir / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity.pop("review_digest")
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _persist_raw(prepared: PreparedTransaction, source: RawSource) -> None:
     destination = prepared.workspace.root / source.stored_relative_path
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +274,10 @@ def test_prepare_stages_a_complete_review_without_live_writes(tmp_path: Path) ->
     added_files = set(_tree_bytes(workspace.root)) - files_before
     transaction_prefix = f".bundlewalker/transactions/{prepared.transaction_id}/"
     assert added_files
-    assert all(path.startswith(transaction_prefix) for path in added_files)
+    assert all(
+        path.startswith(transaction_prefix) or path == ".bundlewalker/transaction.lock"
+        for path in added_files
+    )
     assert _tree_bytes(workspace.wiki_dir) == live_wiki
     assert _tree_bytes(workspace.raw_dir) == live_raw
     assert prepared.diff
@@ -322,6 +361,83 @@ def test_load_review_authenticates_the_same_bytes_it_parses(
     )
 
     assert review.transaction_id == prepared.transaction_id
+
+
+def test_recovery_preserves_schema_v2_pending_review(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+
+    recover_transactions(prepared.workspace)
+    loaded = get_pending_review(prepared.workspace)
+
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.status is ReviewStatus.PENDING
+    assert loaded.diff == prepared.diff
+
+
+def test_pending_review_becomes_stale_after_live_edit(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    (prepared.workspace.wiki_dir / "external.md").write_text(
+        "external\n",
+        encoding="utf-8",
+    )
+
+    loaded = get_pending_review(prepared.workspace)
+
+    assert loaded is not None
+    assert loaded.status is ReviewStatus.STALE
+
+
+def test_second_preparation_is_rejected_without_removing_first(tmp_path: Path) -> None:
+    first, _source = _prepare(tmp_path)
+
+    with pytest.raises(ReviewPendingError) as ensured:
+        ensure_no_pending_review(first.workspace)
+    with pytest.raises(ReviewPendingError) as raised:
+        _prepare_in_workspace(first.workspace, tmp_path / "other.txt")
+
+    assert ensured.value.review_id == first.transaction_id
+    assert raised.value.review_id == first.transaction_id
+    loaded = get_pending_review(first.workspace)
+    assert loaded is not None
+    assert loaded.review_id == first.transaction_id
+
+
+def test_recovery_rejects_more_than_one_valid_pending_review(tmp_path: Path) -> None:
+    first, _source = _prepare(tmp_path)
+    source, change_set, context = _ingestion_in_workspace(tmp_path, first.workspace)
+    transactions._prepare_transaction_locked(  # pyright: ignore[reportPrivateUsage]
+        first.workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+        transactions_root=first.transaction_dir.parent,
+    )
+
+    with pytest.raises(TransactionError, match="more than one pending review"):
+        recover_transactions(first.workspace)
+
+
+def test_corrupted_review_record_is_not_loadable(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    review_path = prepared.transaction_dir / "review.json"
+    review_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(TransactionError, match="review identity"):
+        get_pending_review(prepared.workspace)
+
+
+def test_recovery_cleans_legacy_schema_v1_prepared_transaction(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    live_wiki = _tree_bytes(prepared.workspace.wiki_dir)
+    _set_legacy_schema(prepared)
+
+    recover_transactions(prepared.workspace)
+
+    assert _tree_bytes(prepared.workspace.wiki_dir) == live_wiki
+    assert not prepared.transaction_dir.exists()
 
 
 def test_discard_removes_only_the_prepared_transaction(tmp_path: Path) -> None:
@@ -494,7 +610,6 @@ def test_commit_does_not_enter_swapping_when_the_backup_path_is_occupied(
 @pytest.mark.parametrize(
     ("state", "expected_tree"),
     [
-        ("prepared", "old"),
         ("raw-persisted", "old"),
         ("swapping-before-renames", "old"),
         ("swapping-after-old", "old"),
@@ -924,7 +1039,7 @@ def test_commit_rejects_a_configured_raw_directory_symlink_inside_workspace(
     assert not (redirect / source.stored_relative_path.name).exists()
 
 
-def test_uuid_collision_does_not_delete_an_unowned_transaction_directory(
+def test_prepare_recovers_an_incomplete_transaction_before_allocating_its_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -940,17 +1055,17 @@ def test_uuid_collision_does_not_delete_an_unowned_transaction_directory(
 
     monkeypatch.setattr(transactions.uuid, "uuid4", return_fixed_uuid)
 
-    with pytest.raises(TransactionError, match="prepare transaction"):
-        prepare_transaction(
-            workspace,
-            change_set,
-            context,
-            source,
-            NOW,
-            kind=ReviewKind.INGESTION,
-        )
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
 
-    assert sentinel.read_text(encoding="utf-8") == "pre-existing\n"
+    assert prepared.transaction_id == fixed_uuid.hex
+    assert not sentinel.exists()
 
 
 def test_commit_rejects_a_linked_configured_wiki_ancestor_without_touching_outside(
