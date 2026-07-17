@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
@@ -256,6 +257,71 @@ def test_translate_error_redacts_unsafe_messages(message: str) -> None:
     mapped = translate_error(WorkspaceError(message))
 
     assert mapped.safe_message == "workspace operation failed"
+
+
+def _pending_error_with_message(message: str) -> ReviewPendingError:
+    error = ReviewPendingError("a" * 32)
+    error.args = (message,)
+    return error
+
+
+_REVIEW_ERROR_CASES: tuple[tuple[Callable[[str], BundleWalkerError], str], ...] = (
+    (_pending_error_with_message, "workspace already has a pending review"),
+    (ReviewNotFoundError, "review was not found"),
+    (ReviewMismatchError, "review ID does not match the pending review"),
+    (ReviewStaleError, "review is stale"),
+)
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["could not read /tmp/private-source.md", "unsafe\x00message"],
+)
+@pytest.mark.parametrize(
+    ("error_factory", "fallback"),
+    _REVIEW_ERROR_CASES,
+)
+def test_review_errors_redact_unsafe_messages(
+    error_factory: Callable[[str], BundleWalkerError], fallback: str, message: str
+) -> None:
+    mapped = translate_error(error_factory(message))
+
+    assert mapped.safe_message == fallback
+    assert "/tmp" not in mapped.safe_message
+    assert "\x00" not in mapped.safe_message
+
+
+def test_review_pending_error_retains_typed_review_id_after_message_redaction() -> None:
+    mapped = translate_error(_pending_error_with_message("token=private-token"))
+
+    assert mapped.code is ApplicationErrorCode.REVIEW_PENDING
+    assert mapped.review_id == "a" * 32
+    assert "private-token" not in mapped.safe_message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "path=/tmp/private-source.md",
+        r"path=C:\\Users\\private-source.md",
+        "path=~/private-source.md",
+        "path=file:///tmp/private-source.md",
+        "token=private-token",
+        "api_key=private-key",
+        "Authorization: Bearer private-token",
+        '{"token":"private-token","choices":[{"message":"provider output"}]}',
+    ],
+)
+def test_translate_error_redacts_embedded_paths_credentials_and_provider_payloads(
+    message: str,
+) -> None:
+    mapped = translate_error(AgentRunError(message))
+
+    assert mapped.safe_message == "model-backed operation failed"
+    assert all(
+        unsafe not in mapped.safe_message
+        for unsafe in ("/tmp", "C:\\Users", "private", "token", "api_key", "Bearer", "choices")
+    )
 
 
 def test_translate_error_uses_closed_fallback_for_unknown_core_error() -> None:

@@ -1,5 +1,6 @@
 """Closed, sanitized error translation for every delivery adapter."""
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
@@ -18,6 +19,32 @@ from bundlewalker.errors import (
     TransactionError,
     UsageError,
     WorkspaceError,
+)
+
+_EMBEDDED_PATH_PATTERN = re.compile(
+    r"""(?ix)
+    \b(?:path|file(?:name)?|directory|dir|workspace|source)\b
+    \s*[\"']?\s*[:=]\s*[\"']?\s*
+    (?:/|~[\\/]|file:|[a-z]:[\\/])
+    """
+)
+_CREDENTIAL_PATTERN = re.compile(
+    r"""(?ix)
+    (?:
+        \b(?:token|api[_-]?key|authorization|password|secret|credential(?:s)?)\b
+        \s*[\"']?\s*[:=]\s*[\"']?\s*\S+
+      | \bbearer\s+\S+
+    )
+    """
+)
+_PROVIDER_PAYLOAD_PATTERN = re.compile(
+    r"""(?ix)
+    (?:
+        ^\s*[\[{]
+      | \b(?:response|payload|body|content|choices|messages|tool_calls|output)\b
+        \s*[:=]\s*[\[{]
+    )
+    """
 )
 
 
@@ -56,15 +83,24 @@ def translate_error(error: BundleWalkerError) -> ApplicationError:
     if isinstance(error, ReviewPendingError):
         return ApplicationError(
             ApplicationErrorCode.REVIEW_PENDING,
-            str(error),
+            _public_message(error, "workspace already has a pending review"),
             review_id=error.review_id,
         )
     if isinstance(error, ReviewNotFoundError):
-        return ApplicationError(ApplicationErrorCode.REVIEW_NOT_FOUND, str(error))
+        return ApplicationError(
+            ApplicationErrorCode.REVIEW_NOT_FOUND,
+            _public_message(error, "review was not found"),
+        )
     if isinstance(error, ReviewMismatchError):
-        return ApplicationError(ApplicationErrorCode.REVIEW_ID_MISMATCH, str(error))
+        return ApplicationError(
+            ApplicationErrorCode.REVIEW_ID_MISMATCH,
+            _public_message(error, "review ID does not match the pending review"),
+        )
     if isinstance(error, ReviewStaleError):
-        return ApplicationError(ApplicationErrorCode.REVIEW_STALE, str(error))
+        return ApplicationError(
+            ApplicationErrorCode.REVIEW_STALE,
+            _public_message(error, "review is stale"),
+        )
     if isinstance(error, ConfigurationError):
         return ApplicationError(
             ApplicationErrorCode.CONFIGURATION_ERROR,
@@ -113,6 +149,9 @@ def _public_message(error: BundleWalkerError, fallback: str) -> str:
         not message
         or len(message) > 1_024
         or any(unicodedata.category(character) == "Cc" for character in message)
+        or _EMBEDDED_PATH_PATTERN.search(message) is not None
+        or _CREDENTIAL_PATTERN.search(message) is not None
+        or _PROVIDER_PAYLOAD_PATTERN.search(message) is not None
     ):
         return fallback
     for token in message.split():
