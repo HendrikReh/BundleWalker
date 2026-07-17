@@ -140,7 +140,13 @@ async def _dispatch_tool(
         result = await _call_application_tool(application, name, tool_input)
 
         if progress_messages is not None:
-            await report_progress(server, progress_token, 1.0, progress_messages[1])
+            try:
+                await report_progress(server, progress_token, 1.0, progress_messages[1])
+            except Exception:
+                logger.exception(
+                    "Failed to send final progress for BundleWalker tool %s",
+                    name,
+                )
         return result
     except ApplicationError as error:
         return error_result(error)

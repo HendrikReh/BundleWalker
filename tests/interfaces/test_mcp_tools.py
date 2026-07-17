@@ -25,7 +25,6 @@ from bundlewalker.application import (
     ApplicationErrorCode,
     ConceptSearchResult,
     IngestionResult,
-    InlineSource,
     LintResult,
     MutationResult,
     PendingReviewResult,
@@ -788,6 +787,71 @@ async def test_prepare_reports_protocol_progress_with_request_token(
     ]
 
 
+async def test_final_progress_failure_does_not_hide_successful_durable_review(
+    application: WorkspaceApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from mcp.server.session import ServerSession
+
+    original = ServerSession.send_progress_notification
+
+    async def fail_final_progress(
+        self: ServerSession,
+        progress_token: str | int,
+        progress: float,
+        total: float | None = None,
+        message: str | None = None,
+        related_request_id: str | None = None,
+    ) -> None:
+        if progress == 1.0:
+            raise RuntimeError("final progress transport failed")
+        await original(
+            self,
+            progress_token,
+            progress,
+            total,
+            message,
+            related_request_id,
+        )
+
+    async def ignore_progress(
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
+        del progress, total, message
+        return None
+
+    monkeypatch.setattr(ServerSession, "send_progress_notification", fail_final_progress)
+    server = create_mcp_server(application)
+
+    with caplog.at_level(logging.ERROR, logger="bundlewalker.interfaces.mcp_tools"):
+        async with create_connected_server_and_client_session(server) as session:
+            prepared = await session.call_tool(
+                "prepare_ingestion",
+                {
+                    "source_name": "notes.txt",
+                    "content": "evidence\n",
+                    "model": "test:model",
+                },
+                progress_callback=ignore_progress,
+            )
+            loaded = await session.call_tool("get_pending_review", {})
+
+    assert prepared.isError is False
+    assert prepared.structuredContent is not None
+    result = IngestionResult.model_validate(prepared.structuredContent)
+    assert result.review is not None
+    assert loaded.structuredContent is not None
+    durable = PendingReviewResult.model_validate(loaded.structuredContent).review
+    assert durable is not None
+    assert result.review.review_id == durable.review_id
+    assert result.review.diff == durable.diff
+    assert "RuntimeError: final progress transport failed" in caplog.text
+    assert "final progress" in caplog.text
+
+
 async def test_cancellation_before_persistence_leaves_no_review(tmp_path: Path) -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
@@ -836,24 +900,46 @@ async def test_cancellation_immediately_after_persistence_leaves_review_discover
     application: WorkspaceApplication,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    persisted = asyncio.Event()
+    final_progress_started = asyncio.Event()
     cancelled = asyncio.Event()
-    original = application.prepare_ingestion
 
-    async def persist_then_block(
-        source: InlineSource,
-        *,
-        explicit_model: str | None,
-    ) -> IngestionResult:
-        result = await original(source, explicit_model=explicit_model)
-        persisted.set()
+    from mcp.server.session import ServerSession
+
+    original = ServerSession.send_progress_notification
+
+    async def block_final_progress(
+        self: ServerSession,
+        progress_token: str | int,
+        progress: float,
+        total: float | None = None,
+        message: str | None = None,
+        related_request_id: str | None = None,
+    ) -> None:
+        if progress == 0.0:
+            await original(
+                self,
+                progress_token,
+                progress,
+                total,
+                message,
+                related_request_id,
+            )
+            return
+        final_progress_started.set()
         try:
             await asyncio.Future()
         finally:
             cancelled.set()
-        return result
 
-    monkeypatch.setattr(application, "prepare_ingestion", persist_then_block)
+    async def ignore_progress(
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
+        del progress, total, message
+        return None
+
+    monkeypatch.setattr(ServerSession, "send_progress_notification", block_final_progress)
     server = create_mcp_server(application)
 
     async with create_connected_server_and_client_session(server) as session:
@@ -866,9 +952,10 @@ async def test_cancellation_immediately_after_persistence_leaves_review_discover
                     "content": "evidence\n",
                     "model": "test:model",
                 },
+                progress_callback=ignore_progress,
             )
         )
-        await asyncio.wait_for(persisted.wait(), timeout=1)
+        await asyncio.wait_for(final_progress_started.wait(), timeout=1)
         expected = await application.get_pending_review()
         assert expected is not None
         await _cancel_request(session, request_id)
