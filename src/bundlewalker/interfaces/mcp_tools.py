@@ -4,6 +4,7 @@ import logging
 import unicodedata
 from typing import Any, cast
 
+import jsonschema
 from mcp import types
 from mcp.server.lowlevel.server import Server
 from pydantic import BaseModel, ValidationError
@@ -94,7 +95,18 @@ async def _dispatch_read_tool(
     arguments: dict[str, Any],
 ) -> types.CallToolResult:
     try:
-        tool_input = _validate_tool_input(name, arguments)
+        try:
+            tool_input = _validate_tool_input(name, arguments)
+        except _UnknownToolError:
+            return _unknown_tool_result()
+        except (jsonschema.ValidationError, ValidationError):
+            return error_result(
+                ApplicationError(
+                    ApplicationErrorCode.INVALID_INPUT,
+                    "invalid tool input",
+                )
+            )
+
         if name not in _READ_TOOL_NAMES:
             return _unknown_tool_result()
 
@@ -129,15 +141,6 @@ async def _dispatch_read_tool(
 
         pending = PendingReviewResult(review=await application.get_pending_review())
         return success_result(pending, _render_pending_review(pending))
-    except _UnknownToolError:
-        return _unknown_tool_result()
-    except ValidationError:
-        return error_result(
-            ApplicationError(
-                ApplicationErrorCode.INVALID_INPUT,
-                "invalid tool input",
-            )
-        )
     except ApplicationError as error:
         return error_result(error)
     except Exception:
@@ -154,6 +157,10 @@ def _validate_tool_input(name: str, arguments: dict[str, Any]) -> BaseModel:
     spec = _TOOL_SPECS_BY_NAME.get(name)
     if spec is None:
         raise _UnknownToolError
+    jsonschema.validate(
+        instance=arguments,
+        schema=spec.input_model.model_json_schema(),
+    )
     return spec.input_model.model_validate(arguments)
 
 

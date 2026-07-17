@@ -395,6 +395,34 @@ async def test_invalid_search_is_a_tool_execution_error(
     }
 
 
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("lint", {"semantic": "false"}),
+        ("search_concepts", {"query": "agents", "limit": "1"}),
+    ],
+    ids=["boolean-string", "integer-string"],
+)
+async def test_schema_invalid_json_scalar_is_a_tool_execution_error(
+    application: WorkspaceApplication,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(name, arguments)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"] == {
+        "code": "invalid_input",
+        "message": "invalid tool input",
+        "retryable": False,
+        "review_id": None,
+    }
+
+
 async def test_unknown_and_undispatched_tools_return_bounded_execution_errors(
     application: WorkspaceApplication,
 ) -> None:
@@ -438,6 +466,36 @@ async def test_application_error_is_returned_as_a_tool_execution_error(
     assert result.content == [
         types.TextContent(type="text", text="workspace configuration is invalid")
     ]
+
+
+async def test_facade_validation_error_is_logged_as_unexpected_and_redacted(
+    application: WorkspaceApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail_status() -> WorkspaceStatus:
+        return WorkspaceStatus.model_validate(
+            {"display_name": str(application.workspace.root / "private.txt")}
+        )
+
+    monkeypatch.setattr(application, "status", fail_status)
+    server = create_mcp_server(application)
+
+    with caplog.at_level(logging.ERROR, logger="bundlewalker.interfaces.mcp_tools"):
+        async with create_connected_server_and_client_session(server) as session:
+            result = await session.call_tool("workspace_status", {})
+
+    assert "ValidationError" in caplog.text
+    assert "private.txt" in caplog.text
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"] == {
+        "code": "workspace_error",
+        "message": "BundleWalker operation failed",
+        "retryable": False,
+        "review_id": None,
+    }
+    assert application.workspace.root.as_posix() not in result.model_dump_json()
 
 
 async def test_unexpected_exception_is_logged_and_returns_no_private_detail(
