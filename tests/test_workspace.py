@@ -210,7 +210,7 @@ def test_load_inline_source_builds_the_same_identity_from_supplied_utf8(
 
     source = load_inline_source("Überblick.md", "Grüße\n", workspace)
 
-    assert source.content == "Grüße\n".encode("utf-8")
+    assert source.content == "Grüße\n".encode()
     assert source.text == "Grüße\n"
     assert source.extension == ".md"
     assert source.slug == "uberblick"

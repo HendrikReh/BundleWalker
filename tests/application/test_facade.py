@@ -226,6 +226,23 @@ async def test_list_concepts_rejects_tampered_cursor(
     assert raised.value.code is ApplicationErrorCode.INVALID_INPUT
 
 
+@pytest.mark.parametrize(
+    "cursor",
+    [
+        "ZW50aXRpZXMvdG9vbHM=",
+        "ZW50aXRpZXMvdG9vbHt",
+    ],
+)
+async def test_list_concepts_rejects_noncanonical_cursor_encodings(
+    application: WorkspaceApplication,
+    cursor: str,
+) -> None:
+    with pytest.raises(ApplicationError) as raised:
+        await application.list_concepts(cursor=cursor)
+
+    assert raised.value.code is ApplicationErrorCode.INVALID_INPUT
+
+
 @pytest.mark.parametrize("limit", [0, 101])
 async def test_list_concepts_rejects_limit_outside_page_bounds(
     application: WorkspaceApplication,
