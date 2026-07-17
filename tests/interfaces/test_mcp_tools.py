@@ -66,7 +66,7 @@ from bundlewalker.interfaces.mcp_schemas import (
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
-from bundlewalker.workspace import RawSource, Workspace, initialize_workspace
+from bundlewalker.workspace import RawSource, Workspace, initialize_workspace, load_inline_source
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
@@ -569,6 +569,65 @@ async def test_prepared_review_survives_a_new_in_memory_server_session(
     assert pending.review is not None
     assert pending.review.review_id == first.review.review_id
     assert pending.review.diff == first.review.diff
+
+
+async def test_raw_conflict_remains_resolvable_through_restarted_mcp_server(
+    application: WorkspaceApplication,
+) -> None:
+    source = load_inline_source("notes.txt", "evidence\n", application.workspace)
+    first_server = create_mcp_server(application)
+    async with create_connected_server_and_client_session(first_server) as session:
+        prepared = await session.call_tool(
+            "prepare_ingestion",
+            {
+                "source_name": "notes.txt",
+                "content": "evidence\n",
+                "model": "test:model",
+            },
+        )
+    assert prepared.structuredContent is not None
+    first = IngestionResult.model_validate(prepared.structuredContent)
+    assert first.review is not None
+    destination = application.workspace.root / source.stored_relative_path
+    destination.write_bytes(b"external conflicting bytes\n")
+
+    restarted = WorkspaceApplication(application.workspace)
+    second_server = create_mcp_server(restarted)
+    async with create_connected_server_and_client_session(second_server) as session:
+        status_result = await session.call_tool("workspace_status", {})
+        pending_result = await session.call_tool("get_pending_review", {})
+        resource_result = await session.read_resource(AnyUrl("bundlewalker://review/pending"))
+        apply_result = await session.call_tool(
+            "apply_review",
+            {"review_id": first.review.review_id},
+        )
+        discard_result = await session.call_tool(
+            "discard_review",
+            {"review_id": first.review.review_id},
+        )
+
+    assert status_result.structuredContent is not None
+    status = WorkspaceStatus.model_validate(status_result.structuredContent)
+    assert status.pending_review is not None
+    assert status.pending_review.review_id == first.review.review_id
+    assert status.pending_review.status.value == "stale"
+    assert pending_result.structuredContent is not None
+    pending = PendingReviewResult.model_validate(pending_result.structuredContent)
+    assert pending.review is not None
+    assert pending.review.review_id == first.review.review_id
+    assert pending.review.diff == first.review.diff
+    assert pending.review.status.value == "stale"
+    resource = resource_result.contents[0]
+    assert isinstance(resource, types.TextResourceContents)
+    assert first.review.review_id in resource.text
+    assert first.review.diff in resource.text
+    assert "Status: stale" in resource.text
+    assert apply_result.isError is True
+    assert apply_result.structuredContent is not None
+    assert apply_result.structuredContent["error"]["code"] == "review_stale"
+    assert discard_result.isError is False
+    assert destination.read_bytes() == b"external conflicting bytes\n"
+    assert await restarted.get_pending_review() is None
 
 
 async def test_discard_review_requires_a_second_explicit_call(

@@ -93,6 +93,14 @@ class ReviewStatus(StrEnum):
     STALE = "stale"
 
 
+class _RawDestinationCompatibility(StrEnum):
+    COMPATIBLE = "compatible"
+    DIFFERENT_DIGEST = "different-digest"
+    INVALID_PARENT = "invalid-parent"
+    NON_REGULAR = "non-regular"
+    UNREADABLE = "unreadable"
+
+
 @dataclass(frozen=True, slots=True)
 class TransactionReview:
     review_id: str
@@ -149,6 +157,10 @@ class _IncompleteManifestError(Exception):
 
 
 class _ConcurrentLiveEditError(Exception):
+    pass
+
+
+class _RawDestinationCompatibilityError(TransactionError):
     pass
 
 
@@ -607,8 +619,11 @@ def _pending_review_from_manifest(
     prospective, _backup = _manifest_paths(workspace, transaction_dir, manifest)
     _verify_pending_raw_payload(transaction_dir, manifest)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
-    if verify_raw_destination:
-        _verify_pending_raw_destination(workspace, manifest)
+    raw_destination_compatible = (
+        not verify_raw_destination
+        or _raw_destination_compatibility(workspace, manifest)
+        is _RawDestinationCompatibility.COMPATIBLE
+    )
 
     live_matches_base = _directory_exists(workspace.wiki_dir, "live wiki") and (
         _materialized_tree_digest(workspace.wiki_dir, transaction_dir) == identity.base_wiki_digest
@@ -622,7 +637,7 @@ def _pending_review_from_manifest(
         kind=review.kind,
         status=(
             ReviewStatus.PENDING
-            if live_matches_base and preconditions_match
+            if live_matches_base and preconditions_match and raw_destination_compatible
             else ReviewStatus.STALE
         ),
         summary=review.summary,
@@ -675,7 +690,6 @@ def _verify_pending_transaction(
     identity = _load_authenticated_identity(transaction_dir, manifest)
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
     _verify_pending_raw_payload(transaction_dir, manifest)
-    _verify_pending_raw_destination(workspace, manifest)
     _validate_configured_wiki(workspace)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
     _revalidate_operations(workspace, manifest.drafts)
@@ -684,38 +698,66 @@ def _verify_pending_transaction(
         raise TransactionError(f"transaction backup already exists: {backup}")
     if workspace.wiki_dir.is_symlink() or not workspace.wiki_dir.is_dir():
         raise TransactionError("live wiki is not a regular directory")
+    _require_compatible_raw_destination(workspace, manifest)
 
 
-def _verify_pending_raw_destination(
+def _raw_destination_compatibility(
     workspace: Workspace,
     manifest: _Manifest,
-) -> None:
+) -> _RawDestinationCompatibility:
     if manifest.raw_path is None:
-        return
+        if manifest.raw_sha256 is not None:
+            raise TransactionError("transaction raw identity is incomplete")
+        return _RawDestinationCompatibility.COMPATIBLE
     if manifest.raw_sha256 is None:
         raise TransactionError("transaction raw identity is incomplete")
 
-    relative_value = _validated_raw_relative(workspace, Path(manifest.raw_path))
+    relative_value = _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
     relative = PurePosixPath(relative_value)
-    with _open_workspace_directory(
-        workspace,
-        relative.parts[:-1],
-        label="raw destination parent",
-    ) as parent_descriptor:
-        try:
-            metadata = os.stat(
-                relative.name,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise TransactionError("raw destination could not be authenticated") from exc
-        if not stat.S_ISREG(metadata.st_mode):
-            raise TransactionError("raw destination is not a regular file")
-        if _file_digest_at(parent_descriptor, relative.name) != manifest.raw_sha256:
-            raise TransactionError("raw destination has a different digest")
+    try:
+        with _open_workspace_directory(
+            workspace,
+            relative.parts[:-1],
+            label="raw destination parent",
+        ) as parent_descriptor:
+            try:
+                metadata = os.stat(
+                    relative.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return _RawDestinationCompatibility.COMPATIBLE
+            except OSError:
+                return _RawDestinationCompatibility.UNREADABLE
+            if not stat.S_ISREG(metadata.st_mode):
+                return _RawDestinationCompatibility.NON_REGULAR
+            try:
+                digest = _file_digest_at(parent_descriptor, relative.name)
+            except TransactionError:
+                return _RawDestinationCompatibility.UNREADABLE
+            if digest != manifest.raw_sha256:
+                return _RawDestinationCompatibility.DIFFERENT_DIGEST
+    except TransactionError:
+        return _RawDestinationCompatibility.INVALID_PARENT
+    return _RawDestinationCompatibility.COMPATIBLE
+
+
+def _require_compatible_raw_destination(
+    workspace: Workspace,
+    manifest: _Manifest,
+) -> None:
+    compatibility = _raw_destination_compatibility(workspace, manifest)
+    messages = {
+        _RawDestinationCompatibility.DIFFERENT_DIGEST: ("raw destination has a different digest"),
+        _RawDestinationCompatibility.INVALID_PARENT: (
+            "raw destination parent is missing, linked, or not a directory"
+        ),
+        _RawDestinationCompatibility.NON_REGULAR: ("raw destination is not a regular file"),
+        _RawDestinationCompatibility.UNREADABLE: ("raw destination could not be authenticated"),
+    }
+    if compatibility is not _RawDestinationCompatibility.COMPATIBLE:
+        raise _RawDestinationCompatibilityError(messages[compatibility])
 
 
 def _draft_preconditions_match(
@@ -1394,7 +1436,7 @@ def _manifest_paths(
     if prospective.is_symlink() or backup.is_symlink():
         raise TransactionError("transaction wiki paths must not be symlinks")
     if manifest.raw_path is not None:
-        _validated_raw_relative(workspace, Path(manifest.raw_path))
+        _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
     return prospective, backup
 
 
@@ -1739,17 +1781,26 @@ def _canonical_concept_id(value: str) -> str:
 
 
 def _validated_raw_relative(workspace: Workspace, value: Path) -> str:
+    relative = _validated_raw_manifest_relative(workspace, value)
+    _configured_raw_root(workspace)
+    return relative
+
+
+def _validated_raw_manifest_relative(workspace: Workspace, value: Path) -> str:
     relative = PurePosixPath(value.as_posix())
     configured_raw = PurePosixPath(workspace.config.raw_dir)
     if (
-        relative.is_absolute()
+        configured_raw.is_absolute()
+        or configured_raw == PurePosixPath(".")
+        or ".." in configured_raw.parts
+        or configured_raw.as_posix() != workspace.config.raw_dir
+        or relative.is_absolute()
         or relative.as_posix() != value.as_posix()
         or ".." in relative.parts
         or not relative.is_relative_to(configured_raw)
         or relative == configured_raw
     ):
         raise TransactionError("raw path is not a safe workspace-relative path")
-    _configured_raw_root(workspace)
     return relative.as_posix()
 
 

@@ -1043,23 +1043,28 @@ def test_commit_rejects_an_existing_raw_file_with_different_bytes(tmp_path: Path
     assert hashlib.sha256(destination.read_bytes()).hexdigest() != source.sha256
 
 
-def test_pending_status_rejects_conflicting_raw_destination_and_allows_discard(
+def test_conflicting_raw_destination_is_stale_and_remains_discardable(
     tmp_path: Path,
 ) -> None:
     prepared, source = _prepare(tmp_path)
     destination = prepared.workspace.root / source.stored_relative_path
     destination.write_bytes(b"conflicting bytes\n")
 
-    with pytest.raises(TransactionError, match="raw destination"):
-        get_pending_review(prepared.workspace)
+    loaded = get_pending_review(prepared.workspace)
 
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.diff == prepared.diff
+    assert loaded.status is ReviewStatus.STALE
     assert _manifest(prepared)["phase"] == "prepared"
-    discard_pending_review(prepared.workspace, prepared.transaction_id)
+    with pytest.raises(ReviewStaleError):
+        apply_pending_review(prepared.workspace, loaded.review_id)
+    discard_pending_review(prepared.workspace, loaded.review_id)
     assert destination.read_bytes() == b"conflicting bytes\n"
     assert not prepared.transaction_dir.exists()
 
 
-def test_pending_status_rejects_raw_destination_symlink_and_allows_discard(
+def test_raw_destination_symlink_is_stale_and_remains_discardable(
     tmp_path: Path,
 ) -> None:
     prepared, source = _prepare(tmp_path)
@@ -1068,13 +1073,58 @@ def test_pending_status_rejects_raw_destination_symlink_and_allows_discard(
     destination = prepared.workspace.root / source.stored_relative_path
     destination.symlink_to(outside)
 
-    with pytest.raises(TransactionError, match="raw destination"):
-        get_pending_review(prepared.workspace)
+    loaded = get_pending_review(prepared.workspace)
 
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.diff == prepared.diff
+    assert loaded.status is ReviewStatus.STALE
     assert _manifest(prepared)["phase"] == "prepared"
-    discard_pending_review(prepared.workspace, prepared.transaction_id)
+    with pytest.raises(ReviewStaleError):
+        apply_pending_review(prepared.workspace, loaded.review_id)
+    discard_pending_review(prepared.workspace, loaded.review_id)
     assert destination.is_symlink()
     assert outside.read_bytes() == source.content
+    assert not prepared.transaction_dir.exists()
+
+
+def test_missing_raw_parent_is_stale_and_remains_discardable(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    prepared.workspace.raw_dir.rmdir()
+
+    loaded = get_pending_review(prepared.workspace)
+
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.diff == prepared.diff
+    assert loaded.status is ReviewStatus.STALE
+    with pytest.raises(ReviewStaleError):
+        apply_pending_review(prepared.workspace, loaded.review_id)
+    discard_pending_review(prepared.workspace, loaded.review_id)
+    assert not prepared.workspace.raw_dir.exists()
+    assert not prepared.transaction_dir.exists()
+
+
+def test_linked_raw_parent_is_stale_and_remains_discardable(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    prepared.workspace.raw_dir.rmdir()
+    outside = tmp_path / "outside-raw"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_bytes(b"external bytes\n")
+    prepared.workspace.raw_dir.symlink_to(outside, target_is_directory=True)
+
+    loaded = get_pending_review(prepared.workspace)
+
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+    assert loaded.diff == prepared.diff
+    assert loaded.status is ReviewStatus.STALE
+    with pytest.raises(ReviewStaleError):
+        apply_pending_review(prepared.workspace, loaded.review_id)
+    discard_pending_review(prepared.workspace, loaded.review_id)
+    assert prepared.workspace.raw_dir.is_symlink()
+    assert sentinel.read_bytes() == b"external bytes\n"
     assert not prepared.transaction_dir.exists()
 
 
@@ -1087,7 +1137,7 @@ def test_apply_revalidates_raw_destination_changed_after_status_before_acceptanc
     destination = prepared.workspace.root / source.stored_relative_path
     destination.write_bytes(b"raced conflicting bytes\n")
 
-    with pytest.raises(TransactionError, match="raw destination"):
+    with pytest.raises(ReviewStaleError, match="pending review is stale"):
         apply_pending_review(prepared.workspace, pending.review_id)
 
     assert _manifest(prepared)["phase"] == "prepared"

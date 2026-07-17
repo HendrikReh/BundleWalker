@@ -31,7 +31,7 @@ from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.transactions import get_pending_review
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
-from bundlewalker.workspace import RawSource, Workspace, initialize_workspace
+from bundlewalker.workspace import RawSource, Workspace, initialize_workspace, load_inline_source
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
@@ -605,6 +605,38 @@ async def test_stale_review_cannot_apply(
         await application_with_pending_review.apply_review(pending.review_id)
 
     assert raised.value.code is ApplicationErrorCode.REVIEW_STALE
+
+
+async def test_raw_conflict_is_discoverable_and_discardable_after_facade_restart(
+    application: WorkspaceApplication,
+) -> None:
+    source = load_inline_source("notes.txt", "external evidence\n", application.workspace)
+    prepared = await application.prepare_ingestion(
+        InlineSource(source_name="notes.txt", content="external evidence\n"),
+        explicit_model="test:model",
+    )
+    assert prepared.review is not None
+    destination = application.workspace.root / source.stored_relative_path
+    destination.write_bytes(b"external conflicting bytes\n")
+    restarted = WorkspaceApplication(application.workspace)
+
+    loaded = await restarted.get_pending_review()
+    status = await restarted.status()
+
+    assert loaded is not None
+    assert loaded.review_id == prepared.review.review_id
+    assert loaded.diff == prepared.review.diff
+    assert loaded.status.value == "stale"
+    assert status.pending_review is not None
+    assert status.pending_review.review_id == loaded.review_id
+    assert status.pending_review.status.value == "stale"
+    with pytest.raises(ApplicationError) as raised:
+        await restarted.apply_review(loaded.review_id)
+    assert raised.value.code is ApplicationErrorCode.REVIEW_STALE
+    discarded = await restarted.discard_review(loaded.review_id)
+    assert discarded.status == "discarded"
+    assert destination.read_bytes() == b"external conflicting bytes\n"
+    assert await restarted.get_pending_review() is None
 
 
 async def test_review_can_be_discarded_by_exact_id(

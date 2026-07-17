@@ -191,6 +191,7 @@ def review_discard(context: typer.Context, review_id: str) -> None:
 def _render_review(review: ReviewResult, *, include_id: bool = True) -> None:
     if include_id:
         typer.echo(f"Review ID: {review.review_id}")
+    typer.echo(f"Status: {review.status}")
     typer.echo(f"Summary: {review.summary}")
     typer.echo(review.diff, nl=not review.diff.endswith("\n"))
 
