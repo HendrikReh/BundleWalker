@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-import bundlewalker.cli as cli_module
 import bundlewalker.workflows.ask as ask_workflow
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
@@ -420,13 +419,13 @@ def test_ask_equivalent_refresh_reports_no_op_without_prompt_or_staging(
     calls: list[str] = []
     _install_refresh_runner(monkeypatch, calls, answer=answer)
     render_calls: list[CitedAnswer] = []
-    original_render = cli_module.render_cited_answer
+    original_render = ask_workflow.render_cited_answer
 
     def tracking_render(answered: CitedAnswer, repository: OkfRepository) -> str:
         render_calls.append(answered)
         return original_render(answered, repository)
 
-    monkeypatch.setattr(cli_module, "render_cited_answer", tracking_render)
+    monkeypatch.setattr(ask_workflow, "render_cited_answer", tracking_render)
     before = _tree_bytes(cli_workspace)
 
     result = runner.invoke(

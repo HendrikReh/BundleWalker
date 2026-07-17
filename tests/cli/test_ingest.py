@@ -110,6 +110,7 @@ def test_ingest_decline_or_framework_abort_discards_review_and_exits_zero(
     assert result.exit_code == 0, result.output
     assert "Integrated CLI notes." in result.output
     assert "--- wiki/" in result.output and "+++ wiki/" in result.output
+    assert "Review ID:" not in result.output
     assert "No changes applied." in result.output
     assert "Aborted" not in result.output
     assert _tree_bytes(root / "wiki") == before_wiki

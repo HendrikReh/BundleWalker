@@ -7,8 +7,9 @@ import typer
 from typer.testing import CliRunner
 
 from bundlewalker import workspace as workspace_module
-from bundlewalker.cli import app, confirm_changes
+from bundlewalker.cli import app
 from bundlewalker.conventions import ConventionsStyle, load_conventions
+from bundlewalker.interfaces.cli import confirm_changes
 from bundlewalker.okf.lint import has_errors, lint_bundle
 
 runner = CliRunner()
