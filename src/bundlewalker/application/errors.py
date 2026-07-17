@@ -27,6 +27,16 @@ _SAFE_USAGE_MESSAGES = frozenset(
         "search limit must be between 1 and 10",
     }
 )
+_SAFE_CONFIGURATION_MESSAGES = frozenset(
+    {
+        "an agent model is required; pass --model MODEL or set BUNDLEWALKER_MODEL",
+    }
+)
+_SAFE_CHANGE_MESSAGES = frozenset(
+    {
+        "change set source_sha256 does not match the raw source",
+    }
+)
 _SAFE_AGENT_MESSAGES = frozenset(
     {
         "query answer citations cannot include raw line spans",
@@ -95,7 +105,11 @@ def translate_error(error: BundleWalkerError) -> ApplicationError:
     if isinstance(error, ConfigurationError):
         return ApplicationError(
             ApplicationErrorCode.CONFIGURATION_ERROR,
-            "workspace configuration is invalid",
+            _exact_message_or_fallback(
+                error,
+                _SAFE_CONFIGURATION_MESSAGES,
+                "workspace configuration is invalid",
+            ),
         )
     if isinstance(error, UsageError):
         return ApplicationError(
@@ -115,7 +129,11 @@ def translate_error(error: BundleWalkerError) -> ApplicationError:
     if isinstance(error, ChangeSetError):
         return ApplicationError(
             ApplicationErrorCode.CHANGE_INVALID,
-            "proposed change is invalid",
+            _exact_message_or_fallback(
+                error,
+                _SAFE_CHANGE_MESSAGES,
+                "proposed change is invalid",
+            ),
         )
     if isinstance(error, AgentRunError):
         return ApplicationError(
@@ -152,3 +170,14 @@ def _safe_agent_message(error: AgentRunError) -> str:
     if message in _SAFE_AGENT_MESSAGES:
         return message
     return "model-backed operation failed"
+
+
+def _exact_message_or_fallback(
+    error: BundleWalkerError,
+    allowed: frozenset[str],
+    fallback: str,
+) -> str:
+    message = str(error)
+    if message in allowed:
+        return message
+    return fallback
