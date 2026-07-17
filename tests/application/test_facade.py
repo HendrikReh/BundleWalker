@@ -11,14 +11,24 @@ from bundlewalker.application import (
     ApplicationDependencies,
     ApplicationError,
     ApplicationErrorCode,
+    InlineSource,
     WorkspaceApplication,
 )
-from bundlewalker.domain import Citation, CitedAnswer, OkfMetadata
+from bundlewalker.domain import (
+    ChangeOperation,
+    ChangeSet,
+    Citation,
+    CitedAnswer,
+    ConceptType,
+    DraftConcept,
+    OkfDocument,
+    OkfMetadata,
+)
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.transactions import get_pending_review
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
-from bundlewalker.workspace import Workspace, initialize_workspace
+from bundlewalker.workspace import RawSource, Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
@@ -57,6 +67,90 @@ def _answer() -> CitedAnswer:
     )
 
 
+def _ingestion_change_set(source: RawSource) -> ChangeSet:
+    return ChangeSet(
+        summary="Integrated notes.",
+        source_sha256=source.sha256,
+        drafts=[
+            DraftConcept(
+                operation=ChangeOperation.CREATE,
+                path=source.concept_id,
+                type=ConceptType.SOURCE,
+                title="Notes",
+                description="Notes from the incoming source.",
+                tags=["notes"],
+                body="# Notes\n\nThe source contains text [1].\n",
+                citations=[
+                    Citation(
+                        number=1,
+                        concept_id=source.concept_id,
+                        start_line=1,
+                        end_line=1,
+                    )
+                ],
+            )
+        ],
+    )
+
+
+async def _ingestion_runner(
+    model: AgentModel,
+    _dependencies: AgentDependencies,
+    source: RawSource,
+) -> tuple[ChangeSet, frozenset[str]]:
+    assert model == "test:model"
+    return _ingestion_change_set(source), frozenset()
+
+
+def _live_tree_bytes(workspace: Workspace) -> dict[str, bytes]:
+    return {
+        path.relative_to(workspace.root).as_posix(): path.read_bytes()
+        for root in (workspace.wiki_dir, workspace.raw_dir)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+def _write_refresh_target(workspace: Workspace) -> None:
+    path = workspace.wiki_dir / "syntheses" / "current-agent-framework.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_document(
+            OkfMetadata(
+                type="Synthesis",
+                title="Current Agent Framework",
+                description="A maintained decision framework.",
+                tags=["agents"],
+                timestamp=NOW,
+            ),
+            "# Current answer\n\nAgents can use tools [1].\n\n"
+            "# Citations\n\n[1] [Agents](/topics/agents.md)\n",
+        ),
+        encoding="utf-8",
+    )
+    regenerate_indexes(workspace.wiki_dir)
+
+
+async def _current_refresh_runner(
+    model: AgentModel,
+    dependencies: AgentDependencies,
+    instruction: str,
+    target: OkfDocument,
+) -> tuple[CitedAnswer, frozenset[str]]:
+    assert model == "test:model"
+    assert instruction == "Refresh this answer"
+    assert target.concept_id == "syntheses/current-agent-framework"
+    dependencies.read_ids.add("topics/agents")
+    return (
+        CitedAnswer(
+            title="Current Agent Framework",
+            body="# Current answer\n\nAgents can use tools [1].\n",
+            citations=[Citation(number=1, concept_id="topics/agents")],
+        ),
+        frozenset({"topics/agents"}),
+    )
+
+
 async def _query_runner(
     model: AgentModel,
     dependencies: AgentDependencies,
@@ -72,7 +166,11 @@ async def _query_runner(
 def application(tmp_path: Path) -> WorkspaceApplication:
     return WorkspaceApplication(
         _workspace(tmp_path),
-        ApplicationDependencies(environment={}, query_runner=_query_runner),
+        ApplicationDependencies(
+            environment={},
+            ingestion_runner=_ingestion_runner,
+            query_runner=_query_runner,
+        ),
     )
 
 
@@ -215,3 +313,194 @@ async def test_pending_review_exposes_persisted_fields_and_no_path(
     assert review.changed_paths == persisted.changed_paths
     assert review.resource_uri == "bundlewalker://review/pending"
     assert str(application_with_pending_review.workspace.root) not in review.model_dump_json()
+
+
+async def test_inline_ingestion_returns_persisted_review_without_live_mutation(
+    application: WorkspaceApplication,
+) -> None:
+    before = _live_tree_bytes(application.workspace)
+
+    result = await application.prepare_ingestion(
+        InlineSource(source_name="notes.txt", content="source text\n"),
+        explicit_model="test:model",
+    )
+    persisted = get_pending_review(application.workspace)
+
+    assert result.status == "pending"
+    assert result.review is not None
+    assert result.review.diff
+    assert persisted is not None
+    assert result.review.diff == persisted.diff
+    assert result.review.changed_paths == persisted.changed_paths
+    assert _live_tree_bytes(application.workspace) == before
+
+
+async def test_file_ingestion_has_the_same_pending_review_contract(
+    application: WorkspaceApplication,
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "notes.txt"
+    source_path.write_text("source text\n", encoding="utf-8")
+    before = _live_tree_bytes(application.workspace)
+
+    result = await application.prepare_file_ingestion(
+        source_path,
+        explicit_model="test:model",
+    )
+
+    assert result.status == "pending"
+    assert result.review is not None
+    assert result.review == await application.get_pending_review()
+    assert _live_tree_bytes(application.workspace) == before
+
+
+async def test_duplicate_inline_source_is_a_successful_typed_outcome(
+    application: WorkspaceApplication,
+) -> None:
+    source = InlineSource(source_name="notes.txt", content="source text\n")
+    first = await application.prepare_ingestion(source, explicit_model="test:model")
+    assert first.review is not None
+    await application.apply_review(first.review.review_id)
+
+    duplicate = await application.prepare_ingestion(source, explicit_model=None)
+
+    assert duplicate.status == "duplicate"
+    assert duplicate.review is None
+
+
+async def test_saved_synthesis_uses_one_model_call_and_persisted_review(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    async def runner(
+        model: AgentModel,
+        dependencies: AgentDependencies,
+        question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        return await _query_runner(model, dependencies, question)
+
+    application = WorkspaceApplication(
+        _workspace(tmp_path),
+        ApplicationDependencies(environment={}, query_runner=runner, clock=lambda: NOW),
+    )
+
+    result = await application.prepare_synthesis(
+        "What do agents use?",
+        explicit_model="test:model",
+    )
+    persisted = get_pending_review(application.workspace)
+
+    assert calls == 1
+    assert result.answer.answer == _answer()
+    assert persisted is not None
+    assert result.review.review_id == persisted.review_id
+    assert result.review.diff == persisted.diff
+
+
+async def test_refresh_reports_current_without_review(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    _write_refresh_target(workspace)
+    application = WorkspaceApplication(
+        workspace,
+        ApplicationDependencies(
+            environment={},
+            refresh_runner=_current_refresh_runner,
+            clock=lambda: NOW,
+        ),
+    )
+
+    result = await application.prepare_refresh(
+        "Refresh this answer",
+        "syntheses/current-agent-framework",
+        explicit_model="test:model",
+    )
+
+    assert result.status == "current"
+    assert result.concept_id == "syntheses/current-agent-framework"
+    assert result.review is None
+    assert await application.get_pending_review() is None
+
+
+async def test_preparation_rejects_pending_review_before_model_call(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    calls = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("pending synthesis invoked model runner")
+
+    blocked = WorkspaceApplication(
+        application_with_pending_review.workspace,
+        ApplicationDependencies(environment={}, query_runner=must_not_run),
+    )
+
+    with pytest.raises(ApplicationError) as raised:
+        await blocked.prepare_synthesis("Question", explicit_model="test:model")
+
+    assert raised.value.code is ApplicationErrorCode.REVIEW_PENDING
+    assert calls == 0
+
+
+async def test_review_resolves_exactly_once(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    pending = await application_with_pending_review.get_pending_review()
+    assert pending is not None
+
+    applied = await application_with_pending_review.apply_review(pending.review_id)
+
+    assert applied.status == "applied"
+    with pytest.raises(ApplicationError) as raised:
+        await application_with_pending_review.apply_review(pending.review_id)
+    assert raised.value.code is ApplicationErrorCode.REVIEW_NOT_FOUND
+
+
+async def test_wrong_review_id_does_not_resolve_pending_review(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    pending = await application_with_pending_review.get_pending_review()
+    assert pending is not None
+
+    with pytest.raises(ApplicationError) as raised:
+        await application_with_pending_review.discard_review("0" * 32)
+
+    assert raised.value.code is ApplicationErrorCode.REVIEW_ID_MISMATCH
+    assert await application_with_pending_review.get_pending_review() == pending
+
+
+async def test_stale_review_cannot_apply(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    pending = await application_with_pending_review.get_pending_review()
+    assert pending is not None
+    (application_with_pending_review.workspace.wiki_dir / "external.md").write_text(
+        "external edit\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ApplicationError) as raised:
+        await application_with_pending_review.apply_review(pending.review_id)
+
+    assert raised.value.code is ApplicationErrorCode.REVIEW_STALE
+
+
+async def test_review_can_be_discarded_by_exact_id(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    pending = await application_with_pending_review.get_pending_review()
+    assert pending is not None
+
+    discarded = await application_with_pending_review.discard_review(pending.review_id)
+
+    assert discarded.status == "discarded"
+    assert discarded.review_id == pending.review_id
+    assert await application_with_pending_review.get_pending_review() is None

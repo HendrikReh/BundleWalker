@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import NoReturn
 from urllib.parse import quote
 
@@ -20,9 +20,14 @@ from bundlewalker.application.contracts import (
     ConceptPage,
     ConceptSearchResult,
     ConceptSummaryResult,
+    IngestionResult,
+    InlineSource,
     LintResult,
+    MutationResult,
     PendingReviewSummary,
+    RefreshResult,
     ReviewResult,
+    SynthesisResult,
     WorkspaceStatus,
 )
 from bundlewalker.application.errors import (
@@ -31,14 +36,21 @@ from bundlewalker.application.errors import (
     translate_error,
 )
 from bundlewalker.domain import MAX_CONCEPT_ID_CHARACTERS, OkfDocument
-from bundlewalker.errors import BundleWalkerError
+from bundlewalker.errors import BundleWalkerError, TransactionError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
-from bundlewalker.transactions import TransactionReview, get_pending_review, recover_transactions
+from bundlewalker.transactions import (
+    TransactionReview,
+    apply_pending_review,
+    discard_pending_review,
+    ensure_no_pending_review,
+    get_pending_review,
+    recover_transactions,
+)
 from bundlewalker.workflows import ask as ask_workflow
 from bundlewalker.workflows import ingest as ingest_workflow
 from bundlewalker.workflows import lint as lint_workflow
-from bundlewalker.workspace import Workspace
+from bundlewalker.workspace import Workspace, load_inline_source
 
 _INVALID_CONCEPT_ID_MESSAGE = "concept ID must be a normalized relative path"
 _INVALID_CURSOR_MESSAGE = "concept cursor is invalid"
@@ -208,6 +220,135 @@ class WorkspaceApplication:
         except BundleWalkerError as exc:
             raise translate_error(exc) from exc
 
+    async def prepare_file_ingestion(
+        self,
+        source_path: Path,
+        *,
+        explicit_model: str | None,
+    ) -> IngestionResult:
+        try:
+            outcome = await ingest_workflow.prepare_ingestion(
+                self.workspace,
+                source_path,
+                explicit_model=explicit_model,
+                environment=self.dependencies.environment,
+                runner=self.dependencies.ingestion_runner,
+                occurred_at=self.dependencies.clock(),
+            )
+            return _ingestion_result(self.workspace, outcome)
+        except BundleWalkerError as exc:
+            raise translate_error(exc) from exc
+
+    async def prepare_ingestion(
+        self,
+        source: InlineSource,
+        *,
+        explicit_model: str | None,
+    ) -> IngestionResult:
+        try:
+            recover_transactions(self.workspace)
+            raw_source = load_inline_source(source.source_name, source.content, self.workspace)
+            outcome = await ingest_workflow.prepare_raw_ingestion(
+                self.workspace,
+                raw_source,
+                explicit_model=explicit_model,
+                environment=self.dependencies.environment,
+                runner=self.dependencies.ingestion_runner,
+                occurred_at=self.dependencies.clock(),
+            )
+            return _ingestion_result(self.workspace, outcome)
+        except BundleWalkerError as exc:
+            raise translate_error(exc) from exc
+
+    async def prepare_synthesis(
+        self,
+        question: str,
+        *,
+        explicit_model: str | None,
+    ) -> SynthesisResult:
+        try:
+            ensure_no_pending_review(self.workspace)
+            answered = await ask_workflow.answer_question(
+                self.workspace,
+                question,
+                explicit_model=explicit_model,
+                environment=self.dependencies.environment,
+                runner=self.dependencies.query_runner,
+            )
+            ask_workflow.prepare_synthesis(
+                self.workspace,
+                answered,
+                occurred_at=self.dependencies.clock(),
+            )
+            review = _required_review_result(self.workspace)
+            rendered = ask_workflow.render_cited_answer(
+                answered.answer,
+                OkfRepository(self.workspace.wiki_dir),
+            )
+            return SynthesisResult(
+                answer=AnswerResult(answer=answered.answer, markdown=rendered),
+                review=review,
+            )
+        except BundleWalkerError as exc:
+            raise translate_error(exc) from exc
+
+    async def prepare_refresh(
+        self,
+        instruction: str,
+        concept_id: str,
+        *,
+        explicit_model: str | None,
+    ) -> RefreshResult:
+        try:
+            ensure_no_pending_review(self.workspace)
+            refreshed = await ask_workflow.answer_synthesis_refresh(
+                self.workspace,
+                instruction,
+                concept_id,
+                explicit_model=explicit_model,
+                environment=self.dependencies.environment,
+                runner=self.dependencies.refresh_runner,
+            )
+            rendered = ask_workflow.render_cited_answer(
+                refreshed.answer,
+                OkfRepository(self.workspace.wiki_dir),
+            )
+            answer = AnswerResult(answer=refreshed.answer, markdown=rendered)
+            outcome = ask_workflow.prepare_synthesis_refresh(
+                self.workspace,
+                refreshed,
+                occurred_at=self.dependencies.clock(),
+            )
+            if isinstance(outcome, ask_workflow.SynthesisAlreadyCurrent):
+                return RefreshResult(
+                    status="current",
+                    concept_id=outcome.concept_id,
+                    answer=answer,
+                    review=None,
+                )
+            return RefreshResult(
+                status="pending",
+                concept_id=refreshed.target.concept_id,
+                answer=answer,
+                review=_required_review_result(self.workspace),
+            )
+        except BundleWalkerError as exc:
+            raise translate_error(exc) from exc
+
+    async def apply_review(self, review_id: str) -> MutationResult:
+        try:
+            apply_pending_review(self.workspace, review_id)
+            return MutationResult(review_id=review_id, status="applied")
+        except BundleWalkerError as exc:
+            raise translate_error(exc) from exc
+
+    async def discard_review(self, review_id: str) -> MutationResult:
+        try:
+            discard_pending_review(self.workspace, review_id)
+            return MutationResult(review_id=review_id, status="discarded")
+        except BundleWalkerError as exc:
+            raise translate_error(exc) from exc
+
 
 def _concept_summary(document: OkfDocument) -> ConceptSummaryResult:
     return ConceptSummaryResult(
@@ -244,6 +385,22 @@ def _to_review_result(review: TransactionReview | None) -> ReviewResult | None:
         created_at=review.created_at,
         resource_uri="bundlewalker://review/pending",
     )
+
+
+def _required_review_result(workspace: Workspace) -> ReviewResult:
+    review = _to_review_result(get_pending_review(workspace))
+    if review is None:
+        raise TransactionError("workflow preparation returned without a pending review")
+    return review
+
+
+def _ingestion_result(
+    workspace: Workspace,
+    outcome: ingest_workflow.IngestionOutcome,
+) -> IngestionResult:
+    if isinstance(outcome, ingest_workflow.DuplicateIngestion):
+        return IngestionResult(status="duplicate", review=None)
+    return IngestionResult(status="pending", review=_required_review_result(workspace))
 
 
 def _encode_cursor(concept_id: str) -> str:
