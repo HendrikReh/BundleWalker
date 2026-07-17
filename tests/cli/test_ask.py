@@ -10,12 +10,15 @@ from typer.testing import CliRunner
 import bundlewalker.workflows.ask as ask_workflow
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
+from bundlewalker.application import MAX_QUESTION_CHARACTERS
 from bundlewalker.cli import app
 from bundlewalker.domain import Citation, CitedAnswer, OkfDocument, OkfMetadata
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.okf.repository import OkfRepository
-from bundlewalker.workspace import initialize_workspace
+from bundlewalker.transactions import get_pending_review
+from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
+from bundlewalker.workspace import discover_workspace, initialize_workspace
 
 runner = CliRunner()
 NOW = datetime(2026, 7, 16, 12, tzinfo=UTC)
@@ -447,3 +450,85 @@ def test_ask_equivalent_refresh_reports_no_op_without_prompt_or_staging(
     assert render_calls == [answer]
     assert _tree_bytes(cli_workspace) == before
     assert not (cli_workspace / ".bundlewalker").exists()
+
+
+@pytest.mark.parametrize(
+    ("question", "concept_id", "target_type", "expected_message"),
+    [
+        (" ", "syntheses/current-agent-framework", "Synthesis", "question must not be empty"),
+        (
+            "x" * (MAX_QUESTION_CHARACTERS + 1),
+            "syntheses/current-agent-framework",
+            "Synthesis",
+            "refresh instruction exceeds the supported limit",
+        ),
+        (
+            "Refresh this synthesis.",
+            "syntheses/missing",
+            None,
+            "refresh target does not exist",
+        ),
+        (
+            "Refresh this synthesis.",
+            "syntheses/not-a-synthesis",
+            "Topic",
+            "refresh target is not a Synthesis",
+        ),
+    ],
+    ids=["empty", "oversized", "missing-target", "wrong-target-type"],
+)
+def test_ask_refresh_validation_precedes_pending_review_through_cli(
+    cli_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+    concept_id: str,
+    target_type: str | None,
+    expected_message: str,
+) -> None:
+    if target_type is not None:
+        _write_refresh_target(
+            cli_workspace,
+            concept_id=concept_id,
+            concept_type=target_type,
+        )
+    workspace = discover_workspace(cli_workspace)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(answer=_answer(), read_ids=frozenset({"topics/agents"})),
+        occurred_at=NOW,
+    )
+    pending = get_pending_review(workspace)
+    assert pending is not None
+    runner_calls: list[str] = []
+    model_resolutions: list[tuple[str | None, Mapping[str, str]]] = []
+
+    def unexpected_model_resolution(
+        explicit_model: str | None,
+        environment: Mapping[str, str],
+    ) -> str:
+        model_resolutions.append((explicit_model, environment))
+        raise AssertionError("invalid refresh resolved a model")
+
+    _install_refresh_runner(monkeypatch, runner_calls)
+    monkeypatch.setattr(ask_workflow, "resolve_model", unexpected_model_resolution)
+
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            question,
+            "--model",
+            "test:model",
+            "--refresh",
+            concept_id,
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert expected_message in result.output
+    assert "pending review" not in result.output.casefold()
+    assert runner_calls == []
+    assert model_resolutions == []
+    current = get_pending_review(workspace)
+    assert current is not None
+    assert current.review_id == pending.review_id

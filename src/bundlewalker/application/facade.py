@@ -299,8 +299,17 @@ class WorkspaceApplication:
         *,
         explicit_model: str | None,
     ) -> RefreshResult:
+        if not instruction.strip():
+            raise ApplicationError(
+                ApplicationErrorCode.INVALID_INPUT,
+                "question must not be empty",
+            )
+        if len(instruction) > MAX_QUESTION_CHARACTERS:
+            raise ApplicationError(
+                ApplicationErrorCode.INVALID_INPUT,
+                "refresh instruction exceeds the supported limit",
+            )
         try:
-            ensure_no_pending_review(self.workspace)
             refreshed = await ask_workflow.answer_synthesis_refresh(
                 self.workspace,
                 instruction,

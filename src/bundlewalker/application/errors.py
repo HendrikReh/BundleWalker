@@ -1,10 +1,8 @@
-"""Closed, sanitized error translation for every delivery adapter."""
+"""Closed, safe-by-construction error translation for every delivery adapter."""
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path, PureWindowsPath
 
 from bundlewalker.errors import (
     AgentRunError,
@@ -21,30 +19,18 @@ from bundlewalker.errors import (
     WorkspaceError,
 )
 
-_PATH_VALUE_PATTERN = re.compile(
-    r"""(?ix)
-    (?:^|[=:\s\"'\[({,<])/(?:[^\s\"'\])},;]*)
-  | (?:^|[=:\s\"'\[({,<])~[\\/](?:[^\s\"'\])},;]*)
-  | (?:^|[=:\s\"'\[({,<])[a-z]:[\\/](?:[^\s\"'\])},;]*)
-  | \bfile:(?:[^\s\"'\])},;]*)
-    """
+_REVIEW_ID = re.compile(r"^[0-9a-f]{32}$")
+_SAFE_USAGE_MESSAGES = frozenset(
+    {
+        "question must not be empty",
+        "refresh target metadata exceeds supported producer limits",
+        "search limit must be between 1 and 10",
+    }
 )
-_CREDENTIAL_PATTERN = re.compile(
-    r"""(?ix)
-    (?:
-        \b(?:
-            api[ _-]*key|access[ _-]*token|token|bearer|authorization|password|secret
-          | credential(?:s)?
-        )\b
-        \s*[\"']?\s*[:=]\s*[\"']?\s*\S+
-      | \bbearer\s+\S+
-    )
-    """
-)
-_PROVIDER_PAYLOAD_PATTERN = re.compile(
-    r"""(?ix)
-    [\[\]{}]
-    """
+_SAFE_AGENT_MESSAGES = frozenset(
+    {
+        "query answer citations cannot include raw line spans",
+    }
 )
 
 
@@ -81,61 +67,66 @@ class ApplicationError(Exception):
 def translate_error(error: BundleWalkerError) -> ApplicationError:
     """Map bounded core failures to the one public error vocabulary."""
     if isinstance(error, ReviewPendingError):
+        review_id = error.review_id if _REVIEW_ID.fullmatch(error.review_id) is not None else None
         return ApplicationError(
             ApplicationErrorCode.REVIEW_PENDING,
-            _public_message(error, "workspace already has a pending review"),
-            review_id=error.review_id,
+            (
+                f"workspace already has a pending review: {review_id}"
+                if review_id is not None
+                else "workspace already has a pending review"
+            ),
+            review_id=review_id,
         )
     if isinstance(error, ReviewNotFoundError):
         return ApplicationError(
             ApplicationErrorCode.REVIEW_NOT_FOUND,
-            _public_message(error, "review was not found"),
+            "review was not found",
         )
     if isinstance(error, ReviewMismatchError):
         return ApplicationError(
             ApplicationErrorCode.REVIEW_ID_MISMATCH,
-            _public_message(error, "review ID does not match the pending review"),
+            "review ID does not match the pending review",
         )
     if isinstance(error, ReviewStaleError):
         return ApplicationError(
             ApplicationErrorCode.REVIEW_STALE,
-            _public_message(error, "review is stale"),
+            "review is stale",
         )
     if isinstance(error, ConfigurationError):
         return ApplicationError(
             ApplicationErrorCode.CONFIGURATION_ERROR,
-            _public_message(error, "workspace configuration is invalid"),
+            "workspace configuration is invalid",
         )
     if isinstance(error, UsageError):
         return ApplicationError(
             ApplicationErrorCode.INVALID_INPUT,
-            _public_message(error, "invalid input"),
+            _safe_usage_message(error),
         )
     if isinstance(error, WorkspaceError):
         return ApplicationError(
             ApplicationErrorCode.WORKSPACE_ERROR,
-            _public_message(error, "workspace operation failed"),
+            "workspace operation failed",
         )
     if isinstance(error, OkfError):
         return ApplicationError(
             ApplicationErrorCode.OKF_ERROR,
-            _public_message(error, "knowledge bundle operation failed"),
+            "knowledge bundle operation failed",
         )
     if isinstance(error, ChangeSetError):
         return ApplicationError(
             ApplicationErrorCode.CHANGE_INVALID,
-            _public_message(error, "proposed change is invalid"),
+            "proposed change is invalid",
         )
     if isinstance(error, AgentRunError):
         return ApplicationError(
             ApplicationErrorCode.MODEL_FAILED,
-            _public_message(error, "model-backed operation failed"),
+            _safe_agent_message(error),
             retryable=True,
         )
     if isinstance(error, TransactionError):
         return ApplicationError(
             ApplicationErrorCode.TRANSACTION_FAILED,
-            _public_message(error, "transaction operation failed"),
+            "transaction operation failed",
         )
     return ApplicationError(
         ApplicationErrorCode.WORKSPACE_ERROR,
@@ -143,23 +134,21 @@ def translate_error(error: BundleWalkerError) -> ApplicationError:
     )
 
 
-def _public_message(error: BundleWalkerError, fallback: str) -> str:
+def _safe_usage_message(error: UsageError) -> str:
     message = str(error)
-    if (
-        not message
-        or len(message) > 1_024
-        or any(unicodedata.category(character) == "Cc" for character in message)
-        or _PATH_VALUE_PATTERN.search(message) is not None
-        or _CREDENTIAL_PATTERN.search(message) is not None
-        or _PROVIDER_PAYLOAD_PATTERN.search(message) is not None
-    ):
-        return fallback
-    for token in message.split():
-        candidate = token.strip("'\"()[]{}<>,;:")
-        if (
-            Path(candidate).is_absolute()
-            or PureWindowsPath(candidate).is_absolute()
-            or candidate.startswith(("~/", "file:"))
-        ):
-            return fallback
-    return message
+    if message in _SAFE_USAGE_MESSAGES:
+        return message
+    if message.startswith("refresh target must be a canonical Synthesis concept ID "):
+        return "refresh target must be a canonical Synthesis concept ID"
+    if message.startswith("refresh target does not exist:"):
+        return "refresh target does not exist"
+    if message.startswith("refresh target is not a Synthesis:"):
+        return "refresh target is not a Synthesis"
+    return "invalid input"
+
+
+def _safe_agent_message(error: AgentRunError) -> str:
+    message = str(error)
+    if message in _SAFE_AGENT_MESSAGES:
+        return message
+    return "model-backed operation failed"

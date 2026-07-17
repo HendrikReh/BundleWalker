@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pytest
 
+import bundlewalker.workflows.ask as ask_workflow
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.query import AgentModel
 from bundlewalker.application import (
+    MAX_QUESTION_CHARACTERS,
     ApplicationDependencies,
     ApplicationError,
     ApplicationErrorCode,
@@ -112,13 +114,18 @@ def _live_tree_bytes(workspace: Workspace) -> dict[str, bytes]:
     }
 
 
-def _write_refresh_target(workspace: Workspace) -> None:
-    path = workspace.wiki_dir / "syntheses" / "current-agent-framework.md"
+def _write_refresh_target(
+    workspace: Workspace,
+    *,
+    concept_id: str = "syntheses/current-agent-framework",
+    concept_type: str = "Synthesis",
+) -> None:
+    path = workspace.wiki_dir / f"{concept_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         render_document(
             OkfMetadata(
-                type="Synthesis",
+                type=concept_type,
                 title="Current Agent Framework",
                 description="A maintained decision framework.",
                 tags=["agents"],
@@ -468,6 +475,93 @@ async def test_preparation_rejects_pending_review_before_model_call(
 
     assert raised.value.code is ApplicationErrorCode.REVIEW_PENDING
     assert calls == 0
+
+
+@pytest.mark.parametrize(
+    ("instruction", "concept_id", "target_type", "expected_message"),
+    [
+        (" ", "syntheses/current-agent-framework", "Synthesis", "question must not be empty"),
+        (
+            "x" * (MAX_QUESTION_CHARACTERS + 1),
+            "syntheses/current-agent-framework",
+            "Synthesis",
+            "refresh instruction exceeds the supported limit",
+        ),
+        (
+            "Refresh this answer",
+            "syntheses/missing",
+            None,
+            "refresh target does not exist",
+        ),
+        (
+            "Refresh this answer",
+            "syntheses/not-a-synthesis",
+            "Topic",
+            "refresh target is not a Synthesis",
+        ),
+    ],
+    ids=["empty", "oversized", "missing-target", "wrong-target-type"],
+)
+async def test_refresh_validation_precedes_pending_review_through_facade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instruction: str,
+    concept_id: str,
+    target_type: str | None,
+    expected_message: str,
+) -> None:
+    workspace = _workspace(tmp_path)
+    if target_type is not None:
+        _write_refresh_target(
+            workspace,
+            concept_id=concept_id,
+            concept_type=target_type,
+        )
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(answer=_answer(), read_ids=frozenset({"topics/agents"})),
+        occurred_at=NOW,
+    )
+    pending = get_pending_review(workspace)
+    assert pending is not None
+    runner_calls = 0
+    model_resolutions = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _instruction: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal runner_calls
+        runner_calls += 1
+        raise AssertionError("invalid refresh invoked provider")
+
+    def must_not_resolve_model(*_args: object, **_kwargs: object) -> str:
+        nonlocal model_resolutions
+        model_resolutions += 1
+        raise AssertionError("invalid refresh resolved a model")
+
+    monkeypatch.setattr(ask_workflow, "resolve_model", must_not_resolve_model)
+    application = WorkspaceApplication(
+        workspace,
+        ApplicationDependencies(environment={}, refresh_runner=must_not_run),
+    )
+
+    with pytest.raises(ApplicationError) as raised:
+        await application.prepare_refresh(
+            instruction,
+            concept_id,
+            explicit_model="test:model",
+        )
+
+    assert raised.value.code is ApplicationErrorCode.INVALID_INPUT
+    assert raised.value.safe_message == expected_message
+    assert runner_calls == 0
+    assert model_resolutions == 0
+    current = get_pending_review(workspace)
+    assert current is not None
+    assert current.review_id == pending.review_id
 
 
 async def test_review_resolves_exactly_once(

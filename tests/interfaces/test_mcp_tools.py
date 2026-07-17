@@ -19,6 +19,7 @@ from bundlewalker.agents.common import AgentDependencies, read_concept
 from bundlewalker.agents.query import AgentModel as QueryAgentModel
 from bundlewalker.agents.semantic_lint import AgentModel as LintAgentModel
 from bundlewalker.application import (
+    MAX_QUESTION_CHARACTERS,
     AnswerResult,
     ApplicationDependencies,
     ApplicationError,
@@ -32,6 +33,7 @@ from bundlewalker.application import (
     SynthesisResult,
     WorkspaceApplication,
     WorkspaceStatus,
+    translate_error,
 )
 from bundlewalker.domain import (
     MAX_CONCEPT_ID_CHARACTERS,
@@ -47,6 +49,7 @@ from bundlewalker.domain import (
     OkfMetadata,
     Severity,
 )
+from bundlewalker.errors import AgentRunError, TransactionError, WorkspaceError
 from bundlewalker.interfaces.mcp import create_mcp_server
 from bundlewalker.interfaces.mcp_schemas import (
     MAX_MODEL_NAME_CHARACTERS,
@@ -723,6 +726,131 @@ async def test_pending_review_gate_runs_before_provider_invocation(
     assert result.structuredContent is not None
     assert result.structuredContent["error"]["code"] == "review_pending"
     assert calls == 0
+
+
+@pytest.mark.parametrize(
+    ("arguments", "target_type", "expected_message"),
+    [
+        (
+            {
+                "instruction": "",
+                "concept_id": "syntheses/current-agent-framework",
+                "model": "test:model",
+            },
+            None,
+            "invalid tool input",
+        ),
+        (
+            {
+                "instruction": "x" * (MAX_QUESTION_CHARACTERS + 1),
+                "concept_id": "syntheses/current-agent-framework",
+                "model": "test:model",
+            },
+            None,
+            "invalid tool input",
+        ),
+        (
+            {
+                "instruction": "Refresh this answer",
+                "concept_id": "syntheses/missing",
+                "model": "test:model",
+            },
+            None,
+            "refresh target does not exist",
+        ),
+        (
+            {
+                "instruction": "Refresh this answer",
+                "concept_id": "syntheses/not-a-synthesis",
+                "model": "test:model",
+            },
+            "Topic",
+            "refresh target is not a Synthesis",
+        ),
+    ],
+    ids=["empty", "oversized", "missing-target", "wrong-target-type"],
+)
+async def test_refresh_validation_precedes_pending_review_through_mcp(
+    application_with_pending_review: WorkspaceApplication,
+    arguments: dict[str, object],
+    target_type: str | None,
+    expected_message: str,
+) -> None:
+    if target_type is not None:
+        concept_id = cast(str, arguments["concept_id"])
+        path = application_with_pending_review.workspace.wiki_dir / f"{concept_id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            render_document(
+                OkfMetadata(
+                    type=target_type,
+                    title="Not a synthesis",
+                    description="A target with the wrong concept type.",
+                    tags=["test"],
+                    timestamp=NOW,
+                ),
+                "# Not a synthesis\n",
+            ),
+            encoding="utf-8",
+        )
+        regenerate_indexes(application_with_pending_review.workspace.wiki_dir)
+    calls = 0
+
+    async def must_not_run(
+        _model: QueryAgentModel,
+        _dependencies: AgentDependencies,
+        _instruction: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("invalid refresh invoked provider")
+
+    blocked = WorkspaceApplication(
+        application_with_pending_review.workspace,
+        ApplicationDependencies(environment={}, refresh_runner=must_not_run),
+    )
+    server = create_mcp_server(blocked)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("prepare_refresh", arguments)
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "invalid_input"
+    assert result.structuredContent["error"]["message"] == expected_message
+    assert calls == 0
+
+
+@pytest.mark.parametrize(
+    "internal_error",
+    [
+        TransactionError("could not create raw source: raw/private-source.txt"),
+        WorkspaceError("workspace failure at wiki/topics/private.md"),
+        AgentRunError("token private-token"),
+        AgentRunError("provider response: private plaintext body"),
+    ],
+)
+async def test_bundlewalker_error_details_do_not_cross_the_mcp_adapter(
+    application: WorkspaceApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    internal_error: TransactionError | WorkspaceError | AgentRunError,
+) -> None:
+    async def fail_status() -> WorkspaceStatus:
+        raise translate_error(internal_error)
+
+    monkeypatch.setattr(application, "status", fail_status)
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("workspace_status", {})
+
+    serialized = result.model_dump_json()
+    assert result.isError is True
+    assert all(
+        private not in serialized
+        for private in ("raw/", "wiki/", "private", "token", "provider", "plaintext")
+    )
 
 
 async def test_prepare_reports_protocol_progress_with_request_token(

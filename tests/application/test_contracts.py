@@ -192,40 +192,50 @@ def test_application_error_redacts_absolute_paths() -> None:
         (
             ConfigurationError("bad configuration"),
             ApplicationErrorCode.CONFIGURATION_ERROR,
-            "bad configuration",
+            "workspace configuration is invalid",
             False,
         ),
-        (UsageError("bad request"), ApplicationErrorCode.INVALID_INPUT, "bad request", False),
-        (OkfError("bad bundle"), ApplicationErrorCode.OKF_ERROR, "bad bundle", False),
-        (ChangeSetError("bad change"), ApplicationErrorCode.CHANGE_INVALID, "bad change", False),
+        (UsageError("bad request"), ApplicationErrorCode.INVALID_INPUT, "invalid input", False),
+        (
+            OkfError("bad bundle"),
+            ApplicationErrorCode.OKF_ERROR,
+            "knowledge bundle operation failed",
+            False,
+        ),
+        (
+            ChangeSetError("bad change"),
+            ApplicationErrorCode.CHANGE_INVALID,
+            "proposed change is invalid",
+            False,
+        ),
         (
             AgentRunError("provider timed out"),
             ApplicationErrorCode.MODEL_FAILED,
-            "provider timed out",
+            "model-backed operation failed",
             True,
         ),
         (
             ReviewNotFoundError("review missing"),
             ApplicationErrorCode.REVIEW_NOT_FOUND,
-            "review missing",
+            "review was not found",
             False,
         ),
         (
             ReviewMismatchError("review mismatch"),
             ApplicationErrorCode.REVIEW_ID_MISMATCH,
-            "review mismatch",
+            "review ID does not match the pending review",
             False,
         ),
         (
             ReviewStaleError("review stale"),
             ApplicationErrorCode.REVIEW_STALE,
-            "review stale",
+            "review is stale",
             False,
         ),
         (
             TransactionError("transaction failed"),
             ApplicationErrorCode.TRANSACTION_FAILED,
-            "transaction failed",
+            "transaction operation failed",
             False,
         ),
     ],
@@ -264,7 +274,10 @@ def _pending_error_with_message(message: str) -> ReviewPendingError:
 
 
 _REVIEW_ERROR_CASES: tuple[tuple[Callable[[str], BundleWalkerError], str], ...] = (
-    (_pending_error_with_message, "workspace already has a pending review"),
+    (
+        _pending_error_with_message,
+        "workspace already has a pending review: " + "a" * 32,
+    ),
     (ReviewNotFoundError, "review was not found"),
     (ReviewMismatchError, "review ID does not match the pending review"),
     (ReviewStaleError, "review is stale"),
@@ -398,6 +411,48 @@ def test_translate_error_redacts_scalar_array_fragments_embedded_in_prose(messag
 
     assert mapped.safe_message == "model-backed operation failed"
     assert "provider output" not in mapped.safe_message
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            TransactionError("could not create raw source: raw/deadbeef-private-name.txt"),
+            "transaction operation failed",
+        ),
+        (
+            WorkspaceError("could not read wiki/topics/private-topic.md"),
+            "workspace operation failed",
+        ),
+        (
+            TransactionError("journal failure at .bundlewalker/transactions/private/manifest.json"),
+            "transaction operation failed",
+        ),
+        (
+            AgentRunError("token private-token"),
+            "model-backed operation failed",
+        ),
+        (
+            AgentRunError("provider response: private prompt contents"),
+            "model-backed operation failed",
+        ),
+        (
+            AgentRunError("upstream returned non-JSON body: private plaintext payload"),
+            "model-backed operation failed",
+        ),
+    ],
+)
+def test_translate_error_never_relays_relative_paths_credentials_or_provider_prose(
+    error: BundleWalkerError,
+    expected: str,
+) -> None:
+    mapped = translate_error(error)
+
+    assert mapped.safe_message == expected
+    assert all(
+        private not in mapped.safe_message
+        for private in ("raw/", "wiki/", ".bundlewalker", "private", "provider", "upstream")
+    )
 
 
 def test_translate_error_uses_closed_fallback_for_unknown_core_error() -> None:
