@@ -27,6 +27,7 @@ from bundlewalker.application.errors import (
     ApplicationErrorCode,
     translate_error,
 )
+from bundlewalker.application.facade import ApplicationDependencies, WorkspaceApplication
 
 __all__ = [
     "MAX_CONCEPT_PAGE_SIZE",
@@ -35,6 +36,7 @@ __all__ = [
     "MAX_SEARCH_CHARACTERS",
     "MAX_SOURCE_NAME_CHARACTERS",
     "AnswerResult",
+    "ApplicationDependencies",
     "ApplicationError",
     "ApplicationErrorCode",
     "ConceptContent",
@@ -50,6 +52,7 @@ __all__ = [
     "RefreshResult",
     "ReviewResult",
     "SynthesisResult",
+    "WorkspaceApplication",
     "WorkspaceStatus",
     "translate_error",
 ]
