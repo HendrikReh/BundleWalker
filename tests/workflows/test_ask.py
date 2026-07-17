@@ -465,6 +465,75 @@ async def test_refresh_rejects_a_pending_review_before_invoking_the_model(
     assert current.review_id == pending.review_id
 
 
+async def test_refresh_empty_question_precedes_pending_review_preflight(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(answer=_answer("First synthesis"), read_ids=frozenset({"topics/agents"})),
+        occurred_at=NOW,
+    )
+    calls = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("empty refresh invoked the model runner")
+
+    with pytest.raises(UsageError, match="question must not be empty"):
+        await answer_synthesis_refresh(
+            workspace,
+            " ",
+            target.concept_id,
+            explicit_model=None,
+            environment={},
+            runner=must_not_run,
+        )
+
+    assert calls == 0
+
+
+async def test_refresh_invalid_target_precedes_pending_review_preflight(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(answer=_answer("First synthesis"), read_ids=frozenset({"topics/agents"})),
+        occurred_at=NOW,
+    )
+    calls = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("invalid refresh invoked the model runner")
+
+    with pytest.raises(UsageError, match="canonical Synthesis concept ID"):
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            "topics/agents",
+            explicit_model=None,
+            environment={},
+            runner=must_not_run,
+        )
+
+    assert calls == 0
+
+
 async def test_answer_question_leaves_a_pending_review_untouched(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     prepare_synthesis(

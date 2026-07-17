@@ -120,13 +120,13 @@ async def answer_synthesis_refresh(
 ) -> AnsweredSynthesisRefresh:
     """Recover, validate one refresh target, then run one cited revision query."""
     recover_transactions(workspace)
-    ensure_no_pending_review(workspace)
     if not question.strip():
         raise UsageError("question must not be empty")
 
     validate_repository_path(workspace)
     repository = OkfRepository(workspace.wiki_dir)
     target = _load_refresh_target(repository, concept_id)
+    ensure_no_pending_review(workspace)
     dependencies = _query_dependencies(workspace, repository)
     model = resolve_model(explicit_model, environment if environment is not None else os.environ)
     selected_runner = runner if runner is not None else run_refresh_query_agent
