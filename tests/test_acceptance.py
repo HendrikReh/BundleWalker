@@ -17,6 +17,7 @@ from bundlewalker.agents.common import AgentDependencies, read_concept
 from bundlewalker.agents.ingest import AgentModel as IngestionModel
 from bundlewalker.agents.query import AgentModel as QueryModel
 from bundlewalker.agents.semantic_lint import AgentModel as SemanticLintModel
+from bundlewalker.changes import ChangeValidationContext
 from bundlewalker.cli import app
 from bundlewalker.domain import (
     ChangeOperation,
@@ -31,9 +32,20 @@ from bundlewalker.domain import (
     Severity,
 )
 from bundlewalker.okf.lint import has_errors, lint_bundle
-from bundlewalker.transactions import PreparedTransaction, recover_transactions
+from bundlewalker.okf.repository import OkfRepository
+from bundlewalker.transactions import (
+    PreparedTransaction,
+    ReviewKind,
+    prepare_transaction,
+    recover_transactions,
+)
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
-from bundlewalker.workspace import RawSource, discover_workspace
+from bundlewalker.workspace import (
+    RawSource,
+    discover_workspace,
+    initialize_workspace,
+    load_raw_source,
+)
 
 NOW = datetime(2026, 7, 16, 12, tzinfo=UTC)
 runner = CliRunner()
@@ -123,6 +135,74 @@ def _set_swapping(prepared: PreparedTransaction) -> None:
         encoding="utf-8",
     )
     prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+
+
+def _set_accepted(prepared: PreparedTransaction) -> None:
+    manifest_path = prepared.transaction_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["phase"] = "accepted"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _prepare_accepted_ingestion(tmp_path: Path) -> tuple[PreparedTransaction, RawSource]:
+    workspace = initialize_workspace(tmp_path / "accepted-knowledge", occurred_at=NOW)
+    source_path = tmp_path / "accepted-review-notes.txt"
+    source_path.write_bytes(b"Accepted review survives interruption.\nSecond line.\n")
+    source = load_raw_source(source_path, workspace)
+    change_set = _ingestion_change_set(source)
+    context = ChangeValidationContext(
+        mode="ingest",
+        repository=OkfRepository(workspace.wiki_dir),
+        readable_concepts=frozenset(),
+        source=source,
+    )
+    prepared = prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        NOW,
+        kind=ReviewKind.INGESTION,
+    )
+    _set_accepted(prepared)
+    return prepared, source
+
+
+def test_accepted_review_recovers_to_committed_raw_and_wiki(tmp_path: Path) -> None:
+    prepared, source = _prepare_accepted_ingestion(tmp_path)
+    prospective = {
+        path.relative_to(prepared.prospective_wiki).as_posix(): path.read_bytes()
+        for path in sorted(prepared.prospective_wiki.rglob("*"))
+        if path.is_file()
+    }
+
+    recover_transactions(prepared.workspace)
+
+    live = {
+        path.relative_to(prepared.workspace.wiki_dir).as_posix(): path.read_bytes()
+        for path in sorted(prepared.workspace.wiki_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert live == prospective
+    assert (prepared.workspace.root / source.stored_relative_path).read_bytes() == source.content
+    assert not prepared.transaction_dir.exists()
+
+
+def test_accepted_review_rolls_back_when_live_base_changed(tmp_path: Path) -> None:
+    prepared, source = _prepare_accepted_ingestion(tmp_path)
+    external = prepared.workspace.wiki_dir / "external.md"
+    external.write_text("external live bytes\n", encoding="utf-8")
+    knowledge_after_external_edit = _knowledge_bytes(prepared.workspace.root)
+
+    recover_transactions(prepared.workspace)
+
+    assert _knowledge_bytes(prepared.workspace.root) == knowledge_after_external_edit
+    assert external.read_bytes() == b"external live bytes\n"
+    assert not (prepared.workspace.root / source.stored_relative_path).exists()
+    assert not prepared.transaction_dir.exists()
 
 
 def test_complete_offline_review_first_workflow_and_recovery(

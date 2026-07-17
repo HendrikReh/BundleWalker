@@ -21,7 +21,13 @@ from bundlewalker.domain import (
     ConceptType,
     DraftConcept,
 )
-from bundlewalker.errors import ReviewPendingError, TransactionError
+from bundlewalker.errors import (
+    ReviewMismatchError,
+    ReviewNotFoundError,
+    ReviewPendingError,
+    ReviewStaleError,
+    TransactionError,
+)
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.okf.repository import OkfRepository
@@ -29,7 +35,9 @@ from bundlewalker.transactions import (
     PreparedTransaction,
     ReviewKind,
     ReviewStatus,
+    apply_pending_review,
     commit_transaction,
+    discard_pending_review,
     discard_transaction,
     ensure_no_pending_review,
     get_pending_review,
@@ -312,9 +320,7 @@ def test_prepare_persists_exact_review_record_and_identity(tmp_path: Path) -> No
     prepared, _source = _prepare(tmp_path)
     review_path = prepared.transaction_dir / "review.json"
     review = json.loads(review_path.read_text(encoding="utf-8"))
-    identity = json.loads(
-        (prepared.transaction_dir / "identity.json").read_text(encoding="utf-8")
-    )
+    identity = json.loads((prepared.transaction_dir / "identity.json").read_text(encoding="utf-8"))
 
     assert review == {
         "changed_paths": [prepared.change_set.drafts[0].path],
@@ -386,6 +392,86 @@ def test_pending_review_becomes_stale_after_live_edit(tmp_path: Path) -> None:
 
     assert loaded is not None
     assert loaded.status is ReviewStatus.STALE
+
+
+def test_loaded_review_can_apply_without_original_handle(tmp_path: Path) -> None:
+    prepared, source = _prepare(tmp_path)
+    review_id = prepared.transaction_id
+    workspace = prepared.workspace
+    del prepared
+
+    apply_pending_review(workspace, review_id)
+
+    assert get_pending_review(workspace) is None
+    assert (workspace.root / source.stored_relative_path).read_bytes() == source.content
+
+
+def test_wrong_review_id_cannot_resolve_current_review(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+
+    with pytest.raises(
+        ReviewMismatchError,
+        match=r"^review ID does not match the pending review$",
+    ):
+        discard_pending_review(prepared.workspace, "0" * 32)
+
+    loaded = get_pending_review(prepared.workspace)
+    assert loaded is not None
+    assert loaded.review_id == prepared.transaction_id
+
+
+def test_malformed_review_id_is_rejected_without_inspecting_a_named_path(
+    tmp_path: Path,
+) -> None:
+    prepared, _source = _prepare(tmp_path)
+
+    with pytest.raises(
+        ReviewMismatchError,
+        match=r"^review ID does not match the pending review$",
+    ):
+        apply_pending_review(prepared.workspace, "../manifest.json")
+
+    assert prepared.transaction_dir.is_dir()
+
+
+@pytest.mark.parametrize("review_id", [None, 17, b"0" * 32])
+def test_non_string_review_id_uses_fixed_mismatch_error(
+    tmp_path: Path,
+    review_id: object,
+) -> None:
+    prepared, _source = _prepare(tmp_path)
+
+    with pytest.raises(
+        ReviewMismatchError,
+        match=r"^review ID does not match the pending review$",
+    ):
+        apply_pending_review(
+            prepared.workspace,
+            review_id,  # pyright: ignore[reportArgumentType]
+        )
+
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_missing_pending_review_raises_not_found(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+
+    with pytest.raises(ReviewNotFoundError):
+        apply_pending_review(workspace, "0" * 32)
+
+
+def test_stale_review_cannot_apply_but_can_discard(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+    (prepared.workspace.wiki_dir / "external.md").write_text(
+        "external\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReviewStaleError):
+        apply_pending_review(prepared.workspace, prepared.transaction_id)
+    discard_pending_review(prepared.workspace, prepared.transaction_id)
+
+    assert get_pending_review(prepared.workspace) is None
 
 
 def test_missing_live_wiki_preserves_pending_review_as_stale(tmp_path: Path) -> None:
@@ -475,6 +561,29 @@ def test_commit_persists_exact_raw_bytes_and_the_reviewed_wiki(tmp_path: Path) -
     assert _tree_bytes(prepared.workspace.wiki_dir) == prospective
     assert not has_errors(lint_bundle(prepared.workspace.wiki_dir, prepared.workspace.root))
     assert not prepared.transaction_dir.exists()
+
+
+def test_commit_persists_accepted_before_raw_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, _source = _prepare(tmp_path)
+    observed_phases: list[object] = []
+    original_persist = transactions._persist_raw_source  # pyright: ignore[reportPrivateUsage]
+
+    def observe_persist(
+        workspace: Workspace,
+        transaction_dir: Path,
+        manifest: transactions._Manifest,  # pyright: ignore[reportPrivateUsage]
+    ) -> None:
+        observed_phases.append(_manifest(prepared)["phase"])
+        original_persist(workspace, transaction_dir, manifest)
+
+    monkeypatch.setattr(transactions, "_persist_raw_source", observe_persist)
+
+    commit_transaction(prepared)
+
+    assert observed_phases == ["accepted"]
 
 
 def test_transaction_without_a_raw_source_commits_a_synthesis(tmp_path: Path) -> None:
@@ -664,6 +773,47 @@ def test_recovery_at_each_phase_boundary_is_complete_and_idempotent(
 
     recover_transactions(workspace)
     assert _tree_bytes(workspace.wiki_dir) == recovered
+
+
+def test_accepted_recovery_blocks_corrupt_transaction_owned_tree(tmp_path: Path) -> None:
+    prepared, source = _prepare(tmp_path)
+    live_wiki = _tree_bytes(prepared.workspace.wiki_dir)
+    _set_phase(prepared, "accepted")
+    (prepared.prospective_wiki / "index.md").write_text(
+        "corrupt prospective bytes\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TransactionError, match="reviewed tree"):
+        recover_transactions(prepared.workspace)
+
+    assert _tree_bytes(prepared.workspace.wiki_dir) == live_wiki
+    assert not (prepared.workspace.root / source.stored_relative_path).exists()
+    assert prepared.transaction_dir.is_dir()
+
+
+def test_accepted_recovery_blocks_when_raw_persistence_is_ambiguous(tmp_path: Path) -> None:
+    prepared, source = _prepare(tmp_path)
+    _set_phase(prepared, "accepted")
+    manifest = transactions._load_manifest(  # pyright: ignore[reportPrivateUsage]
+        prepared.workspace,
+        prepared.transaction_dir,
+    )
+    transactions._persist_raw_source(  # pyright: ignore[reportPrivateUsage]
+        prepared.workspace,
+        prepared.transaction_dir,
+        manifest,
+    )
+    external = prepared.workspace.wiki_dir / "external.md"
+    external.write_text("external live bytes\n", encoding="utf-8")
+    live_after_external_edit = _tree_bytes(prepared.workspace.wiki_dir)
+
+    with pytest.raises(TransactionError, match="raw persistence is ambiguous"):
+        recover_transactions(prepared.workspace)
+
+    assert _tree_bytes(prepared.workspace.wiki_dir) == live_after_external_edit
+    assert (prepared.workspace.root / source.stored_relative_path).read_bytes() == source.content
+    assert prepared.transaction_dir.is_dir()
 
 
 def test_new_live_recovery_restores_the_backup_when_the_new_tree_is_invalid(
