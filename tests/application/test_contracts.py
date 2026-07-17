@@ -324,6 +324,54 @@ def test_translate_error_redacts_embedded_paths_credentials_and_provider_payload
     )
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "location=/tmp/private-source.md",
+        r"destination=C:\\Users\\private-source.md",
+        "label=~/private-source.md",
+        "reference=file:///tmp/private-source.md",
+    ],
+)
+def test_translate_error_redacts_path_values_after_arbitrary_labels(message: str) -> None:
+    mapped = translate_error(WorkspaceError(message))
+
+    assert mapped.safe_message == "workspace operation failed"
+    assert "private-source" not in mapped.safe_message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "api key=private-key",
+        "api-key=private-key",
+        "access token=private-token",
+        "authorization=private-token",
+        "password: private-password",
+        "credential=private-credential",
+    ],
+)
+def test_translate_error_redacts_normalized_credential_markers(message: str) -> None:
+    mapped = translate_error(AgentRunError(message))
+
+    assert mapped.safe_message == "model-backed operation failed"
+    assert "private" not in mapped.safe_message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        'provider error: {"response": {"id": "private"}}',
+        'provider error: ["private", "payload"]',
+    ],
+)
+def test_translate_error_redacts_payload_fragments_embedded_in_prose(message: str) -> None:
+    mapped = translate_error(AgentRunError(message))
+
+    assert mapped.safe_message == "model-backed operation failed"
+    assert "private" not in mapped.safe_message
+
+
 def test_translate_error_uses_closed_fallback_for_unknown_core_error() -> None:
     mapped = translate_error(BundleWalkerError("provider secret"))
 

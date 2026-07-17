@@ -21,17 +21,21 @@ from bundlewalker.errors import (
     WorkspaceError,
 )
 
-_EMBEDDED_PATH_PATTERN = re.compile(
+_PATH_VALUE_PATTERN = re.compile(
     r"""(?ix)
-    \b(?:path|file(?:name)?|directory|dir|workspace|source)\b
-    \s*[\"']?\s*[:=]\s*[\"']?\s*
-    (?:/|~[\\/]|file:|[a-z]:[\\/])
+    (?:^|[=\s\"'\[({,<])/(?:[^\s\"'\])},;]*)
+  | (?:^|[=\s\"'\[({,<])~[\\/](?:[^\s\"'\])},;]*)
+  | (?:^|[=\s\"'\[({,<])[a-z]:[\\/](?:[^\s\"'\])},;]*)
+  | \bfile:(?:[^\s\"'\])},;]*)
     """
 )
 _CREDENTIAL_PATTERN = re.compile(
     r"""(?ix)
     (?:
-        \b(?:token|api[_-]?key|authorization|password|secret|credential(?:s)?)\b
+        \b(?:
+            api[ _-]*key|access[ _-]*token|token|bearer|authorization|password|secret
+          | credential(?:s)?
+        )\b
         \s*[\"']?\s*[:=]\s*[\"']?\s*\S+
       | \bbearer\s+\S+
     )
@@ -39,11 +43,7 @@ _CREDENTIAL_PATTERN = re.compile(
 )
 _PROVIDER_PAYLOAD_PATTERN = re.compile(
     r"""(?ix)
-    (?:
-        ^\s*[\[{]
-      | \b(?:response|payload|body|content|choices|messages|tool_calls|output)\b
-        \s*[:=]\s*[\[{]
-    )
+    [\[{]\s*(?:[\"']|[\[{]|\w+\s*[:=])
     """
 )
 
@@ -149,7 +149,7 @@ def _public_message(error: BundleWalkerError, fallback: str) -> str:
         not message
         or len(message) > 1_024
         or any(unicodedata.category(character) == "Cc" for character in message)
-        or _EMBEDDED_PATH_PATTERN.search(message) is not None
+        or _PATH_VALUE_PATTERN.search(message) is not None
         or _CREDENTIAL_PATTERN.search(message) is not None
         or _PROVIDER_PAYLOAD_PATTERN.search(message) is not None
     ):
