@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+import anyio
 import pytest
 from mcp import ClientSession, types
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -23,6 +24,7 @@ from bundlewalker.workspace import Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 PROJECT_ROOT = Path(__file__).parents[2]
+STDIO_TIMEOUT_SECONDS = 15
 
 
 def _captured_text(stream: TextIO) -> str:
@@ -66,6 +68,22 @@ def _parameters(
     )
 
 
+def _console_parameters(workspace: Workspace) -> StdioServerParameters:
+    return StdioServerParameters(
+        command="uv",
+        args=[
+            "run",
+            "--project",
+            str(PROJECT_ROOT),
+            "bundlewalker-mcp",
+            "--workspace",
+            str(workspace.root),
+        ],
+        env=os.environ.copy(),
+        cwd=PROJECT_ROOT,
+    )
+
+
 @pytest.fixture
 def workspace_with_pending_review(tmp_path: Path) -> tuple[Workspace, str, str]:
     workspace = _workspace(tmp_path)
@@ -90,13 +108,14 @@ async def _inspect_pending_review(
     parameters: StdioServerParameters,
 ) -> tuple[dict[str, Any], str]:
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error_output:
-        async with (
-            stdio_client(parameters, errlog=error_output) as (read, write),
-            ClientSession(read, write) as session,
-        ):
-            await session.initialize()
-            result = await session.call_tool("get_pending_review", {})
-            resource = await session.read_resource(AnyUrl("bundlewalker://review/pending"))
+        with anyio.fail_after(STDIO_TIMEOUT_SECONDS):
+            async with (
+                stdio_client(parameters, errlog=error_output) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+                result = await session.call_tool("get_pending_review", {})
+                resource = await session.read_resource(AnyUrl("bundlewalker://review/pending"))
 
         assert _captured_text(error_output) == ""
     assert result.isError is False
@@ -106,17 +125,18 @@ async def _inspect_pending_review(
     return result.structuredContent, content.text
 
 
-async def test_stdio_entrypoint_binds_explicit_workspace_without_stdout_noise(
+async def test_registered_console_entrypoint_binds_workspace_without_protocol_noise(
     tmp_path: Path,
 ) -> None:
     workspace = _workspace(tmp_path)
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error_output:
-        async with (
-            stdio_client(_parameters(workspace=workspace), errlog=error_output) as (read, write),
-            ClientSession(read, write) as session,
-        ):
-            initialized = await session.initialize()
-            result = await session.call_tool("workspace_status", {})
+        with anyio.fail_after(STDIO_TIMEOUT_SECONDS):
+            async with (
+                stdio_client(_console_parameters(workspace), errlog=error_output) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                initialized = await session.initialize()
+                result = await session.call_tool("workspace_status", {})
 
         assert _captured_text(error_output) == ""
     assert result.isError is False
@@ -138,12 +158,15 @@ async def test_stdio_entrypoint_discovers_workspace_from_process_cwd(tmp_path: P
     nested.mkdir(parents=True)
 
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error_output:
-        async with (
-            stdio_client(_parameters(cwd=nested), errlog=error_output) as (read, write),
-            ClientSession(read, write) as session,
-        ):
-            await session.initialize()
-            result = await session.call_tool("workspace_status", {})
+        with anyio.fail_after(STDIO_TIMEOUT_SECONDS):
+            async with (
+                stdio_client(_parameters(cwd=nested), errlog=error_output) as (read, write),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+                result = await session.call_tool("workspace_status", {})
+
+        assert _captured_text(error_output) == ""
 
     assert result.isError is False
     assert result.structuredContent is not None
@@ -156,13 +179,21 @@ async def test_stdio_entrypoint_supports_deterministic_lint_and_resource_read(
     workspace = _workspace(tmp_path)
 
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error_output:
-        async with (
-            stdio_client(_parameters(workspace=workspace), errlog=error_output) as (read, write),
-            ClientSession(read, write) as session,
-        ):
-            await session.initialize()
-            linted = await session.call_tool("lint", {"semantic": False})
-            resource = await session.read_resource(AnyUrl("bundlewalker://concept/topics/agents"))
+        with anyio.fail_after(STDIO_TIMEOUT_SECONDS):
+            async with (
+                stdio_client(_parameters(workspace=workspace), errlog=error_output) as (
+                    read,
+                    write,
+                ),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+                linted = await session.call_tool("lint", {"semantic": False})
+                resource = await session.read_resource(
+                    AnyUrl("bundlewalker://concept/topics/agents")
+                )
+
+        assert _captured_text(error_output) == ""
 
     assert linted.isError is False
     assert linted.structuredContent is not None
@@ -249,3 +280,15 @@ def test_console_script_is_registered() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert project["project"]["scripts"]["bundlewalker-mcp"] == ("bundlewalker.interfaces.mcp:main")
+
+
+def test_mcp_runtime_dependencies_are_direct_and_bounded() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = project["project"]["dependencies"]
+    assert "jsonschema>=4.26,<5" in dependencies
+    assert "mcp>=1.28.1,<2" in dependencies
+
+    lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    packages = {package["name"]: package for package in lock["package"]}
+    assert packages["mcp"]["version"] == "1.28.1"
+    assert packages["jsonschema"]["version"].startswith("4.")

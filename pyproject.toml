@@ -5,6 +5,7 @@ description = "Build a review-first personal knowledge wiki with OKF and Pydanti
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "jsonschema>=4.26,<5",
     "markdown-it-py>=4.0.0",
     "mcp>=1.28.1,<2",
     "pydantic-ai>=2.10.0",
