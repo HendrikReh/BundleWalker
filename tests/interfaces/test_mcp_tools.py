@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from mcp import types
+from mcp.shared.exceptions import McpError
 from mcp.shared.memory import create_connected_server_and_client_session
-from pydantic import BaseModel, ValidationError
+from pydantic import AnyUrl, BaseModel, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -22,6 +25,7 @@ from bundlewalker.application import (
     ApplicationErrorCode,
     ConceptSearchResult,
     IngestionResult,
+    InlineSource,
     LintResult,
     MutationResult,
     PendingReviewResult,
@@ -32,10 +36,15 @@ from bundlewalker.application import (
 )
 from bundlewalker.domain import (
     MAX_CONCEPT_ID_CHARACTERS,
+    ChangeOperation,
+    ChangeSet,
     Citation,
     CitedAnswer,
+    ConceptType,
+    DraftConcept,
     FindingOrigin,
     LintFinding,
+    OkfDocument,
     OkfMetadata,
     Severity,
 )
@@ -55,7 +64,7 @@ from bundlewalker.interfaces.mcp_schemas import (
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
-from bundlewalker.workspace import Workspace, initialize_workspace
+from bundlewalker.workspace import RawSource, Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 17, 12, tzinfo=UTC)
 
@@ -104,6 +113,102 @@ async def _query_runner(
     return _answer(), frozenset({"topics/agents"})
 
 
+def _ingestion_change_set(source: RawSource) -> ChangeSet:
+    return ChangeSet(
+        summary="Integrated notes.",
+        source_sha256=source.sha256,
+        drafts=[
+            DraftConcept(
+                operation=ChangeOperation.CREATE,
+                path=source.concept_id,
+                type=ConceptType.SOURCE,
+                title="Notes",
+                description="Notes from the incoming source.",
+                tags=["notes"],
+                body="# Notes\n\nThe source contains evidence [1].\n",
+                citations=[
+                    Citation(
+                        number=1,
+                        concept_id=source.concept_id,
+                        start_line=1,
+                        end_line=1,
+                    )
+                ],
+            )
+        ],
+    )
+
+
+async def _ingestion_runner(
+    model: QueryAgentModel,
+    _dependencies: AgentDependencies,
+    source: RawSource,
+) -> tuple[ChangeSet, frozenset[str]]:
+    assert model == "test:model"
+    return _ingestion_change_set(source), frozenset()
+
+
+def _write_refresh_target(workspace: Workspace) -> None:
+    path = workspace.wiki_dir / "syntheses" / "current-agent-framework.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_document(
+            OkfMetadata(
+                type="Synthesis",
+                title="Current Agent Framework",
+                description="A maintained decision framework.",
+                tags=["agents"],
+                timestamp=NOW,
+            ),
+            "# Current answer\n\nAgents can use tools [1].\n\n"
+            "# Citations\n\n[1] [Agents](/topics/agents.md)\n",
+        ),
+        encoding="utf-8",
+    )
+    regenerate_indexes(workspace.wiki_dir)
+
+
+async def _current_refresh_runner(
+    model: QueryAgentModel,
+    dependencies: AgentDependencies,
+    instruction: str,
+    target: OkfDocument,
+) -> tuple[CitedAnswer, frozenset[str]]:
+    assert model == "test:model"
+    assert instruction == "Refresh this answer"
+    assert target.concept_id == "syntheses/current-agent-framework"
+    dependencies.read_ids.add("topics/agents")
+    return (
+        CitedAnswer(
+            title="Current Agent Framework",
+            body="# Current answer\n\nAgents can use tools [1].\n",
+            citations=[Citation(number=1, concept_id="topics/agents")],
+        ),
+        frozenset({"topics/agents"}),
+    )
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+async def _cancel_request(session: Any, request_id: int | str) -> None:
+    await session.send_notification(
+        types.ClientNotification(
+            types.CancelledNotification(
+                params=types.CancelledNotificationParams(
+                    requestId=request_id,
+                    reason="test cancellation",
+                )
+            )
+        )
+    )
+
+
 async def _semantic_lint_runner(
     model: LintAgentModel,
     dependencies: AgentDependencies,
@@ -136,6 +241,7 @@ def application(tmp_path: Path) -> WorkspaceApplication:
         _workspace(tmp_path),
         ApplicationDependencies(
             environment={},
+            ingestion_runner=_ingestion_runner,
             query_runner=_query_runner,
             semantic_lint_runner=_semantic_lint_runner,
         ),
@@ -377,6 +483,412 @@ async def test_pending_review_tool_returns_object_root_when_none_is_pending(
     assert result.content[0].text == "No pending review."
 
 
+async def test_prepare_then_apply_uses_two_explicit_tool_calls(
+    application: WorkspaceApplication,
+) -> None:
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        prepared = await session.call_tool(
+            "prepare_ingestion",
+            {
+                "source_name": "notes.txt",
+                "content": "evidence\n",
+                "model": "test:model",
+            },
+        )
+        assert prepared.structuredContent is not None
+        validated = IngestionResult.model_validate(prepared.structuredContent)
+        assert validated.review is not None
+        review_id = validated.review.review_id
+        assert _tree_bytes(application.workspace.raw_dir) == {}
+        applied = await session.call_tool("apply_review", {"review_id": review_id})
+
+    assert prepared.isError is False
+    assert validated.review.diff
+    assert isinstance(prepared.content[0], types.TextContent)
+    assert review_id in prepared.content[0].text
+    assert validated.review.summary in prepared.content[0].text
+    assert validated.review.diff in prepared.content[0].text
+    assert "bundlewalker://review/pending" in prepared.content[0].text
+    assert applied.isError is False
+    assert applied.structuredContent is not None
+    assert MutationResult.model_validate(applied.structuredContent) == MutationResult(
+        review_id=review_id,
+        status="applied",
+    )
+    assert _tree_bytes(application.workspace.raw_dir)
+
+
+async def test_mcp_ingestion_has_no_path_argument(application: WorkspaceApplication) -> None:
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "prepare_ingestion",
+            {
+                "source_name": "notes.txt",
+                "content": "text\n",
+                "path": "/tmp/secret",
+            },
+        )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "invalid_input"
+    assert "/tmp/secret" not in result.model_dump_json()
+    assert await application.get_pending_review() is None
+
+
+async def test_prepared_review_survives_a_new_in_memory_server_session(
+    application: WorkspaceApplication,
+) -> None:
+    first_server = create_mcp_server(application)
+    async with create_connected_server_and_client_session(first_server) as session:
+        prepared = await session.call_tool(
+            "prepare_ingestion",
+            {
+                "source_name": "notes.txt",
+                "content": "evidence\n",
+                "model": "test:model",
+            },
+        )
+
+    assert prepared.structuredContent is not None
+    first = IngestionResult.model_validate(prepared.structuredContent)
+    assert first.review is not None
+    restarted = WorkspaceApplication(application.workspace)
+    second_server = create_mcp_server(restarted)
+    async with create_connected_server_and_client_session(second_server) as session:
+        loaded = await session.call_tool("get_pending_review", {})
+
+    assert loaded.structuredContent is not None
+    pending = PendingReviewResult.model_validate(loaded.structuredContent)
+    assert pending.review is not None
+    assert pending.review.review_id == first.review.review_id
+    assert pending.review.diff == first.review.diff
+
+
+async def test_discard_review_requires_a_second_explicit_call(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    expected = await application_with_pending_review.get_pending_review()
+    assert expected is not None
+    server = create_mcp_server(application_with_pending_review)
+
+    async with create_connected_server_and_client_session(server) as session:
+        discarded = await session.call_tool(
+            "discard_review",
+            {"review_id": expected.review_id},
+        )
+        loaded = await session.call_tool("get_pending_review", {})
+
+    assert discarded.isError is False
+    assert discarded.structuredContent is not None
+    assert MutationResult.model_validate(discarded.structuredContent).status == "discarded"
+    assert loaded.structuredContent == {"review": None}
+
+
+async def test_wrong_review_id_does_not_resolve_current_review(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    expected = await application_with_pending_review.get_pending_review()
+    assert expected is not None
+    server = create_mcp_server(application_with_pending_review)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("apply_review", {"review_id": "0" * 32})
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "review_id_mismatch"
+    assert await application_with_pending_review.get_pending_review() == expected
+
+
+async def test_stale_review_cannot_be_applied(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    expected = await application_with_pending_review.get_pending_review()
+    assert expected is not None
+    (application_with_pending_review.workspace.wiki_dir / "external.md").write_text(
+        "external edit\n",
+        encoding="utf-8",
+    )
+    server = create_mcp_server(application_with_pending_review)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("apply_review", {"review_id": expected.review_id})
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "review_stale"
+    pending = await application_with_pending_review.get_pending_review()
+    assert pending is not None
+    assert pending.review_id == expected.review_id
+
+
+async def test_prepare_synthesis_uses_exactly_one_model_call(tmp_path: Path) -> None:
+    calls = 0
+
+    async def runner(
+        model: QueryAgentModel,
+        dependencies: AgentDependencies,
+        question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        return await _query_runner(model, dependencies, question)
+
+    application = WorkspaceApplication(
+        _workspace(tmp_path),
+        ApplicationDependencies(environment={}, query_runner=runner, clock=lambda: NOW),
+    )
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "prepare_synthesis",
+            {"question": "What do agents use?", "model": "test:model"},
+        )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    validated = SynthesisResult.model_validate(result.structuredContent)
+    assert calls == 1
+    assert validated.answer.answer == _answer()
+    assert isinstance(result.content[0], types.TextContent)
+    assert validated.review.review_id in result.content[0].text
+    assert validated.review.summary in result.content[0].text
+    assert validated.review.diff in result.content[0].text
+    assert validated.review.resource_uri in result.content[0].text
+
+
+async def test_prepare_refresh_reports_unchanged_without_a_review(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    _write_refresh_target(workspace)
+    application = WorkspaceApplication(
+        workspace,
+        ApplicationDependencies(
+            environment={},
+            refresh_runner=_current_refresh_runner,
+            clock=lambda: NOW,
+        ),
+    )
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "prepare_refresh",
+            {
+                "instruction": "Refresh this answer",
+                "concept_id": "syntheses/current-agent-framework",
+                "model": "test:model",
+            },
+        )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    validated = RefreshResult.model_validate(result.structuredContent)
+    assert validated.status == "current"
+    assert validated.review is None
+    assert await application.get_pending_review() is None
+
+
+async def test_pending_review_gate_runs_before_provider_invocation(
+    application_with_pending_review: WorkspaceApplication,
+) -> None:
+    calls = 0
+
+    async def must_not_run(
+        _model: QueryAgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("pending synthesis invoked provider")
+
+    blocked = WorkspaceApplication(
+        application_with_pending_review.workspace,
+        ApplicationDependencies(environment={}, query_runner=must_not_run),
+    )
+    server = create_mcp_server(blocked)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "prepare_synthesis",
+            {"question": "Question", "model": "test:model"},
+        )
+
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "review_pending"
+    assert calls == 0
+
+
+async def test_prepare_reports_protocol_progress_with_request_token(
+    application: WorkspaceApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notifications: list[tuple[str | int, float, float | None, str | None]] = []
+    callbacks: list[tuple[float, float | None, str | None]] = []
+
+    from mcp.server.session import ServerSession
+
+    original = ServerSession.send_progress_notification
+
+    async def capture_progress(
+        self: ServerSession,
+        progress_token: str | int,
+        progress: float,
+        total: float | None = None,
+        message: str | None = None,
+        related_request_id: str | None = None,
+    ) -> None:
+        notifications.append((progress_token, progress, total, message))
+        await original(
+            self,
+            progress_token,
+            progress,
+            total,
+            message,
+            related_request_id,
+        )
+
+    async def progress_callback(
+        progress: float,
+        total: float | None,
+        message: str | None,
+    ) -> None:
+        callbacks.append((progress, total, message))
+
+    monkeypatch.setattr(ServerSession, "send_progress_notification", capture_progress)
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        request_id = cast(Any, session)._request_id
+        result = await session.call_tool(
+            "prepare_ingestion",
+            {
+                "source_name": "notes.txt",
+                "content": "evidence\n",
+                "model": "test:model",
+            },
+            progress_callback=progress_callback,
+        )
+
+    assert result.isError is False
+    assert notifications == [
+        (request_id, 0.0, 1.0, "Preparing ingestion review"),
+        (request_id, 1.0, 1.0, "Prepared ingestion review"),
+    ]
+    assert callbacks == [
+        (0.0, 1.0, "Preparing ingestion review"),
+        (1.0, 1.0, "Prepared ingestion review"),
+    ]
+
+
+async def test_cancellation_before_persistence_leaves_no_review(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_runner(
+        _model: QueryAgentModel,
+        _dependencies: AgentDependencies,
+        _source: RawSource,
+    ) -> tuple[ChangeSet, frozenset[str]]:
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+        raise AssertionError("unreachable")
+
+    application = WorkspaceApplication(
+        _workspace(tmp_path),
+        ApplicationDependencies(environment={}, ingestion_runner=blocking_runner),
+    )
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        request_id = cast(Any, session)._request_id
+        call = asyncio.create_task(
+            session.call_tool(
+                "prepare_ingestion",
+                {
+                    "source_name": "notes.txt",
+                    "content": "evidence\n",
+                    "model": "test:model",
+                },
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await _cancel_request(session, request_id)
+        with pytest.raises(McpError, match="Request cancelled"):
+            await call
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+    assert await application.get_pending_review() is None
+    assert _tree_bytes(application.workspace.raw_dir) == {}
+
+
+async def test_cancellation_immediately_after_persistence_leaves_review_discoverable(
+    application: WorkspaceApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    persisted = asyncio.Event()
+    cancelled = asyncio.Event()
+    original = application.prepare_ingestion
+
+    async def persist_then_block(
+        source: InlineSource,
+        *,
+        explicit_model: str | None,
+    ) -> IngestionResult:
+        result = await original(source, explicit_model=explicit_model)
+        persisted.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+        return result
+
+    monkeypatch.setattr(application, "prepare_ingestion", persist_then_block)
+    server = create_mcp_server(application)
+
+    async with create_connected_server_and_client_session(server) as session:
+        request_id = cast(Any, session)._request_id
+        call = asyncio.create_task(
+            session.call_tool(
+                "prepare_ingestion",
+                {
+                    "source_name": "notes.txt",
+                    "content": "evidence\n",
+                    "model": "test:model",
+                },
+            )
+        )
+        await asyncio.wait_for(persisted.wait(), timeout=1)
+        expected = await application.get_pending_review()
+        assert expected is not None
+        await _cancel_request(session, request_id)
+        with pytest.raises(McpError, match="Request cancelled"):
+            await call
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        loaded = await session.call_tool("get_pending_review", {})
+        resource = await session.read_resource(AnyUrl(expected.resource_uri))
+
+    assert loaded.structuredContent is not None
+    review = PendingReviewResult.model_validate(loaded.structuredContent).review
+    assert review is not None
+    assert review.review_id == expected.review_id
+    assert review.diff == expected.diff
+    content = resource.contents[0]
+    assert isinstance(content, types.TextResourceContents)
+    assert expected.review_id in content.text
+    assert expected.diff in content.text
+
+
 async def test_invalid_search_is_a_tool_execution_error(
     application: WorkspaceApplication,
 ) -> None:
@@ -423,25 +935,20 @@ async def test_schema_invalid_json_scalar_is_a_tool_execution_error(
     }
 
 
-async def test_unknown_and_undispatched_tools_return_bounded_execution_errors(
+async def test_unknown_tool_returns_a_bounded_execution_error(
     application: WorkspaceApplication,
 ) -> None:
     server = create_mcp_server(application)
 
     async with create_connected_server_and_client_session(server) as session:
-        unknown = await session.call_tool("not_a_bundlewalker_tool", {"secret": "/tmp/private"})
-        undispatched = await session.call_tool(
-            "prepare_ingestion",
-            {"source_name": "notes.txt", "content": "text"},
-        )
+        result = await session.call_tool("not_a_bundlewalker_tool", {"secret": "/tmp/private"})
 
-    for result in (unknown, undispatched):
-        assert result.isError is True
-        assert result.structuredContent is not None
-        assert result.structuredContent["error"]["code"] == "invalid_input"
-        assert isinstance(result.content[0], types.TextContent)
-        assert len(result.content[0].text) < 256
-        assert "/tmp/private" not in result.content[0].text
+    assert result.isError is True
+    assert result.structuredContent is not None
+    assert result.structuredContent["error"]["code"] == "invalid_input"
+    assert isinstance(result.content[0], types.TextContent)
+    assert len(result.content[0].text) < 256
+    assert "/tmp/private" not in result.content[0].text
 
 
 async def test_application_error_is_returned_as_a_tool_execution_error(
