@@ -16,6 +16,7 @@ from bundlewalker.retrieval import LexicalRetriever
 from bundlewalker.transactions import (
     PreparedTransaction,
     ReviewKind,
+    ensure_no_pending_review,
     prepare_transaction,
     recover_transactions,
 )
@@ -51,13 +52,33 @@ async def prepare_ingestion(
     runner: IngestionRunner | None = None,
     occurred_at: datetime | None = None,
 ) -> IngestionOutcome:
-    """Prepare a validated ingestion transaction without changing live knowledge."""
+    source = load_raw_source(source_path, workspace)
+    return await prepare_raw_ingestion(
+        workspace,
+        source,
+        explicit_model=explicit_model,
+        environment=environment,
+        runner=runner,
+        occurred_at=occurred_at,
+    )
+
+
+async def prepare_raw_ingestion(
+    workspace: Workspace,
+    source: RawSource,
+    *,
+    explicit_model: str | None,
+    environment: Mapping[str, str] | None = None,
+    runner: IngestionRunner | None = None,
+    occurred_at: datetime | None = None,
+) -> IngestionOutcome:
+    """Prepare a normalized source as a validated ingestion transaction."""
     recover_transactions(workspace)
     validate_repository_path(workspace)
-    source = load_raw_source(source_path, workspace)
     repository = OkfRepository(workspace.wiki_dir)
     if _contains_source_digest(repository, source.sha256):
         return DuplicateIngestion()
+    ensure_no_pending_review(workspace)
 
     conventions = read_context(
         workspace,

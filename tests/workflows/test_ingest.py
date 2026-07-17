@@ -10,18 +10,29 @@ from pathlib import Path
 
 import pytest
 
+import bundlewalker.workflows.ingest as ingest_workflow
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.ingest import AgentModel
 from bundlewalker.domain import ChangeOperation, ChangeSet, Citation, ConceptType, DraftConcept
-from bundlewalker.errors import ChangeSetError, WorkspaceError
+from bundlewalker.errors import ChangeSetError, ReviewPendingError, WorkspaceError
 from bundlewalker.okf.repository import OkfRepository
-from bundlewalker.transactions import commit_transaction, discard_transaction
+from bundlewalker.transactions import (
+    ReviewKind,
+    commit_transaction,
+    discard_transaction,
+    get_pending_review,
+)
 from bundlewalker.workflows.ingest import (
     DuplicateIngestion,
     PreparedIngestion,
     prepare_ingestion,
 )
-from bundlewalker.workspace import RawSource, Workspace, initialize_workspace
+from bundlewalker.workspace import (
+    RawSource,
+    Workspace,
+    initialize_workspace,
+    load_inline_source,
+)
 
 NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
 
@@ -107,6 +118,66 @@ async def test_prepare_ingestion_returns_a_staged_review_without_live_mutation(
     assert _tree_bytes(workspace.raw_dir) == before_raw
     assert outcome.transaction.transaction_dir.is_dir()
     discard_transaction(outcome.transaction)
+
+
+async def test_prepare_raw_ingestion_accepts_an_already_normalized_source(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    source = load_inline_source("notes.txt", "first\nsecond\n", workspace)
+
+    outcome = await ingest_workflow.prepare_raw_ingestion(
+        workspace,
+        source,
+        explicit_model="test:model",
+        environment={},
+        runner=_valid_runner,
+        occurred_at=NOW,
+    )
+
+    assert isinstance(outcome, PreparedIngestion)
+    pending = get_pending_review(workspace)
+    assert pending is not None
+    assert pending.kind is ReviewKind.INGESTION
+
+
+async def test_ingestion_rejects_a_pending_review_before_invoking_the_model(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    input_path = tmp_path / "notes.txt"
+    input_path.write_text("first\nsecond\n", encoding="utf-8")
+    first = await prepare_ingestion(
+        workspace,
+        input_path,
+        explicit_model="test:model",
+        environment={},
+        runner=_valid_runner,
+        occurred_at=NOW,
+    )
+    assert isinstance(first, PreparedIngestion)
+    calls = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _source: RawSource,
+    ) -> tuple[ChangeSet, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("pending ingestion invoked the model runner")
+
+    with pytest.raises(ReviewPendingError):
+        await prepare_ingestion(
+            workspace,
+            input_path,
+            explicit_model="test:model",
+            environment={},
+            runner=must_not_run,
+            occurred_at=NOW,
+        )
+
+    assert calls == 0
 
 
 async def test_duplicate_digest_is_a_typed_noop_before_model_resolution_or_runner(

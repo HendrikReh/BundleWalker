@@ -19,11 +19,11 @@ from bundlewalker.domain import (
     OkfDocument,
     OkfMetadata,
 )
-from bundlewalker.errors import AgentRunError, ChangeSetError, UsageError
+from bundlewalker.errors import AgentRunError, ChangeSetError, ReviewPendingError, UsageError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
 from bundlewalker.okf.repository import OkfRepository
-from bundlewalker.transactions import PreparedTransaction, discard_transaction
+from bundlewalker.transactions import PreparedTransaction, discard_transaction, get_pending_review
 from bundlewalker.workflows.ask import (
     AnsweredQuestion,
     AnsweredSynthesisRefresh,
@@ -390,6 +390,114 @@ def test_invalid_synthesis_answer_does_not_leave_a_staged_transaction(tmp_path: 
         prepare_synthesis(workspace, answered, occurred_at=NOW)
 
     assert _tree_bytes(workspace.root) == before
+
+
+def test_prepare_synthesis_rechecks_a_pending_review_before_transaction_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace(tmp_path)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(answer=_answer("First synthesis"), read_ids=frozenset({"topics/agents"})),
+        occurred_at=NOW,
+    )
+    pending = get_pending_review(workspace)
+    assert pending is not None
+
+    def must_not_prepare_transaction(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pending synthesis reached transaction preparation")
+
+    monkeypatch.setattr(ask_workflow, "prepare_transaction", must_not_prepare_transaction)
+
+    with pytest.raises(ReviewPendingError):
+        prepare_synthesis(
+            workspace,
+            AnsweredQuestion(
+                answer=_answer("Second synthesis"),
+                read_ids=frozenset({"topics/agents"}),
+            ),
+            occurred_at=NOW,
+        )
+
+    current = get_pending_review(workspace)
+    assert current is not None
+    assert current.review_id == pending.review_id
+
+
+async def test_refresh_rejects_a_pending_review_before_invoking_the_model(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target = _write_refresh_target(workspace)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(answer=_answer("First synthesis"), read_ids=frozenset({"topics/agents"})),
+        occurred_at=NOW,
+    )
+    pending = get_pending_review(workspace)
+    assert pending is not None
+    calls = 0
+
+    async def must_not_run(
+        _model: AgentModel,
+        _dependencies: AgentDependencies,
+        _question: str,
+        _target: OkfDocument,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("pending refresh invoked the model runner")
+
+    with pytest.raises(ReviewPendingError):
+        await answer_synthesis_refresh(
+            workspace,
+            "Refresh this synthesis.",
+            target.concept_id,
+            explicit_model="test:model",
+            environment={},
+            runner=must_not_run,
+        )
+
+    assert calls == 0
+    current = get_pending_review(workspace)
+    assert current is not None
+    assert current.review_id == pending.review_id
+
+
+async def test_answer_question_leaves_a_pending_review_untouched(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=_answer("Pending synthesis"),
+            read_ids=frozenset({"topics/agents"}),
+        ),
+        occurred_at=NOW,
+    )
+    pending = get_pending_review(workspace)
+    assert pending is not None
+
+    async def runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _question: str,
+    ) -> tuple[CitedAnswer, frozenset[str]]:
+        dependencies.read_ids.add("topics/agents")
+        return _answer(), frozenset({"topics/agents"})
+
+    result = await answer_question(
+        workspace,
+        "How do agents use tools?",
+        explicit_model="test:model",
+        environment={},
+        runner=runner,
+    )
+
+    assert result.answer == _answer()
+    current = get_pending_review(workspace)
+    assert current is not None
+    assert current.review_id == pending.review_id
 
 
 @pytest.mark.parametrize(

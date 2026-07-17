@@ -40,6 +40,7 @@ from bundlewalker.retrieval import LexicalRetriever
 from bundlewalker.transactions import (
     PreparedTransaction,
     ReviewKind,
+    ensure_no_pending_review,
     prepare_transaction,
     recover_transactions,
 )
@@ -119,6 +120,7 @@ async def answer_synthesis_refresh(
 ) -> AnsweredSynthesisRefresh:
     """Recover, validate one refresh target, then run one cited revision query."""
     recover_transactions(workspace)
+    ensure_no_pending_review(workspace)
     if not question.strip():
         raise UsageError("question must not be empty")
 
@@ -173,6 +175,7 @@ def prepare_synthesis(
         readable_concepts=answered.read_ids,
     )
     validate_change_set(change_set, context)
+    ensure_no_pending_review(workspace)
     return prepare_transaction(
         workspace,
         change_set,
@@ -224,6 +227,7 @@ def prepare_synthesis_refresh(
     if document_digest(canonical.encode("utf-8")) == refresh.target.digest:
         _require_current_refresh_target(repository, refresh.target)
         return SynthesisAlreadyCurrent(refresh.target.concept_id)
+    ensure_no_pending_review(workspace)
     return prepare_transaction(
         workspace,
         change_set,

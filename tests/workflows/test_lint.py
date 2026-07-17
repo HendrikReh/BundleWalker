@@ -22,6 +22,7 @@ from bundlewalker.domain import (
 from bundlewalker.errors import AgentRunError, WorkspaceError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
+from bundlewalker.transactions import get_pending_review
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
 from bundlewalker.workflows.lint import LintRun, run_lint
 from bundlewalker.workspace import Workspace, initialize_workspace
@@ -122,6 +123,48 @@ async def test_plain_lint_recovers_authenticated_swap_before_scanning(tmp_path: 
     assert workspace.wiki_dir.is_dir()
     assert _tree_bytes(workspace.wiki_dir) == expected_wiki
     assert not prepared.transaction_dir.exists()
+
+
+@pytest.mark.parametrize("semantic", [False, True], ids=["plain", "semantic"])
+async def test_lint_leaves_a_pending_review_untouched(
+    tmp_path: Path,
+    semantic: bool,
+) -> None:
+    workspace = _workspace(tmp_path, regenerate=True)
+    prepare_synthesis(
+        workspace,
+        AnsweredQuestion(
+            answer=CitedAnswer(
+                title="Pending lint fixture",
+                body="Agents use tools [1].",
+                citations=[Citation(number=1, concept_id="topics/agents")],
+            ),
+            read_ids=frozenset({"topics/agents"}),
+        ),
+        occurred_at=NOW,
+    )
+    pending = get_pending_review(workspace)
+    assert pending is not None
+
+    async def semantic_runner(
+        _model: AgentModel,
+        dependencies: AgentDependencies,
+        _deterministic_findings: tuple[LintFinding, ...],
+    ) -> tuple[list[LintFinding], frozenset[str]]:
+        _read(dependencies, "topics/agents")
+        return [], frozenset({"topics/agents"})
+
+    await run_lint(
+        workspace,
+        semantic=semantic,
+        explicit_model="test:model" if semantic else None,
+        environment={},
+        runner=semantic_runner if semantic else None,
+    )
+
+    current = get_pending_review(workspace)
+    assert current is not None
+    assert current.review_id == pending.review_id
 
 
 async def test_semantic_lint_runs_after_deterministic_lint_and_stays_advisory(
