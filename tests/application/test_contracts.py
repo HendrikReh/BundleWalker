@@ -343,6 +343,22 @@ def test_translate_error_redacts_path_values_after_arbitrary_labels(message: str
 @pytest.mark.parametrize(
     "message",
     [
+        "location:/tmp/private-source.md",
+        r"destination:C:\\Users\\private-source.md",
+        "label:~/private-source.md",
+        "reference:file:///tmp/private-source.md",
+    ],
+)
+def test_translate_error_redacts_colon_delimited_path_values(message: str) -> None:
+    mapped = translate_error(WorkspaceError(message))
+
+    assert mapped.safe_message == "workspace operation failed"
+    assert "private-source" not in mapped.safe_message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
         "api key=private-key",
         "api-key=private-key",
         "access token=private-token",
@@ -370,6 +386,20 @@ def test_translate_error_redacts_payload_fragments_embedded_in_prose(message: st
 
     assert mapped.safe_message == "model-backed operation failed"
     assert "private" not in mapped.safe_message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "provider output: [12345, 67890]",
+        "provider output: [true, false, null]",
+    ],
+)
+def test_translate_error_redacts_scalar_array_fragments_embedded_in_prose(message: str) -> None:
+    mapped = translate_error(AgentRunError(message))
+
+    assert mapped.safe_message == "model-backed operation failed"
+    assert "provider output" not in mapped.safe_message
 
 
 def test_translate_error_uses_closed_fallback_for_unknown_core_error() -> None:
