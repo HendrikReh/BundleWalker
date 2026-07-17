@@ -62,9 +62,7 @@ def test_inline_source_forbids_extra_fields() -> None:
         ("content", "c" * (MAX_INLINE_SOURCE_CHARACTERS + 1)),
     ],
 )
-def test_inline_source_rejects_values_beyond_its_contract(
-    field: str, value: str
-) -> None:
+def test_inline_source_rejects_values_beyond_its_contract(field: str, value: str) -> None:
     payload = {"source_name": "notes.md", "content": "text\n"}
     payload[field] = value
 
@@ -130,7 +128,7 @@ def test_refresh_result_accepts_exact_status_review_combinations(
     ],
 )
 def test_ingestion_result_rejects_invalid_status_review_combinations(
-    payload: dict[str, object]
+    payload: dict[str, object],
 ) -> None:
     with pytest.raises(ValidationError):
         IngestionResult.model_validate(payload)

@@ -775,9 +775,7 @@ def _has_durable_transaction_state(transaction_dir: Path) -> bool:
     if any(path.exists() or path.is_symlink() for path in fixed_artifacts):
         return True
     try:
-        return any(
-            path.name.startswith(_QUARANTINE_PREFIX) for path in transaction_dir.iterdir()
-        )
+        return any(path.name.startswith(_QUARANTINE_PREFIX) for path in transaction_dir.iterdir())
     except OSError as exc:
         raise TransactionError("could not inspect incomplete transaction state") from exc
 
