@@ -128,6 +128,23 @@ def test_load_raw_source_rejects_unsupported_extensions(
         load_raw_source(source, workspace)
 
 
+def test_load_raw_source_rejects_unsupported_extensions_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge")
+    source = tmp_path / "source.pdf"
+    source.write_text("content", encoding="utf-8")
+
+    def fail_read_bytes(_path: Path) -> bytes:
+        raise AssertionError("unsupported source files must not be read")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    with pytest.raises(WorkspaceError, match=r"\.md.*\.txt"):
+        load_raw_source(source, workspace)
+
+
 def test_load_raw_source_rejects_directories_and_symlinks(tmp_path: Path) -> None:
     workspace = initialize_workspace(tmp_path / "knowledge")
     directory = tmp_path / "directory.md"

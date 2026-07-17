@@ -181,6 +181,8 @@ def load_raw_source(path: Path, workspace: Workspace) -> RawSource:
     candidate = path.expanduser()
     if candidate.is_symlink() or not candidate.is_file():
         raise WorkspaceError(f"source must be a regular file: {candidate}")
+    if candidate.suffix not in {".md", ".txt"}:
+        raise WorkspaceError("source extension must be .md or .txt")
 
     try:
         content = candidate.read_bytes()
