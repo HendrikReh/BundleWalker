@@ -1,7 +1,12 @@
 # Copyright (C) 2026 Hendrik Reh
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import ClassVar
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from bundlewalker.backups import VerifiedBackup
 
 
 class BundleWalkerError(Exception):
@@ -36,6 +41,21 @@ class BackupVerificationError(BackupError):
 
 class RestoreTargetError(UsageError):
     pass
+
+
+class MigrationUnavailableError(UsageError):
+    pass
+
+
+class MigrationExecutionError(BundleWalkerError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        backup: VerifiedBackup | None,
+    ) -> None:
+        self.backup = backup
+        super().__init__(message)
 
 
 class OkfError(BundleWalkerError):
