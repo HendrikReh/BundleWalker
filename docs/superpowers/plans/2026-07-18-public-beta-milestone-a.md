@@ -881,7 +881,16 @@ Append to `tests/test_project_automation.py`:
 def test_ci_requires_dependency_audit() -> None:
     workflow = _yaml(".github/workflows/ci.yml")
 
-    assert "uv run pip-audit --strict" in _run_commands(workflow, "dependency-audit")
+    audit_commands = _run_commands(workflow, "dependency-audit")
+    assert (
+        "uv export --frozen --no-emit-project --output-file "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null' in audit_commands
+    )
+    assert (
+        "uv run pip-audit --strict --requirement "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip'
+        in audit_commands
+    )
     assert workflow["jobs"]["required"]["needs"] == [
         "supported",
         "build",
@@ -952,12 +961,15 @@ Run:
 ```bash
 uv add --group dev 'pip-audit>=2.9,<3'
 uv sync --locked
-uv run pip-audit --strict
+AUDIT_REQ="$(mktemp)"
+uv export --frozen --no-emit-project --output-file "$AUDIT_REQ" >/dev/null
+uv run pip-audit --strict --requirement "$AUDIT_REQ" --require-hashes --disable-pip
 ```
 
-Expected: the requirement and lock entries are added, and pip-audit exits `0` with no known
-vulnerabilities. If it reports a vulnerability or cannot complete its advisory query, stop and
-open a focused remediation task; do not suppress, ignore, or allow-fail the required audit.
+Expected: the requirement and lock entries are added, the frozen lock export preserves hashes,
+and pip-audit exits `0` with no known vulnerabilities. If it reports a vulnerability or cannot
+complete its advisory query, stop and open a focused remediation task; do not suppress, ignore,
+or allow-fail the required audit.
 
 - [ ] **Step 4: Add the required dependency-audit job**
 
@@ -982,8 +994,10 @@ Insert before `required` in `.github/workflows/ci.yml`:
           cache-suffix: dependency-audit
       - name: Synchronize locked environment
         run: uv sync --locked
-      - name: Audit installed dependencies
-        run: uv run pip-audit --strict
+      - name: Export locked third-party requirements
+        run: uv export --frozen --no-emit-project --output-file "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null
+      - name: Audit locked third-party dependencies
+        run: uv run pip-audit --strict --requirement "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip
 ```
 
 Add `dependency-audit` to `required.needs` and add:
@@ -1064,7 +1078,9 @@ Run:
 
 ```bash
 uv run pytest tests/test_project_automation.py tests/test_release_metadata.py -q
-uv run pip-audit --strict
+AUDIT_REQ="$(mktemp)"
+uv export --frozen --no-emit-project --output-file "$AUDIT_REQ" >/dev/null
+uv run pip-audit --strict --requirement "$AUDIT_REQ" --require-hashes --disable-pip
 uv lock --check
 git diff --check
 ```
@@ -1091,9 +1107,9 @@ git commit -m "ci: add security automation"
 **Interfaces:**
 - Consumes: verified package build, `testpypi` GitHub environment, TestPyPI pending trusted
   publisher, and manual `version` workflow input.
-- Produces: a secretless manual publication workflow that builds once, uploads exact artifacts,
-  publishes attestations through `pypa/gh-action-pypi-publish`, and installs the published version
-  from TestPyPI.
+- Produces: a master-only, secretless manual publication workflow that re-audits frozen locked
+  dependencies, builds once, uploads exact artifacts, publishes attestations through
+  `pypa/gh-action-pypi-publish`, and installs the published version from TestPyPI.
 
 - [ ] **Step 1: Add a failing trusted-publishing workflow contract**
 
@@ -1107,10 +1123,25 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     assert workflow_dispatch["inputs"]["version"]["required"] == "true"
     assert workflow_dispatch["inputs"]["version"]["type"] == "string"
     assert workflow["permissions"] == {"contents": "read"}
-    assert "uv build --clear --no-sources" in _run_commands(workflow, "build")
-    assert "uv run twine check dist/*" in _run_commands(workflow, "build")
+    build = workflow["jobs"]["build"]
+    assert build["if"] == "github.ref == 'refs/heads/master'"
+    build_commands = _run_commands(workflow, "build")
+    assert "uv build --clear --no-sources" in build_commands
+    assert "uv run twine check dist/*" in build_commands
+    build_run_steps = [step["run"] for step in _steps(workflow, "build") if "run" in step]
+    assert (
+        "uv export --frozen --no-emit-project --output-file "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null' in build_run_steps
+    )
+    assert (
+        "uv run pip-audit --strict --requirement "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip'
+        in build_run_steps
+    )
 
     publish = workflow["jobs"]["publish"]
+    assert publish["if"] == "github.ref == 'refs/heads/master'"
+    assert publish["needs"] == ["build"]
     assert publish["environment"]["name"] == "testpypi"
     assert publish["permissions"] == {"id-token": "write"}
     publish_steps = _steps(workflow, "publish")
@@ -1118,6 +1149,7 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
         "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b"
     )
     assert publish_steps[-1]["with"]["repository-url"] == "https://test.pypi.org/legacy/"
+    assert workflow["jobs"]["verify"]["needs"] == ["publish"]
     verify_commands = _run_commands(workflow, "verify")
     assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
     _assert_actions_are_sha_pinned(workflow)
@@ -1131,7 +1163,9 @@ Run:
 uv run pytest tests/test_project_automation.py::test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication -v
 ```
 
-Expected: FAIL with `FileNotFoundError` for `.github/workflows/publish-testpypi.yml`.
+Expected: FAIL with `FileNotFoundError` for `.github/workflows/publish-testpypi.yml`. During later
+maintenance, removing a master guard, the frozen hashed audit, or either dependency edge must make
+the same contract fail at its corresponding assertion.
 
 - [ ] **Step 3: Create the TestPyPI workflow**
 
@@ -1157,6 +1191,7 @@ env:
 jobs:
   build:
     name: Build exact distributions
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out selected revision
@@ -1188,6 +1223,10 @@ jobs:
           uv run ruff check .
           uv run pyright
           uv lock --check
+      - name: Export locked third-party requirements
+        run: uv export --frozen --no-emit-project --output-file "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null
+      - name: Audit locked third-party dependencies
+        run: uv run pip-audit --strict --requirement "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip
       - name: Build wheel and source distribution
         run: uv build --clear --no-sources
       - name: Validate distribution metadata
@@ -1202,6 +1241,7 @@ jobs:
 
   publish:
     name: Publish exact distributions
+    if: github.ref == 'refs/heads/master'
     needs: [build]
     runs-on: ubuntu-24.04
     environment:
@@ -1279,7 +1319,9 @@ uv run pytest -m 'not eval' -q
 uv run ruff format --check .
 uv run ruff check .
 uv run pyright
-uv run pip-audit --strict
+AUDIT_REQ="$(mktemp)"
+uv export --frozen --no-emit-project --output-file "$AUDIT_REQ" >/dev/null
+uv run pip-audit --strict --requirement "$AUDIT_REQ" --require-hashes --disable-pip
 uv build --clear --no-sources
 uv run twine check dist/*
 git diff --check
@@ -1292,6 +1334,7 @@ The commands must all exit zero. The `dist/` directory must contain exactly one
 
 TestPyPI publishing uses the GitHub workflow `publish-testpypi.yml`, GitHub environment
 `testpypi`, and a matching TestPyPI trusted publisher. It does not use an API-token secret.
+The workflow's build and publish jobs run only from `master`.
 
 Dispatch it with the exact version already present on `master`:
 
@@ -1445,7 +1488,9 @@ uv run pytest -m 'not eval' -q
 uv run ruff format --check .
 uv run ruff check .
 uv run pyright
-uv run pip-audit --strict
+AUDIT_REQ="$(mktemp)"
+uv export --frozen --no-emit-project --output-file "$AUDIT_REQ" >/dev/null
+uv run pip-audit --strict --requirement "$AUDIT_REQ" --require-hashes --disable-pip
 uv lock --check
 PACKAGE_TMP="$(mktemp -d)"
 uv build --clear --no-sources --out-dir "$PACKAGE_TMP/dist"

@@ -17,6 +17,7 @@ env:
 jobs:
   build:
     name: Build exact distributions
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out selected revision
@@ -48,6 +49,10 @@ jobs:
           uv run ruff check .
           uv run pyright
           uv lock --check
+      - name: Export locked third-party requirements
+        run: uv export --frozen --no-emit-project --output-file "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null
+      - name: Audit locked third-party dependencies
+        run: uv run pip-audit --strict --requirement "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip
       - name: Build wheel and source distribution
         run: uv build --clear --no-sources
       - name: Validate distribution metadata
@@ -62,6 +67,7 @@ jobs:
 
   publish:
     name: Publish exact distributions
+    if: github.ref == 'refs/heads/master'
     needs: [build]
     runs-on: ubuntu-24.04
     environment:

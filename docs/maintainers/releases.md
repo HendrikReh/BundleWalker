@@ -38,6 +38,7 @@ The commands must all exit zero. The `dist/` directory must contain exactly one
 
 TestPyPI publishing uses the GitHub workflow `publish-testpypi.yml`, GitHub environment
 `testpypi`, and a matching TestPyPI trusted publisher. It does not use an API-token secret.
+The workflow's build and publish jobs run only from `master`.
 
 Dispatch it with the exact version already present on `master`:
 

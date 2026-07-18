@@ -177,10 +177,25 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     assert workflow_dispatch["inputs"]["version"]["required"] == "true"
     assert workflow_dispatch["inputs"]["version"]["type"] == "string"
     assert workflow["permissions"] == {"contents": "read"}
-    assert "uv build --clear --no-sources" in _run_commands(workflow, "build")
-    assert "uv run twine check dist/*" in _run_commands(workflow, "build")
+    build = workflow["jobs"]["build"]
+    assert build["if"] == "github.ref == 'refs/heads/master'"
+    build_commands = _run_commands(workflow, "build")
+    assert "uv build --clear --no-sources" in build_commands
+    assert "uv run twine check dist/*" in build_commands
+    build_run_steps = [step["run"] for step in _steps(workflow, "build") if "run" in step]
+    assert (
+        "uv export --frozen --no-emit-project --output-file "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null' in build_run_steps
+    )
+    assert (
+        "uv run pip-audit --strict --requirement "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip'
+        in build_run_steps
+    )
 
     publish = workflow["jobs"]["publish"]
+    assert publish["if"] == "github.ref == 'refs/heads/master'"
+    assert publish["needs"] == ["build"]
     assert publish["environment"]["name"] == "testpypi"
     assert publish["permissions"] == {"id-token": "write"}
     publish_steps = _steps(workflow, "publish")
@@ -188,6 +203,7 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
         "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b"
     )
     assert publish_steps[-1]["with"]["repository-url"] == "https://test.pypi.org/legacy/"
+    assert workflow["jobs"]["verify"]["needs"] == ["publish"]
     verify_commands = _run_commands(workflow, "verify")
     assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
     _assert_actions_are_sha_pinned(workflow)
