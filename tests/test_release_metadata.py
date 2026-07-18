@@ -114,3 +114,20 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
 
     assert python_files
     assert not missing, "missing GPL SPDX header:\n" + "\n".join(missing)
+
+
+def test_public_policy_documents_exist_and_are_linked() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    security = (PROJECT_ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    support = (PROJECT_ROOT / "SUPPORT.md").read_text(encoding="utf-8")
+
+    assert "[Security](SECURITY.md)" in readme
+    assert "[Support](SUPPORT.md)" in readme
+    assert "[Security Policy](SECURITY.md)" in contributing
+    assert "[Support Policy](SUPPORT.md)" in contributing
+    assert "security/advisories/new" in security
+    assert "Do not report vulnerabilities in a public issue." in security
+    assert "macOS and Linux" in support
+    assert "Windows is experimental" in support
+    assert "no guaranteed response time" in support

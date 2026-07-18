@@ -8,7 +8,8 @@ Current release: **v3** (Python package `0.3.0`). See the [changelog](CHANGELOG.
 history.
 
 [Tutorial](docs/tutorial.md) · [User Guide](docs/user-guide.md) ·
-[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [License](LICENSE-SCOPE.md)
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) ·
+[Security](SECURITY.md) · [Support](SUPPORT.md) · [License](LICENSE-SCOPE.md)
 
 ## Why BundleWalker
 
@@ -187,6 +188,10 @@ Each document has one primary job:
 - The [Changelog](CHANGELOG.md) records the public capability changes in each tagged release.
 - [Contributing](CONTRIBUTING.md) is authoritative for architecture, development workflow,
   verification, and compatibility expectations.
+- The [Security Policy](SECURITY.md) provides private vulnerability-reporting and supported-version
+  guidance.
+- The [Support Policy](SUPPORT.md) defines supported platforms, issue reporting, and the
+  best-effort maintenance boundary.
 
 ## Development
 

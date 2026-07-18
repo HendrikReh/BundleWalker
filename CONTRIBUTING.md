@@ -16,6 +16,8 @@ the local web UI remains a separate next plan.
 Before proposing an expansion of that scope, read the original
 [v1 design](docs/superpowers/specs/2026-07-15-bundlewalker-v1-design.md), the accepted
 [MCP and local web architecture](docs/superpowers/specs/2026-07-17-mcp-web-interface-architecture-design.md),
+the approved
+[public-beta roadmap](docs/superpowers/specs/2026-07-18-bundlewalker-public-beta-roadmap-design.md),
 and the relevant records in [`docs/superpowers/specs/`](docs/superpowers/specs/) and
 [`docs/superpowers/plans/`](docs/superpowers/plans/). A scope change should begin with an explicit
 design decision, not an incidental implementation change.
@@ -135,6 +137,10 @@ user-guide edit, update the embedded block and verify byte equality with the can
 including the final newline.
 
 ## Security and compatibility
+
+Use the [Security Policy](SECURITY.md) for private vulnerability reports and the
+[Support Policy](SUPPORT.md) for public bug-report scope. Never disclose a suspected
+vulnerability, credential, or private workspace in a public issue.
 
 Public errors must stay bounded and must not leak source contents, protected context,
 credentials, or provider details. Frame external source content and existing-knowledge payloads
