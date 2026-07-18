@@ -846,8 +846,8 @@ def test_commit_does_not_enter_swapping_when_the_backup_path_is_occupied(
 @pytest.mark.parametrize(
     ("state", "expected_tree"),
     [
-        ("raw-persisted", "old"),
-        ("swapping-before-renames", "old"),
+        ("raw-persisted", "new"),
+        ("swapping-before-renames", "new"),
         ("swapping-after-old", "old"),
         ("swapping-after-new", "new"),
         ("new-live", "new"),

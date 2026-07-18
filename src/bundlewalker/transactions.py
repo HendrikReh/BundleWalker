@@ -883,7 +883,7 @@ def _recover_transaction(
     ):
         raise TransactionError("manifest identities do not match transaction identity")
     _validate_manifest_review(transaction_dir, manifest)
-    if manifest.schema_version == _SCHEMA_VERSION and manifest.phase == "accepted":
+    if manifest.schema_version == _SCHEMA_VERSION and manifest.phase != "prepared":
         _recover_accepted_transaction(workspace, transaction_dir, manifest, identity)
         return
     _recover_known_topology(
@@ -925,7 +925,27 @@ def _recover_accepted_transaction(
     identity: _Identity,
 ) -> None:
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
-    backup = _recovery_backup_path(transaction_dir, backup)
+    recovery_backup = _recovery_backup_path(transaction_dir, backup)
+    if manifest.phase != "accepted":
+        resumes_before_swap = (
+            manifest.phase in {"raw-persisted", "swapping"}
+            and _directory_exists(workspace.wiki_dir, "live wiki")
+            and _directory_exists(prospective, "prospective wiki")
+            and not _directory_exists(recovery_backup, "transaction backup")
+        )
+        if not resumes_before_swap:
+            _recover_known_topology(
+                workspace,
+                transaction_dir,
+                manifest.phase,
+                prospective,
+                backup,
+                identity,
+            )
+            return
+        manifest = replace(manifest, phase="accepted")
+
+    backup = recovery_backup
     _verify_pending_raw_payload(transaction_dir, manifest)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
     if _directory_exists(backup, "transaction backup"):
