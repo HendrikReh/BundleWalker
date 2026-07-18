@@ -4,6 +4,19 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Added required macOS/Linux CI for Python 3.13 and 3.14 plus visible experimental Windows jobs.
+- Added verified wheel and source-distribution builds, artifact installation smoke tests,
+  dependency auditing, CodeQL, and Dependabot.
+- Added public security and support policies, complete package metadata, and an OIDC-only
+  TestPyPI publishing rehearsal.
+
+### Changed
+
+- Adopted package-aligned versioning beginning with development version `0.4.0a1`.
+- Made installed distribution metadata the runtime package-version source.
+
 ## [v3] - 2026-07-18
 
 ### Added
