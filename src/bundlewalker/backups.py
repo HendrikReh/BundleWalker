@@ -709,6 +709,13 @@ def _create_restore_staging(
             succeeded = True
             return staging
         except BaseException:
+            if container_descriptor is not None and container_identity is None:
+                with suppress(OSError):
+                    descriptor_state = os.fstat(container_descriptor)
+                    container_identity = (
+                        descriptor_state.st_dev,
+                        descriptor_state.st_ino,
+                    )
             if workspace_descriptor is not None and workspace_identity is None:
                 with suppress(OSError):
                     workspace_state = os.fstat(workspace_descriptor)
@@ -720,6 +727,8 @@ def _create_restore_staging(
                     os.rmdir(workspace_name, dir_fd=container_descriptor)
             if container_identity is not None:
                 _remove_empty_directory_identity(parent_descriptor, container_identity)
+            elif container_descriptor is None:
+                _remove_just_created_empty_directory(parent_descriptor, container_name)
             raise
         finally:
             if not succeeded and workspace_descriptor is not None:
@@ -874,6 +883,7 @@ def _open_restore_directory(
             current_path /= part
             trusted_identity: tuple[int, int] | None = None
             child: int | None = None
+            child_identity: tuple[int, int] | None = None
             try:
                 if create:
                     if owned_entries is None:
@@ -903,9 +913,6 @@ def _open_restore_directory(
                 child_identity = (child_state.st_dev, child_state.st_ino)
                 if created:
                     trusted_identity = child_identity
-                    if owned_entries is None:
-                        raise BackupVerificationError("restore staging ownership is unavailable")
-                    owned_entries[current_path.as_posix()] = (True, trusted_identity)
                 relative_state = os.stat(part, dir_fd=current, follow_symlinks=False)
                 if (
                     not stat.S_ISDIR(child_state.st_mode)
@@ -915,10 +922,29 @@ def _open_restore_directory(
                     raise BackupVerificationError("restore staging path changed during extraction")
                 if created:
                     _sync_directory_descriptor(current)
+                    if owned_entries is None:
+                        raise BackupVerificationError("restore staging ownership is unavailable")
+                    owned_entries[current_path.as_posix()] = (True, child_identity)
                 previous = current
                 current = child
                 child = None
                 os.close(previous)
+            except BaseException:
+                if created:
+                    cleanup_identity = child_identity
+                    if child is not None and cleanup_identity is None:
+                        with suppress(OSError):
+                            cleanup_state = os.fstat(child)
+                            cleanup_identity = (
+                                cleanup_state.st_dev,
+                                cleanup_state.st_ino,
+                            )
+                    if cleanup_identity is not None:
+                        with suppress(OSError):
+                            _remove_empty_directory_identity(current, cleanup_identity)
+                    elif child is None:
+                        _remove_just_created_empty_directory(current, part)
+                raise
             finally:
                 if child is not None:
                     with suppress(OSError):
@@ -1310,6 +1336,22 @@ def _remove_empty_directory_identity(
                 continue
             if (current.st_dev, current.st_ino) == identity:
                 return
+
+
+def _remove_just_created_empty_directory(
+    parent_descriptor: int,
+    name: str,
+) -> None:
+    try:
+        metadata = os.stat(
+            name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if stat.S_ISDIR(metadata.st_mode):
+            os.rmdir(name, dir_fd=parent_descriptor)
+    except OSError:
+        return
 
 
 def _remove_restore_container_if_empty(

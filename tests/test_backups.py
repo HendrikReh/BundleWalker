@@ -1910,6 +1910,140 @@ def test_restore_final_review_cleans_partial_staging_after_workspace_capture_fai
         assert raised.value.errno == errno.EBADF
 
 
+@pytest.mark.parametrize("failure_point", ["open", "fstat"])
+def test_restore_partial_capture_cleanup_removes_outer_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    original_fstat = os.fstat
+    original_open = os.open
+    parent_descriptors: list[int] = []
+    container_descriptors: list[int] = []
+    failed = False
+
+    def fail_container_open_or_track(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal failed
+        name = cast(str | bytes, os.fspath(path))
+        is_container = isinstance(name, str) and name.startswith(".target-restore-")
+        if failure_point == "open" and not failed and is_container and dir_fd is not None:
+            failed = True
+            raise OSError(errno.EIO, "injected container open failure")
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == target.parent:
+            parent_descriptors.append(descriptor)
+        if is_container:
+            container_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_container_fstat_once(descriptor: int) -> os.stat_result:
+        nonlocal failed
+        if failure_point == "fstat" and not failed and descriptor in container_descriptors:
+            failed = True
+            raise OSError(errno.EIO, "injected container fstat failure")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(backups_module.os, "open", fail_container_open_or_track)
+    monkeypatch.setattr(backups_module.os, "fstat", fail_container_fstat_once)
+
+    with pytest.raises(BackupError) as raised:
+        restore_workspace_backup(archive, target)
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert failed is True
+    assert (target.stat().st_dev, target.stat().st_ino) == target_identity
+    assert list(target.iterdir()) == []
+    _assert_no_restore_temporary(target)
+    for descriptor in (*parent_descriptors, *container_descriptors):
+        with pytest.raises(OSError) as descriptor_error:
+            original_fstat(descriptor)
+        assert descriptor_error.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize("failure_point", ["open", "fstat"])
+def test_restore_partial_capture_cleanup_removes_extraction_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
+    actor = tmp_path / "actor"
+    actor.mkdir()
+    actor_sentinel = actor / "sentinel.txt"
+    actor_sentinel.write_bytes(b"actor")
+    original_fstat = os.fstat
+    original_open = os.open
+    managed_descriptors: list[int] = []
+    child_descriptors: list[int] = []
+    failed = False
+
+    def fail_child_open_or_track(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal failed
+        name = cast(str | bytes, os.fspath(path))
+        if failure_point == "open" and not failed and name == "raw" and dir_fd is not None:
+            failed = True
+            raise OSError(errno.EIO, "injected child open failure")
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        is_managed = (
+            path == target.parent
+            or name in {"workspace", "raw"}
+            or (isinstance(name, str) and name.startswith(".target-restore-"))
+        )
+        if is_managed:
+            managed_descriptors.append(descriptor)
+        if name == "raw" and dir_fd is not None:
+            child_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_child_fstat_once(descriptor: int) -> os.stat_result:
+        nonlocal failed
+        if failure_point == "fstat" and not failed and descriptor in child_descriptors:
+            failed = True
+            raise OSError(errno.EIO, "injected child fstat failure")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(backups_module.os, "open", fail_child_open_or_track)
+    monkeypatch.setattr(backups_module.os, "fstat", fail_child_fstat_once)
+
+    with pytest.raises(BackupError) as raised:
+        restore_workspace_backup(archive, target)
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert failed is True
+    assert (target.stat().st_dev, target.stat().st_ino) == target_identity
+    assert list(target.iterdir()) == []
+    assert actor_sentinel.read_bytes() == b"actor"
+    assert list(actor.iterdir()) == [actor_sentinel]
+    _assert_no_restore_temporary(target)
+    for descriptor in managed_descriptors:
+        with pytest.raises(OSError) as descriptor_error:
+            original_fstat(descriptor)
+        assert descriptor_error.value.errno == errno.EBADF
+
+
 def _valid_payload() -> dict[str, bytes]:
     return {
         "bundlewalker.toml": DEFAULT_CONFIG_TEXT.encode(),
