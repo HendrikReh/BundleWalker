@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 import bundlewalker.workflows.ingest as ingest_workflow
@@ -29,10 +30,11 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 
 def test_ingest_help_does_not_require_a_workspace() -> None:
     result = runner.invoke(app, ["ingest", "--help"], catch_exceptions=False)
+    output = unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "FILE" in result.output
-    assert "--model" in result.output
+    assert "FILE" in output
+    assert "--model" in output
 
 
 async def _runner(

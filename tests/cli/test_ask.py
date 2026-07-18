@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 import bundlewalker.workflows.ask as ask_workflow
@@ -37,13 +38,14 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 
 def test_ask_help_does_not_require_a_workspace() -> None:
     result = runner.invoke(app, ["ask", "--help"], catch_exceptions=False)
+    output = unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "QUESTION" in result.output
-    assert "--model" in result.output
-    assert "--save" in result.output
-    assert "--refresh" in result.output
-    assert "SYNTHESIS_ID" in result.output
+    assert "QUESTION" in output
+    assert "--model" in output
+    assert "--save" in output
+    assert "--refresh" in output
+    assert "SYNTHESIS_ID" in output
 
 
 @pytest.fixture

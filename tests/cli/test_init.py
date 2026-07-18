@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from click import unstyle
 from typer.testing import CliRunner
 
 from bundlewalker import workspace as workspace_module
@@ -57,11 +58,12 @@ def test_init_selects_the_requested_conventions_style(
 
 def test_init_help_lists_all_conventions_styles() -> None:
     result = runner.invoke(app, ["init", "--help"])
+    output = unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "--conventions-style" in result.output
+    assert "--conventions-style" in output
     for style in ConventionsStyle:
-        assert style.value in result.output
+        assert style.value in output
 
 
 def test_init_rejects_an_unknown_conventions_style_before_creating_target(
@@ -75,7 +77,7 @@ def test_init_rejects_an_unknown_conventions_style_before_creating_target(
     )
 
     assert result.exit_code == 2
-    assert "--conventions-style" in result.output
+    assert "--conventions-style" in unstyle(result.output)
     assert not root.exists()
 
 

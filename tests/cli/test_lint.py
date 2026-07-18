@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from pydantic_ai import RunContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -64,10 +65,11 @@ def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, regenerate: b
 
 def test_lint_help_does_not_require_a_workspace() -> None:
     result = runner.invoke(app, ["lint", "--help"], catch_exceptions=False)
+    output = unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "--semantic" in result.output
-    assert "--model" in result.output
+    assert "--semantic" in output
+    assert "--model" in output
 
 
 def test_plain_lint_reports_sorted_findings_and_exits_on_deterministic_errors(
