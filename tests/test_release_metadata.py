@@ -1,3 +1,4 @@
+import hashlib
 import tomllib
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -5,6 +6,20 @@ from pathlib import Path
 import bundlewalker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+LICENSE_EXPRESSION = "GPL-3.0-or-later AND CC0-1.0"
+LICENSE_FILES = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
+OFFICIAL_LICENSE_SHA256 = {
+    "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "LICENSES/CC0-1.0.txt": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
+}
+CC0_PRESET_PATHS = {
+    "src/bundlewalker/convention_presets/agent-context.md",
+    "src/bundlewalker/convention_presets/default.md",
+    "src/bundlewalker/convention_presets/personal-workbook.md",
+    "src/bundlewalker/convention_presets/research-agent.md",
+    "src/bundlewalker/convention_presets/software-agent.md",
+}
 
 
 def test_v2_release_versions_are_consistent() -> None:
@@ -20,3 +35,30 @@ def test_v2_release_versions_are_consistent() -> None:
     assert bundlewalker.__version__ == "0.2.0"
     assert distribution_version("bundlewalker") == "0.2.0"
     assert editable_package["version"] == "0.2.0"
+
+
+def test_license_metadata_and_files_are_declared() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["project"]["license"] == LICENSE_EXPRESSION
+    assert project["project"]["license-files"] == LICENSE_FILES
+    assert all((PROJECT_ROOT / relative).is_file() for relative in LICENSE_FILES)
+
+
+def test_official_license_texts_are_unmodified() -> None:
+    for relative, expected_digest in OFFICIAL_LICENSE_SHA256.items():
+        content = (PROJECT_ROOT / relative).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == expected_digest
+
+
+def test_cc0_scope_matches_the_packaged_convention_presets() -> None:
+    actual_presets = {
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in (PROJECT_ROOT / "src/bundlewalker/convention_presets").glob("*.md")
+    }
+    scope = (PROJECT_ROOT / "LICENSE-SCOPE.md").read_text(encoding="utf-8")
+
+    assert actual_presets == CC0_PRESET_PATHS
+    assert all(f"`{relative}`" in scope for relative in CC0_PRESET_PATHS)
+    assert "All other project-owned files are licensed under GPL-3.0-or-later." in scope
+    assert "generated `conventions.md`" in scope

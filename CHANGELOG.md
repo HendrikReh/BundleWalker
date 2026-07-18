@@ -2,6 +2,15 @@
 
 All notable BundleWalker releases are recorded here.
 
+## [Unreleased]
+
+### Added
+
+- Licensed BundleWalker's application code, tests, documentation, and internal prompts under
+  GPL-3.0-or-later.
+- Dedicated the five convention preset resources under CC0-1.0 so their copied scaffolding does
+  not restrict generated workspaces.
+
 ## [v2] - 2026-07-18
 
 ### Added

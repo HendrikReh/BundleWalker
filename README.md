@@ -8,7 +8,7 @@ Current release: **v2** (Python package `0.2.0`). See the [changelog](CHANGELOG.
 history.
 
 [Tutorial](docs/tutorial.md) · [User Guide](docs/user-guide.md) ·
-[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [License](LICENSE-SCOPE.md)
 
 ## Why BundleWalker
 
@@ -209,3 +209,20 @@ The current quality areas are faithful source summary, cross-source topic update
 preservation, cited answer, and stale-Synthesis refresh. Live evaluation may use the network and
 incur provider cost; it never replaces offline acceptance coverage. See
 [Contributing](CONTRIBUTING.md) for architecture and workflow detail.
+
+## License
+
+BundleWalker is an open-source, multi-license distribution. Its application code, tests,
+documentation, and internal agent prompts are available under the
+[GNU General Public License version 3 or later](LICENSE). Commercial use is permitted under the
+GPL's terms, including its source-sharing requirements when covered work is distributed.
+
+The five packaged convention presets are dedicated under
+[CC0 1.0 Universal](LICENSES/CC0-1.0.txt). Their content can be copied into a generated
+`conventions.md` without imposing BundleWalker's GPL terms on the resulting workspace.
+User-provided sources and generated knowledge remain subject to the rights in that content; they
+do not become BundleWalker-owned merely because the program processed them.
+
+See [License Scope](LICENSE-SCOPE.md) for the exact path mapping.
+
+Copyright (C) 2026 Hendrik Reh

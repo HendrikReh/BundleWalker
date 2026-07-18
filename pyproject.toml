@@ -3,6 +3,8 @@ name = "bundlewalker"
 version = "0.2.0"
 description = "Build a review-first personal knowledge wiki with OKF and PydanticAI."
 readme = "README.md"
+license = "GPL-3.0-or-later AND CC0-1.0"
+license-files = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
 requires-python = ">=3.13"
 dependencies = [
     "jsonschema>=4.26,<5",

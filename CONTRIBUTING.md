@@ -149,6 +149,19 @@ interruption and concurrency.
 Never weaken any of these boundaries merely to accept a model response; reject or retry invalid
 output before persistence instead.
 
+## Licensing contributions
+
+By intentionally submitting a contribution to BundleWalker, you agree that its inbound terms
+match the license assigned to the target path in [License Scope](LICENSE-SCOPE.md):
+
+- contributions to the five Markdown files under `src/bundlewalker/convention_presets/` are made
+  under the CC0 1.0 Universal dedication, waiver, and fallback license; and
+- contributions to all other project-owned paths are licensed under GPL-3.0-or-later unless that
+  path is explicitly documented otherwise.
+
+GPL contributors retain copyright in their contributions. BundleWalker does not require a
+copyright assignment, contributor license agreement, or Developer Certificate of Origin.
+
 ## Before opening a pull request
 
 - [ ] The change is focused, remains within v2 scope, or links to an accepted scope decision.
