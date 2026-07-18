@@ -2024,3 +2024,27 @@ def test_discard_syncs_the_transaction_parent_after_owned_cleanup(
 
     assert observations
     assert observations[-1] is False
+
+
+def test_quiescent_workspace_yields_only_after_recovery(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+
+    with transactions.quiescent_workspace(workspace) as quiescent:
+        assert quiescent.workspace == workspace
+        assert (workspace.root / ".bundlewalker/transaction.lock").is_file()
+
+
+def test_quiescent_workspace_preserves_and_rejects_pending_review(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+
+    with (
+        pytest.raises(ReviewPendingError) as raised,
+        transactions.quiescent_workspace(prepared.workspace),
+    ):
+        pytest.fail("pending review must prevent a quiescent snapshot")
+
+    assert raised.value.review_id == prepared.transaction_id
+    assert prepared.transaction_dir.is_dir()
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    assert pending.review_id == prepared.transaction_id
