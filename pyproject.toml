@@ -6,6 +6,27 @@ readme = "README.md"
 license = "GPL-3.0-or-later AND CC0-1.0"
 license-files = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
 requires-python = ">=3.13"
+authors = [{ name = "Hendrik Reh" }]
+maintainers = [{ name = "Hendrik Reh" }]
+keywords = [
+    "knowledge-base",
+    "markdown",
+    "mcp",
+    "okf",
+    "pydantic-ai",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Documentation",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "jsonschema>=4.26,<5",
     "markdown-it-py>=4.0.0",
@@ -14,6 +35,13 @@ dependencies = [
     "pyyaml>=6.0.0",
     "typer>=0.16.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/HendrikReh/BundleWalker"
+Documentation = "https://github.com/HendrikReh/BundleWalker#documentation"
+Repository = "https://github.com/HendrikReh/BundleWalker"
+Issues = "https://github.com/HendrikReh/BundleWalker/issues"
+Changelog = "https://github.com/HendrikReh/BundleWalker/blob/master/CHANGELOG.md"
 
 [project.scripts]
 bundlewalker = "bundlewalker.cli:app"

@@ -26,7 +26,7 @@ CC0_PRESET_PATHS = {
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
 
 
-def test_v3_release_versions_are_consistent() -> None:
+def test_release_versions_are_consistent() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
     editable_package = next(
@@ -35,10 +35,45 @@ def test_v3_release_versions_are_consistent() -> None:
         if package["name"] == "bundlewalker" and package.get("source") == {"editable": "."}
     )
 
-    assert project["project"]["version"] == "0.3.0"
-    assert bundlewalker.__version__ == "0.3.0"
-    assert distribution_version("bundlewalker") == "0.3.0"
-    assert editable_package["version"] == "0.3.0"
+    expected = project["project"]["version"]
+    assert bundlewalker.__version__ == expected
+    assert distribution_version("bundlewalker") == expected
+    assert editable_package["version"] == expected
+
+
+def test_public_package_metadata_is_complete() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
+
+    assert project["authors"] == [{"name": "Hendrik Reh"}]
+    assert project["maintainers"] == [{"name": "Hendrik Reh"}]
+    assert project["keywords"] == [
+        "knowledge-base",
+        "markdown",
+        "mcp",
+        "okf",
+        "pydantic-ai",
+    ]
+    assert project["classifiers"] == [
+        "Development Status :: 3 - Alpha",
+        "Environment :: Console",
+        "Intended Audience :: Developers",
+        "Operating System :: MacOS",
+        "Operating System :: POSIX :: Linux",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
+        "Topic :: Documentation",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    ]
+    assert project["urls"] == {
+        "Homepage": "https://github.com/HendrikReh/BundleWalker",
+        "Documentation": "https://github.com/HendrikReh/BundleWalker#documentation",
+        "Repository": "https://github.com/HendrikReh/BundleWalker",
+        "Issues": "https://github.com/HendrikReh/BundleWalker/issues",
+        "Changelog": "https://github.com/HendrikReh/BundleWalker/blob/master/CHANGELOG.md",
+    }
 
 
 def test_license_metadata_and_files_are_declared() -> None:
