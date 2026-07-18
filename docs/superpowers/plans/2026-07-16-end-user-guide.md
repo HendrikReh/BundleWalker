@@ -241,7 +241,7 @@ uv run --project "$PROJECT_ROOT" bundlewalker ingest ../research.txt \
   --model '<pydantic-ai-model-string>'
 ```
 
-Version 1 accepts one regular UTF-8 `.md` or `.txt` file per invocation. The default limit is
+Version 2 accepts one regular UTF-8 `.md` or `.txt` file per invocation. The default limit is
 100,000 Unicode characters, configured by `max_source_characters` in `bundlewalker.toml`.
 
 BundleWalker recovers any interrupted transaction, reads and hashes the exact input bytes, and
@@ -651,9 +651,9 @@ may complete or roll back an already-reviewed interrupted transaction.
 Tracebacks are hidden by default. Errors report a concise primary cause without printing source
 content or provider credentials.
 
-### V1 producer limits and permissive reading
+### V2 producer limits and permissive reading
 
-BundleWalker's v1 producer is deliberately stricter than its OKF reader. It generates only
+BundleWalker's v2 producer is deliberately stricter than its OKF reader. It generates only
 Source, Topic, Entity, and Synthesis concepts; supports create and digest-protected replace
 operations, not deletion; and confines generated concept paths to their matching `wiki/`
 categories.
@@ -671,7 +671,7 @@ categories.
 
 Existing OKF content is read permissively: a non-empty unknown concept type and unknown metadata
 fields are accepted, and representable metadata extensions survive round-tripping. This allows
-compatible external OKF extensions without letting v1 model proposals invent new producer types.
+compatible external OKF extensions without letting v2 model proposals invent new producer types.
 Broken internal links are warnings rather than parser failures. Refresh remains narrower: its
 target must have exact type `Synthesis`, and metadata that must be re-produced has to fit the
 producer bounds above.
@@ -717,7 +717,7 @@ workspace merely to bypass the check. See [Create a workspace](#create-a-workspa
 ### A source is rejected
 
 Check that it is one regular UTF-8 `.md` or `.txt` file and fits `max_source_characters`. URL,
-PDF, image, audio, video, OCR, batch, and watched-directory ingestion are outside v1. See
+PDF, image, audio, video, OCR, batch, and watched-directory ingestion are outside v2. See
 [Ingest and review a source](#ingest-and-review-a-source).
 
 ### A proposal is rejected
@@ -751,6 +751,7 @@ Run `ingest`, `ask`, or `lint` again to invoke authenticated recovery. Preserve
 BundleWalker never commits or pushes for you. Review durable files—especially exact bytes under
 `raw/`—before sharing them, and ignore `.bundlewalker/`. See
 [Git and privacy boundary](#git-and-privacy-boundary).
+
 ````
 
 - [ ] **Step 3: Link the guide from the README**

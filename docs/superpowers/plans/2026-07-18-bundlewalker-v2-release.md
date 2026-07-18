@@ -48,8 +48,13 @@ Python SDK
   design plus the MCP architecture record.
 - Modify `docs/user-guide.md`: update current-release language and the producer-limits anchor to
   v2 without changing the limits themselves.
+- Modify `docs/tutorial.md`: link the current rendered command-reference link to the canonical
+  user-guide heading.
 - Modify `docs/superpowers/plans/2026-07-16-end-user-guide.md`: mechanically synchronize only the
   embedded canonical user-guide block.
+- Modify `docs/superpowers/plans/2026-07-18-bundlewalker-v2-release.md`: validate rendered links
+  only in current user-facing documentation and include the scoped tutorial correction in the
+  verified release state.
 
 ### Task 1: Build and Commit the Verified v2 Release State
 
@@ -62,7 +67,9 @@ Python SDK
 - Modify: `README.md:1-9,123-174`
 - Modify: `CONTRIBUTING.md:8-20,151-161`
 - Modify: `docs/user-guide.md:168-181,588-610,651-656`
+- Modify: `docs/tutorial.md:243`
 - Modify: `docs/superpowers/plans/2026-07-16-end-user-guide.md:66-754`
+- Modify: `docs/superpowers/plans/2026-07-18-bundlewalker-v2-release.md:42-55,374-455,489-503`
 
 **Interfaces:**
 - Consumes: approved design at
@@ -376,27 +383,39 @@ if rg -n 'Version 1|\bV1\b|#v1-producer-limits' README.md CONTRIBUTING.md docs/u
     printf 'unexpected current-document v1 wording\n' >&2
     exit 1
 fi
-git diff -- docs/superpowers/specs docs/superpowers/plans ':!docs/superpowers/plans/2026-07-16-end-user-guide.md'
+git diff -- docs/superpowers/specs docs/superpowers/plans \
+  ':!docs/superpowers/plans/2026-07-16-end-user-guide.md' \
+  ':!docs/superpowers/plans/2026-07-18-bundlewalker-v2-release.md'
 ```
 
 Expected: the first search shows the intended current-release statements; the second returns no
 matches; the final diff is empty, proving other historical specifications and plans were not
-rewritten.
+rewritten. The two excluded plans are the required embedded-guide mirror and this current
+release-plan correction.
 
-- [ ] **Step 14: Validate every repository-local Markdown link and heading anchor**
+- [ ] **Step 14: Validate rendered current-document Markdown links and heading anchors**
 
 Run:
 
 ```bash
 uv run python - <<'PY'
 import re
-import subprocess
 from pathlib import Path
 from urllib.parse import unquote
 
+from markdown_it import MarkdownIt
+
 ROOT = Path.cwd().resolve()
-LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+MARKDOWN = MarkdownIt("commonmark")
+SOURCES = [
+    ROOT / "README.md",
+    ROOT / "CHANGELOG.md",
+    ROOT / "CONTRIBUTING.md",
+    ROOT / "docs/tutorial.md",
+    ROOT / "docs/user-guide.md",
+]
 
 
 def slug(text: str) -> str:
@@ -417,39 +436,33 @@ def anchors(path: Path) -> set[str]:
     return result
 
 
-tracked = subprocess.run(
-    ["git", "ls-files", "*.md"],
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout.splitlines()
-sources = [ROOT / path for path in tracked]
-changelog = ROOT / "CHANGELOG.md"
-if changelog.exists() and changelog not in sources:
-    sources.append(changelog)
-
 errors: list[str] = []
 checked = 0
-for source in sorted(sources):
-    for raw_target in LINK.findall(source.read_text(encoding="utf-8")):
-        target = raw_target.strip().split()[0].strip("<>")
-        if target.startswith(("http://", "https://", "mailto:")):
-            continue
-        path_text, separator, fragment = target.partition("#")
-        destination = source if not path_text else (source.parent / unquote(path_text)).resolve()
-        checked += 1
-        if not destination.exists() or ROOT not in (destination, *destination.parents):
-            errors.append(f"{source.relative_to(ROOT)} -> {target}: missing or outside repository")
-            continue
-        if separator and destination.is_file() and unquote(fragment) not in anchors(destination):
-            errors.append(f"{source.relative_to(ROOT)} -> {target}: missing anchor")
+for source in SOURCES:
+    for token in MARKDOWN.parse(source.read_text(encoding="utf-8")):
+        for child in token.children or []:
+            if child.type != "link_open" or not isinstance(href := child.attrGet("href"), str):
+                continue
+            target = href.strip().split()[0].strip("<>")
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            path_text, separator, fragment = target.partition("#")
+            destination = source if not path_text else (source.parent / unquote(path_text)).resolve()
+            checked += 1
+            if not destination.exists() or ROOT not in (destination, *destination.parents):
+                errors.append(f"{source.relative_to(ROOT)} -> {target}: missing or outside repository")
+                continue
+            if separator and destination.is_file() and unquote(fragment) not in anchors(destination):
+                errors.append(f"{source.relative_to(ROOT)} -> {target}: missing anchor")
 
 assert not errors, "\n".join(errors)
-print(f"validated {checked} local Markdown links")
+print(f"validated {checked} rendered local Markdown links")
 PY
 ```
 
-Expected: prints a positive validated-link count and exits `0` with no missing file or anchor.
+Expected: prints a positive validated-link count and exits `0` with no missing file or anchor in
+the current user-facing documentation set. Markdown-it token parsing excludes fenced and other
+non-rendered example links from this rendered-link check.
 
 - [ ] **Step 15: Validate all documented executable surfaces against live help**
 
@@ -492,9 +505,9 @@ Run:
 
 ```bash
 git diff --stat
-git diff -- CHANGELOG.md pyproject.toml src/bundlewalker/__init__.py uv.lock README.md CONTRIBUTING.md docs/user-guide.md docs/superpowers/plans/2026-07-16-end-user-guide.md tests/test_release_metadata.py
+git diff -- CHANGELOG.md pyproject.toml src/bundlewalker/__init__.py uv.lock README.md CONTRIBUTING.md docs/user-guide.md docs/tutorial.md docs/superpowers/plans/2026-07-16-end-user-guide.md docs/superpowers/plans/2026-07-18-bundlewalker-v2-release.md tests/test_release_metadata.py
 git status --short
-git add CHANGELOG.md pyproject.toml src/bundlewalker/__init__.py uv.lock README.md CONTRIBUTING.md docs/user-guide.md docs/superpowers/plans/2026-07-16-end-user-guide.md tests/test_release_metadata.py
+git add CHANGELOG.md pyproject.toml src/bundlewalker/__init__.py uv.lock README.md CONTRIBUTING.md docs/user-guide.md docs/tutorial.md docs/superpowers/plans/2026-07-16-end-user-guide.md docs/superpowers/plans/2026-07-18-bundlewalker-v2-release.md tests/test_release_metadata.py
 git diff --cached --check
 git status --short
 ```

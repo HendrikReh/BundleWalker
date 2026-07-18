@@ -4,7 +4,11 @@ BundleWalker is a local, review-first CLI that turns Markdown and text sources i
 cited Open Knowledge Format (OKF) wiki. Accepted source bytes stay immutable, every proposed
 knowledge change is reviewable, and the resulting Markdown remains readable without BundleWalker.
 
-[Tutorial](docs/tutorial.md) · [User Guide](docs/user-guide.md) · [Contributing](CONTRIBUTING.md)
+Current release: **v2** (Python package `0.2.0`). See the [changelog](CHANGELOG.md) for the release
+history.
+
+[Tutorial](docs/tutorial.md) · [User Guide](docs/user-guide.md) ·
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md)
 
 ## Why BundleWalker
 
@@ -122,12 +126,12 @@ Run these from a workspace with `PROJECT_ROOT` pointing to the BundleWalker chec
 
 ## Current scope
 
-Version 1 ingests one regular UTF-8 `.md` or `.txt` file per command, with a default limit of
+Version 2 ingests one regular UTF-8 `.md` or `.txt` file per command, with a default limit of
 100,000 Unicode characters. It produces four knowledge types: Source, Topic, Entity, and
 Synthesis. Model proposals, answers, paths, metadata, and citations are bounded; see the
-[detailed producer limits](docs/user-guide.md#v1-producer-limits-and-permissive-reading).
+[detailed producer limits](docs/user-guide.md#v2-producer-limits-and-permissive-reading).
 
-V1 does not ingest URLs, PDFs, images, audio, video, or OCR; batch or watch directories; chunk
+V2 does not ingest URLs, PDFs, images, audio, video, or OCR; batch or watch directories; chunk
 book-sized sources; use embeddings, vector databases, or background indexes; provide a web UI,
 plugin, hosted or remote service; let agents delete, rename, edit conventions, or resolve
 contradictions automatically; or perform multi-user synchronization and Git operations. The local
@@ -137,7 +141,7 @@ operating boundary in detail.
 
 ## Local MCP server
 
-BundleWalker also exposes one workspace through a local MCP `stdio` server. Configure your MCP
+BundleWalker v2 also exposes one workspace through a local MCP `stdio` server. Configure your MCP
 host to launch this command, replacing the two placeholders with absolute local paths:
 
 ```text
@@ -174,6 +178,7 @@ Each document has one primary job:
   save, newer evidence, refresh, and final health checks.
 - The [User Guide](docs/user-guide.md) is authoritative for detailed user tasks, CLI behavior,
   provider setup, recovery, limits, and troubleshooting.
+- The [Changelog](CHANGELOG.md) records the public capability changes in each tagged release.
 - [Contributing](CONTRIBUTING.md) is authoritative for architecture, development workflow,
   verification, and compatibility expectations.
 

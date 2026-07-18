@@ -1,6 +1,6 @@
 [project]
 name = "bundlewalker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Build a review-first personal knowledge wiki with OKF and PydanticAI."
 readme = "README.md"
 requires-python = ">=3.13"

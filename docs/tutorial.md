@@ -240,7 +240,7 @@ before publishing the repository to any remote. BundleWalker does not publish it
 ## What to try next
 
 - Compare the [preset choices](user-guide.md#choosing-a-preset) for other kinds of workspace.
-- Explore the [full command reference](user-guide.md#command-reference).
+- Explore the [full command reference](user-guide.md#complete-cli-reference).
 - Consult [troubleshooting and safety](user-guide.md#troubleshooting-and-safety) for provider,
   workspace, proposal, refresh, and privacy problems.
 - Read the [contributor guidance](../CONTRIBUTING.md) before changing BundleWalker itself.
