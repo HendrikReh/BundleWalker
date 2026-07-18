@@ -7,7 +7,7 @@ deterministic code, and must keep the default test suite offline.
 
 ## Project boundaries
 
-BundleWalker v2 ingests one UTF-8 Markdown or text source at a time and produces only four
+BundleWalker v3 ingests one UTF-8 Markdown or text source at a time and produces only four
 concept types: Source, Topic, Entity, and Synthesis. Agents never write files directly. The
 project does not perform automatic Git operations and does not run a background, hosted, or remote
 service. Its MCP adapter is a foreground local `stdio` process bound to one workspace at startup;
@@ -164,7 +164,7 @@ copyright assignment, contributor license agreement, or Developer Certificate of
 
 ## Before opening a pull request
 
-- [ ] The change is focused, remains within v2 scope, or links to an accepted scope decision.
+- [ ] The change is focused, remains within v3 scope, or links to an accepted scope decision.
 - [ ] Focused tests cover the behavior and were observed failing before the fix where applicable.
 - [ ] The full offline suite passes.
 - [ ] `uv run ruff format --check .` and `uv run ruff check .` pass.

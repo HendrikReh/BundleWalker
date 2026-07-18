@@ -20,7 +20,7 @@ BundleWalker. Hermes's own conversation model and BundleWalker's PydanticAI mode
 
 You need:
 
-- a local BundleWalker v2 checkout installed with `uv sync --locked`;
+- a local BundleWalker v3 checkout installed with `uv sync --locked`;
 - an initialized BundleWalker workspace containing `bundlewalker.toml`;
 - Hermes Agent with MCP support; and
 - terminal access to `uv` and `hermes`.

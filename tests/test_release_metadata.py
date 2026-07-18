@@ -26,7 +26,7 @@ CC0_PRESET_PATHS = {
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
 
 
-def test_v2_release_versions_are_consistent() -> None:
+def test_v3_release_versions_are_consistent() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
     editable_package = next(
@@ -35,10 +35,10 @@ def test_v2_release_versions_are_consistent() -> None:
         if package["name"] == "bundlewalker" and package.get("source") == {"editable": "."}
     )
 
-    assert project["project"]["version"] == "0.2.0"
-    assert bundlewalker.__version__ == "0.2.0"
-    assert distribution_version("bundlewalker") == "0.2.0"
-    assert editable_package["version"] == "0.2.0"
+    assert project["project"]["version"] == "0.3.0"
+    assert bundlewalker.__version__ == "0.3.0"
+    assert distribution_version("bundlewalker") == "0.3.0"
+    assert editable_package["version"] == "0.3.0"
 
 
 def test_license_metadata_and_files_are_declared() -> None:

@@ -4,12 +4,21 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+## [v3] - 2026-07-18
+
 ### Added
 
 - Licensed BundleWalker's application code, tests, documentation, and internal prompts under
   GPL-3.0-or-later.
 - Dedicated the five convention preset resources under CC0-1.0 so their copied scaffolding does
   not restrict generated workspaces.
+- Added path-specific license documentation, PEP 639 distribution metadata, official-text
+  fingerprint checks, and repository-wide GPL source-header enforcement.
+
+### Changed
+
+- Published the first explicitly licensed BundleWalker release as Python package `0.3.0` without
+  changing CLI or MCP behavior.
 
 ## [v2] - 2026-07-18
 
@@ -44,5 +53,6 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
+[v3]: https://github.com/HendrikReh/BundleWalker/compare/v2...v3
 [v2]: https://github.com/HendrikReh/BundleWalker/compare/v1...v2
 [v1]: https://github.com/HendrikReh/BundleWalker/tree/v1
