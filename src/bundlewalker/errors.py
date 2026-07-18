@@ -26,6 +26,14 @@ class WorkspaceError(BundleWalkerError):
     pass
 
 
+class BackupError(BundleWalkerError):
+    pass
+
+
+class BackupVerificationError(BackupError):
+    pass
+
+
 class OkfError(BundleWalkerError):
     pass
 
