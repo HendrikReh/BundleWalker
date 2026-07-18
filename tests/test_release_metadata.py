@@ -4,7 +4,6 @@ from pathlib import Path
 
 import bundlewalker
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
