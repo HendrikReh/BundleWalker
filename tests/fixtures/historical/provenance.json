@@ -31,5 +31,10 @@
     "invalid-malformed": "configuration_error",
     "invalid-format-zero": "unsupported",
     "future-format": "too_new"
+  },
+  "representation": {
+    "schema_version": 1,
+    "empty_directories": "empty-directories.json",
+    "ownership": "bundlewalker_fixture_representation"
   }
 }

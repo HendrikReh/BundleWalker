@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -19,17 +18,37 @@ from bundlewalker.errors import ConfigurationError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import get_pending_review, recover_transactions
 from bundlewalker.workspace import Workspace, discover_workspace
+from tests.historical_fixtures import HistoricalFixtures, copy_file_representation
 
-FIXTURES = Path(__file__).parent / "fixtures" / "historical"
+SOURCE_FIXTURES = Path(__file__).parent / "fixtures" / "historical"
+
+
+@pytest.fixture
+def historical_fixtures(tmp_path: Path) -> HistoricalFixtures:
+    represented = tmp_path / "represented-historical-fixtures"
+    copy_file_representation(SOURCE_FIXTURES, represented)
+    return HistoricalFixtures(represented)
+
+
+def test_file_only_representation_restores_release_owned_empty_directories(
+    historical_fixtures: HistoricalFixtures,
+    tmp_path: Path,
+) -> None:
+    for name in ("v1-clean", "v2-clean", "v3-clean", "v3-schema2-pending"):
+        root = historical_fixtures.materialize(name, tmp_path / f"materialized-{name}")
+
+        assert (root / "raw").is_dir()
+        assert list((root / "raw").iterdir()) == []
+        assert not (root / "empty-directories.json").exists()
 
 
 @pytest.mark.parametrize("release", ["v1", "v2", "v3"])
 def test_released_clean_workspace_remains_current_and_readable(
     tmp_path: Path,
     release: str,
+    historical_fixtures: HistoricalFixtures,
 ) -> None:
-    root = tmp_path / release
-    shutil.copytree(FIXTURES / f"{release}-clean", root)
+    root = historical_fixtures.materialize(f"{release}-clean", tmp_path / release)
 
     compatibility = inspect_workspace(root)
     workspace = discover_workspace(root)
@@ -45,9 +64,9 @@ def test_released_clean_workspace_remains_current_and_readable(
 def test_released_clean_workspace_creates_a_current_verified_backup(
     tmp_path: Path,
     release: str,
+    historical_fixtures: HistoricalFixtures,
 ) -> None:
-    root = tmp_path / release
-    shutil.copytree(FIXTURES / f"{release}-clean", root)
+    root = historical_fixtures.materialize(f"{release}-clean", tmp_path / release)
     workspace = discover_workspace(root)
 
     verified = create_workspace_backup(workspace, tmp_path / f"{release}.zip")
@@ -60,9 +79,12 @@ def test_released_clean_workspace_creates_a_current_verified_backup(
 def test_released_workspace_round_trips_through_backup_and_restore(
     tmp_path: Path,
     release: str,
+    historical_fixtures: HistoricalFixtures,
 ) -> None:
-    source = tmp_path / f"{release}-source"
-    shutil.copytree(FIXTURES / f"{release}-clean", source)
+    source = historical_fixtures.materialize(
+        f"{release}-clean",
+        tmp_path / f"{release}-source",
+    )
     archive = tmp_path / f"{release}.zip"
     original = discover_workspace(source)
     create_workspace_backup(original, archive)
@@ -76,9 +98,11 @@ def test_released_workspace_round_trips_through_backup_and_restore(
     assert (restored.workspace.wiki_dir / "index.md").is_file()
 
 
-def test_v1_interrupted_schema1_transaction_recovers_exact_base(tmp_path: Path) -> None:
-    root = tmp_path / "legacy"
-    shutil.copytree(FIXTURES / "v1-schema1-swapping", root)
+def test_v1_interrupted_schema1_transaction_recovers_exact_base(
+    tmp_path: Path,
+    historical_fixtures: HistoricalFixtures,
+) -> None:
+    root = historical_fixtures.materialize("v1-schema1-swapping", tmp_path / "legacy")
     expected = (root / "expected-base.sha256").read_text(encoding="utf-8").strip()
     (root / "expected-base.sha256").unlink()
     workspace = discover_workspace(root)
@@ -89,9 +113,11 @@ def test_v1_interrupted_schema1_transaction_recovers_exact_base(tmp_path: Path) 
     assert not any((root / ".bundlewalker/transactions").iterdir())
 
 
-def test_v3_pending_review_remains_pending(tmp_path: Path) -> None:
-    root = tmp_path / "pending"
-    shutil.copytree(FIXTURES / "v3-schema2-pending", root)
+def test_v3_pending_review_remains_pending(
+    tmp_path: Path,
+    historical_fixtures: HistoricalFixtures,
+) -> None:
+    root = historical_fixtures.materialize("v3-schema2-pending", tmp_path / "pending")
     workspace = discover_workspace(root)
 
     pending = get_pending_review(workspace)
@@ -101,16 +127,25 @@ def test_v3_pending_review_remains_pending(tmp_path: Path) -> None:
     assert pending.status.value == "pending"
 
 
-def test_static_provenance_pins_release_commits() -> None:
-    provenance = json.loads((FIXTURES / "provenance.json").read_text(encoding="utf-8"))
-    assert provenance["v1"]["commit"] == "be165ac283ba7511592771fd876c89b12ef4ff1a"
-    assert provenance["v2"]["commit"] == "12ef119ac3b2ba84cff7ca9aee0fbf14b239d975"
-    assert provenance["v3"]["commit"] == "ab079a16a98cc31c46f77db73c941328c886075b"
-    assert {provenance[release]["expected_compatibility"] for release in ("v1", "v2", "v3")} == {
-        "current"
+def test_static_provenance_pins_release_commits(
+    historical_fixtures: HistoricalFixtures,
+) -> None:
+    provenance = historical_fixtures.read_metadata("provenance.json")
+    releases = {name: cast(dict[str, object], provenance[name]) for name in ("v1", "v2", "v3")}
+    assert releases["v1"]["commit"] == "be165ac283ba7511592771fd876c89b12ef4ff1a"
+    assert releases["v2"]["commit"] == "12ef119ac3b2ba84cff7ca9aee0fbf14b239d975"
+    assert releases["v3"]["commit"] == "ab079a16a98cc31c46f77db73c941328c886075b"
+    assert {releases[release]["expected_compatibility"] for release in releases} == {"current"}
+    fixtures = cast(dict[str, object], provenance["fixtures"])
+    representation = cast(dict[str, object], provenance["representation"])
+    assert fixtures["v1-schema1-swapping"] == "recovers_base"
+    assert fixtures["v3-schema2-pending"] == "pending_review"
+    assert representation == {
+        "schema_version": 1,
+        "empty_directories": "empty-directories.json",
+        "ownership": "bundlewalker_fixture_representation",
     }
-    assert provenance["fixtures"]["v1-schema1-swapping"] == "recovers_base"
-    assert provenance["fixtures"]["v3-schema2-pending"] == "pending_review"
+    assert not list(SOURCE_FIXTURES.rglob(".gitkeep"))
 
 
 @pytest.mark.parametrize(
@@ -121,15 +156,24 @@ def test_static_provenance_pins_release_commits() -> None:
     ],
 )
 def test_well_formed_incompatible_fixtures_are_inspection_only(
+    tmp_path: Path,
     name: str,
     status: CompatibilityStatus,
+    historical_fixtures: HistoricalFixtures,
 ) -> None:
-    assert inspect_workspace(FIXTURES / name).status is status
+    root = historical_fixtures.materialize(name, tmp_path / name)
+
+    assert inspect_workspace(root).status is status
 
 
-def test_malformed_fixture_is_a_configuration_error() -> None:
+def test_malformed_fixture_is_a_configuration_error(
+    tmp_path: Path,
+    historical_fixtures: HistoricalFixtures,
+) -> None:
+    root = historical_fixtures.materialize("invalid-malformed", tmp_path / "invalid-malformed")
+
     with pytest.raises(ConfigurationError):
-        inspect_workspace(FIXTURES / "invalid-malformed")
+        inspect_workspace(root)
 
 
 def _tree_digest(root: Path) -> str:

@@ -67,27 +67,32 @@ def workspace_lock(workspace: Workspace) -> Generator[None]:
         label="transaction lock parent",
         create_from=0,
     ) as parent_descriptor:
+        descriptor: int | None = None
+        locked = False
         try:
             try:
-                descriptor = os.open(
-                    LOCK_NAME,
-                    flags | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                    dir_fd=parent_descriptor,
-                )
-                os.fsync(parent_descriptor)
-            except FileExistsError:
-                descriptor = os.open(LOCK_NAME, flags, dir_fd=parent_descriptor)
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise TransactionError("workspace transaction lock is not a regular file")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        except OSError as exc:
-            raise TransactionError("could not acquire workspace transaction lock") from exc
-        try:
+                try:
+                    descriptor = os.open(
+                        LOCK_NAME,
+                        flags | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                        dir_fd=parent_descriptor,
+                    )
+                    os.fsync(parent_descriptor)
+                except FileExistsError:
+                    descriptor = os.open(LOCK_NAME, flags, dir_fd=parent_descriptor)
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise TransactionError("workspace transaction lock is not a regular file")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                locked = True
+            except OSError as exc:
+                raise TransactionError("could not acquire workspace transaction lock") from exc
             yield
         finally:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            finally:
-                os.close(descriptor)
+            if descriptor is not None:
+                try:
+                    if locked:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)

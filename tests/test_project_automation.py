@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -102,6 +103,17 @@ def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
     for dependency in ("supported", "build", "artifact-smoke", "sdist-smoke"):
         assert dependency in required_needs
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_sdist_includes_historical_empty_directory_representation() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    force_include = project["tool"]["hatch"]["build"]["targets"]["sdist"]["force-include"]
+    assert force_include == {
+        "tests/fixtures/historical/empty-directories.json": (
+            "tests/fixtures/historical/empty-directories.json"
+        )
+    }
 
 
 def test_ci_requires_dependency_audit() -> None:
