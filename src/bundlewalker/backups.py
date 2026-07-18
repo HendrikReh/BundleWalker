@@ -50,6 +50,7 @@ PAYLOAD_PREFIX = "workspace/"
 MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 MAX_BACKUP_ENTRIES = 100_000
 MAX_BACKUP_PATH_CHARACTERS = 4_096
+MAX_BACKUP_PATH_COMPONENTS = 128
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _SUPPORTED_ZIP_FLAGS = 0x80E
 _EOCD_SIGNATURE = b"PK\x05\x06"
@@ -166,6 +167,16 @@ class _ExistingRestoreTarget:
     descriptor: int
     identity: tuple[int, int]
     mode: int
+
+
+@dataclass(slots=True)
+class _RestoreCleanupFrame:
+    descriptor: int
+    relative: str
+    names: list[str]
+    parent_descriptor: int | None
+    identity: tuple[int, int] | None
+    index: int = 0
 
 
 def create_workspace_backup(
@@ -634,6 +645,7 @@ def _create_restore_staging(
         workspace_descriptor: int | None = None
         workspace_identity: tuple[int, int] | None = None
         workspace_name = "workspace"
+        workspace_created = False
         succeeded = False
         try:
             container_descriptor = os.open(
@@ -659,6 +671,7 @@ def _create_restore_staging(
                 raise BackupError("restore staging directory changed during creation")
 
             os.mkdir(workspace_name, mode=0o700, dir_fd=container_descriptor)
+            workspace_created = True
             workspace_descriptor = os.open(
                 workspace_name,
                 os.O_RDONLY
@@ -696,8 +709,15 @@ def _create_restore_staging(
             succeeded = True
             return staging
         except BaseException:
+            if workspace_descriptor is not None and workspace_identity is None:
+                with suppress(OSError):
+                    workspace_state = os.fstat(workspace_descriptor)
+                    workspace_identity = (workspace_state.st_dev, workspace_state.st_ino)
             if container_descriptor is not None and workspace_identity is not None:
                 _remove_empty_directory_identity(container_descriptor, workspace_identity)
+            elif container_descriptor is not None and workspace_created:
+                with suppress(OSError):
+                    os.rmdir(workspace_name, dir_fd=container_descriptor)
             if container_identity is not None:
                 _remove_empty_directory_identity(parent_descriptor, container_identity)
             raise
@@ -853,53 +873,56 @@ def _open_restore_directory(
             created = False
             current_path /= part
             trusted_identity: tuple[int, int] | None = None
-            if create:
-                if owned_entries is None:
-                    raise BackupVerificationError("restore staging ownership is unavailable")
-                try:
-                    os.mkdir(part, mode=0o700, dir_fd=current)
-                    created = True
-                except FileExistsError:
-                    expected = owned_entries.get(current_path.as_posix())
-                    if expected is None or not expected[0]:
-                        raise BackupVerificationError(
-                            "restore staging path was not created by BundleWalker"
-                        ) from None
-                    trusted_identity = expected[1]
-                else:
-                    created_state = os.stat(
-                        part,
-                        dir_fd=current,
-                        follow_symlinks=False,
-                    )
-                    if not stat.S_ISDIR(created_state.st_mode):
-                        raise BackupVerificationError(
-                            "restore staging path changed during extraction"
-                        )
-                    trusted_identity = (created_state.st_dev, created_state.st_ino)
+            child: int | None = None
+            try:
+                if create:
+                    if owned_entries is None:
+                        raise BackupVerificationError("restore staging ownership is unavailable")
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=current)
+                        created = True
+                    except FileExistsError:
+                        expected = owned_entries.get(current_path.as_posix())
+                        if expected is None or not expected[0]:
+                            raise BackupVerificationError(
+                                "restore staging path was not created by BundleWalker"
+                            ) from None
+                        trusted_identity = expected[1]
+                # mkdir cannot return a descriptor, so same-principal replacement in the
+                # immediately adjacent mkdir-to-open scheduling gap cannot be distinguished
+                # after open; the descriptor identity below is the sole ownership source.
+                child = os.open(
+                    part,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_BINARY", 0),
+                    dir_fd=current,
+                )
+                child_state = os.fstat(child)
+                child_identity = (child_state.st_dev, child_state.st_ino)
+                if created:
+                    trusted_identity = child_identity
+                    if owned_entries is None:
+                        raise BackupVerificationError("restore staging ownership is unavailable")
                     owned_entries[current_path.as_posix()] = (True, trusted_identity)
-            child = os.open(
-                part,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_BINARY", 0),
-                dir_fd=current,
-            )
-            child_state = os.fstat(child)
-            relative_state = os.stat(part, dir_fd=current, follow_symlinks=False)
-            child_identity = (child_state.st_dev, child_state.st_ino)
-            if (
-                not stat.S_ISDIR(child_state.st_mode)
-                or _managed_identity(child_state) != _managed_identity(relative_state)
-                or (trusted_identity is not None and child_identity != trusted_identity)
-            ):
-                os.close(child)
-                raise BackupVerificationError("restore staging path changed during extraction")
-            if created:
-                _sync_directory_descriptor(current)
-            os.close(current)
-            current = child
+                relative_state = os.stat(part, dir_fd=current, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(child_state.st_mode)
+                    or _managed_identity(child_state) != _managed_identity(relative_state)
+                    or (trusted_identity is not None and child_identity != trusted_identity)
+                ):
+                    raise BackupVerificationError("restore staging path changed during extraction")
+                if created:
+                    _sync_directory_descriptor(current)
+                previous = current
+                current = child
+                child = None
+                os.close(previous)
+            finally:
+                if child is not None:
+                    with suppress(OSError):
+                        os.close(child)
         return current
     except BaseException:
         with suppress(OSError):
@@ -1133,73 +1156,122 @@ def _clear_owned_restore_directory(
     parent: PurePosixPath,
     entries: dict[str, tuple[bool, tuple[int, int]]],
 ) -> None:
-    for name in os.listdir(directory_descriptor):
-        relative = (parent / name).as_posix()
-        expected = entries.get(relative)
-        if expected is None:
-            continue
-        expected_directory, expected_identity = expected
-        try:
-            metadata = os.stat(
-                name,
-                dir_fd=directory_descriptor,
-                follow_symlinks=False,
-            )
-        except OSError:
-            continue
-        actual_identity = (metadata.st_dev, metadata.st_ino)
-        if (
-            actual_identity != expected_identity
-            or stat.S_ISDIR(metadata.st_mode) != expected_directory
+    root = os.dup(directory_descriptor)
+    prefix = parent.as_posix()
+    if prefix == ".":
+        prefix = ""
+    stack = [
+        _RestoreCleanupFrame(
+            descriptor=root,
+            relative=prefix,
+            names=[],
+            parent_descriptor=None,
+            identity=None,
+        )
+    ]
+    try:
+        stack[0].names = os.listdir(root)
+        while stack:
+            frame = stack[-1]
+            if frame.index >= len(frame.names):
+                stack.pop()
+                os.close(frame.descriptor)
+                if frame.parent_descriptor is not None and frame.identity is not None:
+                    _remove_empty_directory_identity(
+                        frame.parent_descriptor,
+                        frame.identity,
+                    )
+                continue
+            name = frame.names[frame.index]
+            frame.index += 1
+            relative = f"{frame.relative}/{name}" if frame.relative else name
+            expected = entries.get(relative)
+            if expected is None:
+                continue
+            expected_directory, expected_identity = expected
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=frame.descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                continue
+            actual_identity = (metadata.st_dev, metadata.st_ino)
+            if (
+                actual_identity != expected_identity
+                or stat.S_ISDIR(metadata.st_mode) != expected_directory
+            ):
+                continue
+            if expected_directory:
+                child: int | None = None
+                try:
+                    child = _open_restore_directory(
+                        frame.descriptor,
+                        (name,),
+                        create=False,
+                    )
+                    names = os.listdir(child)
+                except (OSError, BackupVerificationError):
+                    if child is not None:
+                        with suppress(OSError):
+                            os.close(child)
+                    continue
+                stack.append(
+                    _RestoreCleanupFrame(
+                        descriptor=child,
+                        relative=relative,
+                        names=names,
+                        parent_descriptor=frame.descriptor,
+                        identity=expected_identity,
+                    )
+                )
+            else:
+                _remove_owned_restore_file(
+                    frame.descriptor,
+                    name,
+                    expected_identity,
+                )
+    finally:
+        for frame in reversed(stack):
+            with suppress(OSError):
+                os.close(frame.descriptor)
+
+
+def _remove_owned_restore_file(
+    directory_descriptor: int,
+    name: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    descriptor: int | None = None
+    try:
+        before = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+            dir_fd=directory_descriptor,
+        )
+        descriptor_state = os.fstat(descriptor)
+        after = os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if all(
+            stat.S_ISREG(state.st_mode) and (state.st_dev, state.st_ino) == expected_identity
+            for state in (before, descriptor_state, after)
         ):
-            continue
-        if expected_directory:
-            try:
-                child = _open_restore_directory(
-                    directory_descriptor,
-                    (name,),
-                    create=False,
-                )
-            except (OSError, BackupVerificationError):
-                continue
-            try:
-                _clear_owned_restore_directory(child, parent / name, entries)
-            finally:
-                with suppress(OSError):
-                    os.close(child)
-            _remove_empty_directory_identity(directory_descriptor, expected_identity)
-        else:
-            try:
-                before = os.stat(
-                    name,
-                    dir_fd=directory_descriptor,
-                    follow_symlinks=False,
-                )
-                descriptor = os.open(
-                    name,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
-                    dir_fd=directory_descriptor,
-                )
-            except OSError:
-                continue
-            try:
-                descriptor_state = os.fstat(descriptor)
-                after = os.stat(
-                    name,
-                    dir_fd=directory_descriptor,
-                    follow_symlinks=False,
-                )
-                if all(
-                    stat.S_ISREG(state.st_mode)
-                    and (state.st_dev, state.st_ino) == expected_identity
-                    for state in (before, descriptor_state, after)
-                ):
-                    os.unlink(name, dir_fd=directory_descriptor)
-            except OSError:
-                continue
-            finally:
-                with suppress(OSError):
-                    os.close(descriptor)
+            os.unlink(name, dir_fd=directory_descriptor)
+    except OSError:
+        return
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def _remove_empty_directory_identity(
@@ -1919,6 +1991,7 @@ def _canonical_relative_path(value: str) -> str:
     if (
         path.is_absolute()
         or path == PurePosixPath(".")
+        or len(path.parts) > MAX_BACKUP_PATH_COMPONENTS
         or any(part in {"", ".", ".."} for part in path.parts)
         or any(
             len(part) >= 2 and part[0].isascii() and part[0].isalpha() and part[1] == ":"

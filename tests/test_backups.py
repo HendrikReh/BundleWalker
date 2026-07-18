@@ -12,8 +12,10 @@ import os
 import shutil
 import stat
 import struct
+import sys
 import zipfile
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -1418,7 +1420,7 @@ def test_restore_second_review_rejects_preinserted_wiki_directory(
     assert not target.exists()
 
 
-def test_restore_second_review_rejects_nested_directory_substitution_before_open(
+def test_restore_second_review_rejects_nested_directory_substitution_before_identity_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1427,23 +1429,32 @@ def test_restore_second_review_rejects_nested_directory_substitution_before_open
     create_workspace_backup(workspace, archive)
     target = tmp_path / "target"
     original_open = os.open
+    original_stat = os.stat
     substituted = False
     actor_identity: tuple[int, int] | None = None
     actor_mutations: list[str] = []
 
-    def substitute_topics_before_open(
+    def track_actor_creation(
         path: Any,
         flags: int,
         mode: int = 0o777,
         *,
         dir_fd: int | None = None,
     ) -> int:
-        nonlocal actor_identity, substituted
-        name = cast(str | bytes | int, path)
         if dir_fd is not None and actor_identity is not None:
             parent_state = os.fstat(dir_fd)
             if (parent_state.st_dev, parent_state.st_ino) == actor_identity and flags & os.O_CREAT:
                 actor_mutations.append(f"open:{os.fspath(path)}")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def substitute_topics_before_identity_validation(
+        path: Any,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal actor_identity, substituted
+        name = cast(str | bytes | int, path)
         if not substituted and name == "topics" and dir_fd is not None:
             substituted = True
             os.rename(
@@ -1471,9 +1482,14 @@ def test_restore_second_review_rejects_nested_directory_substitution_before_open
                     sentinel.write(b"actor")
             finally:
                 os.close(actor_descriptor)
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-    monkeypatch.setattr(backups_module.os, "open", substitute_topics_before_open)
+    monkeypatch.setattr(backups_module.os, "open", track_actor_creation)
+    monkeypatch.setattr(
+        backups_module.os,
+        "stat",
+        substitute_topics_before_identity_validation,
+    )
 
     with pytest.raises(BackupVerificationError):
         restore_workspace_backup(archive, target)
@@ -1606,6 +1622,294 @@ def test_restore_second_review_wraps_embedded_nul_target_as_target_error(
         restore_workspace_backup(archive, target)
 
 
+def test_restore_final_review_does_not_adopt_child_replaced_at_identity_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_open = os.open
+    original_stat = os.stat
+    actor_identity: tuple[int, int] | None = None
+    actor_mutations: list[str] = []
+    replaced = False
+
+    def track_actor_file_creation(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is not None and actor_identity is not None:
+            parent_state = os.fstat(dir_fd)
+            if (parent_state.st_dev, parent_state.st_ino) == actor_identity and flags & os.O_CREAT:
+                actor_mutations.append(f"open:{os.fspath(path)}")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def replace_topics_at_identity_capture(
+        path: Any,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal actor_identity, replaced
+        name = cast(str | bytes | int, path)
+        if not replaced and name == "topics" and dir_fd is not None:
+            replaced = True
+            os.rename(
+                "topics",
+                "topics-owned-parked",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir("topics", mode=0o700, dir_fd=dir_fd)
+            actor_descriptor = original_open(
+                "topics",
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                dir_fd=dir_fd,
+            )
+            try:
+                actor_state = os.fstat(actor_descriptor)
+                actor_identity = (actor_state.st_dev, actor_state.st_ino)
+                sentinel_descriptor = original_open(
+                    "actor-capture.txt",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=actor_descriptor,
+                )
+                with os.fdopen(sentinel_descriptor, "wb") as sentinel:
+                    sentinel.write(b"actor")
+            finally:
+                os.close(actor_descriptor)
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(backups_module.os, "open", track_actor_file_creation)
+    monkeypatch.setattr(backups_module.os, "stat", replace_topics_at_identity_capture)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert replaced is True
+    assert actor_mutations == []
+    actor_sentinels = list(tmp_path.rglob("actor-capture.txt"))
+    assert len(actor_sentinels) == 1
+    assert actor_sentinels[0].read_bytes() == b"actor"
+    assert sorted(path.name for path in actor_sentinels[0].parent.iterdir()) == [
+        "actor-capture.txt"
+    ]
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("failure_point", ["fstat", "path_stat"])
+def test_restore_final_review_closes_child_descriptor_on_inspection_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "child").mkdir()
+    root_descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    original_dup = os.dup
+    original_fstat = os.fstat
+    original_open = os.open
+    original_stat = os.stat
+    child_descriptors: list[int] = []
+    duplicate_descriptors: list[int] = []
+    open_restore_directory = vars(backups_module)["_open_restore_directory"]
+
+    def track_duplicate(descriptor: int) -> int:
+        duplicate = original_dup(descriptor)
+        duplicate_descriptors.append(duplicate)
+        return duplicate
+
+    def track_child_open(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if path == "child":
+            child_descriptors.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(backups_module.os, "dup", track_duplicate)
+    monkeypatch.setattr(backups_module.os, "open", track_child_open)
+    if failure_point == "fstat":
+
+        def fail_child_fstat(descriptor: int) -> os.stat_result:
+            if descriptor in child_descriptors:
+                raise OSError(errno.EIO, "injected child fstat failure")
+            return original_fstat(descriptor)
+
+        monkeypatch.setattr(backups_module.os, "fstat", fail_child_fstat)
+    else:
+
+        def fail_child_path_stat(
+            path: Any,
+            *,
+            dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> os.stat_result:
+            if path == "child" and dir_fd is not None:
+                raise OSError(errno.EIO, "injected child path stat failure")
+            return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(backups_module.os, "stat", fail_child_path_stat)
+
+    try:
+        for _attempt in range(3):
+            with pytest.raises(OSError, match="injected child"):
+                open_restore_directory(root_descriptor, ("child",), create=False)
+
+        assert child_descriptors
+        assert duplicate_descriptors
+        for descriptor in (*child_descriptors, *duplicate_descriptors):
+            with pytest.raises(OSError) as raised:
+                original_fstat(descriptor)
+            assert raised.value.errno == errno.EBADF
+        assert stat.S_ISDIR(original_fstat(root_descriptor).st_mode)
+    finally:
+        for descriptor in {*child_descriptors, *duplicate_descriptors}:
+            with suppress(OSError):
+                os.close(descriptor)
+        os.close(root_descriptor)
+
+
+def test_restore_final_review_accepts_manifest_at_component_depth_limit(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "depth-limit.zip"
+    deep_path = _write_depth_archive(archive, component_depth=128)
+    target = tmp_path / "target"
+
+    verified = verify_backup_archive(archive)
+    restored = restore_workspace_backup(archive, target)
+
+    assert any(record.path == deep_path for record in verified.manifest.files)
+    assert (restored.workspace.root / deep_path).read_bytes() == b"deep"
+
+
+def test_restore_final_review_rejects_over_depth_manifest_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "over-depth.zip"
+    _write_depth_archive(archive, component_depth=129)
+    target = tmp_path / "target"
+    staging_attempted = False
+
+    def reject_staging(*_args: object, **_kwargs: object) -> None:
+        nonlocal staging_attempted
+        staging_attempted = True
+        raise AssertionError("over-depth archive reached staging")
+
+    monkeypatch.setattr(backups_module, "_create_restore_staging", reject_staging)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert staging_attempted is False
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_final_review_depth_limit_cleanup_is_iterative_and_preserves_primary_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "depth-cleanup.zip"
+    _write_depth_archive(archive, component_depth=128)
+    target = tmp_path / "target"
+    original_recursion_limit = sys.getrecursionlimit()
+
+    def fail_discovery_under_low_recursion_limit(_path: Path) -> Workspace:
+        sys.setrecursionlimit(80)
+        raise BackupVerificationError("primary depth cleanup failure")
+
+    monkeypatch.setattr(
+        backups_module, "discover_workspace", fail_discovery_under_low_recursion_limit
+    )
+
+    try:
+        with pytest.raises(BackupVerificationError, match="primary depth cleanup failure"):
+            restore_workspace_backup(archive, target)
+    finally:
+        sys.setrecursionlimit(original_recursion_limit)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+@pytest.mark.parametrize("failure_point", ["open", "fstat"])
+def test_restore_final_review_cleans_partial_staging_after_workspace_capture_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+    original_fstat = os.fstat
+    original_open = os.open
+    staging_descriptors: list[int] = []
+    workspace_descriptor: int | None = None
+    failed = False
+
+    def fail_workspace_open_or_track(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal failed, workspace_descriptor
+        name = cast(str | bytes | int, path)
+        if failure_point == "open" and not failed and name == "workspace" and dir_fd is not None:
+            failed = True
+            raise OSError(errno.EIO, "injected workspace open failure")
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if isinstance(name, str) and (name.startswith(".target-restore-") or name == "workspace"):
+            staging_descriptors.append(descriptor)
+        if name == "workspace":
+            workspace_descriptor = descriptor
+        return descriptor
+
+    def fail_workspace_fstat_once(descriptor: int) -> os.stat_result:
+        nonlocal failed
+        if (
+            failure_point == "fstat"
+            and not failed
+            and workspace_descriptor is not None
+            and descriptor == workspace_descriptor
+        ):
+            failed = True
+            raise OSError(errno.EIO, "injected workspace fstat failure")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(backups_module.os, "open", fail_workspace_open_or_track)
+    monkeypatch.setattr(backups_module.os, "fstat", fail_workspace_fstat_once)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert failed is True
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    _assert_no_restore_temporary(target)
+    for descriptor in staging_descriptors:
+        with pytest.raises(OSError) as raised:
+            original_fstat(descriptor)
+        assert raised.value.errno == errno.EBADF
+
+
 def _valid_payload() -> dict[str, bytes]:
     return {
         "bundlewalker.toml": DEFAULT_CONFIG_TEXT.encode(),
@@ -1665,6 +1969,45 @@ def _write_archive(
             archive.writestr(f"workspace/{name}", content)
         for name, content in extra_members:
             archive.writestr(name, content)
+
+
+def _write_depth_archive(path: Path, *, component_depth: int) -> str:
+    if component_depth < 2:
+        raise ValueError("depth must include raw root and a filename")
+    deep_path = PurePosixPath(
+        "raw",
+        *("d" for _index in range(component_depth - 2)),
+        "deep.md",
+    )
+    payload = {**_valid_payload(), deep_path.as_posix(): b"deep"}
+    directories = {
+        "raw",
+        "wiki",
+        "wiki/sources",
+        "wiki/topics",
+        "wiki/entities",
+        "wiki/syntheses",
+    }
+    directories.update(
+        parent.as_posix() for parent in deep_path.parents if parent != PurePosixPath(".")
+    )
+    sorted_directories = sorted(directories)
+    manifest = {
+        "archive_format": ARCHIVE_FORMAT,
+        "schema_version": ARCHIVE_SCHEMA_VERSION,
+        "created_at": CREATED_AT.isoformat(),
+        "bundlewalker_version": "0.4.0a1",
+        "workspace_format_version": 1,
+        "directories": sorted_directories,
+        "files": _file_records(payload),
+    }
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        archive.writestr(MANIFEST_NAME, json.dumps(manifest, sort_keys=True).encode())
+        for directory in sorted_directories:
+            archive.writestr(f"{backups_module.PAYLOAD_PREFIX}{directory}/", b"")
+        for name, content in sorted(payload.items()):
+            archive.writestr(f"{backups_module.PAYLOAD_PREFIX}{name}", content)
+    return deep_path.as_posix()
 
 
 def _file_records(payload: dict[str, bytes] | None = None) -> list[dict[str, object]]:
