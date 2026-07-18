@@ -34,6 +34,30 @@ git diff --check
 The commands must all exit zero. The `dist/` directory must contain exactly one
 `bundlewalker-*.whl` and one `bundlewalker-*.tar.gz` for the declared version.
 
+## Workspace lifecycle evidence
+
+Before publishing any prerelease or release that can read BundleWalker workspaces, attach or link
+fresh evidence for the authoritative [workspace compatibility policy](../workspace-compatibility.md):
+
+- [ ] Static historical `v1`, `v2`, and `v3` workspace fixtures pass their documented
+  compatibility, backup, restore, and supported-read behavior without regeneration by current
+  initialization code.
+- [ ] A current verified backup and its separate-target restore both print `SHA-256`; the recorded
+  archive digests match.
+- [ ] A rollback rehearsal restores a verified pre-upgrade backup to a separate new or empty
+  target. It does not overwrite, rename, or remove the original workspace.
+- [ ] The restored rollback target reports `current` through `bundlewalker workspace status`, and
+  offline deterministic `bundlewalker lint` completes without errors from inside that target.
+- [ ] Abrupt-termination recovery evidence passes for prepared, accepted, raw-persisted, swapping,
+  and new-live transaction phases, including idempotent second recovery.
+- [ ] Required CI is green on Ubuntu 24.04 and macOS 15 with both Python 3.13 and 3.14. Windows
+  2025 jobs for Python 3.13 and 3.14 remain experimental and `continue-on-error`; they provide
+  visibility and are not evidence of supported Windows behavior.
+
+Production currently registers no migration and format `1` upgrade is a no-op. Synthetic migration
+tests prove backup-before-mutation and rollback orchestration without claiming a real format
+migration.
+
 ## TestPyPI
 
 TestPyPI publishing uses the GitHub workflow `publish-testpypi.yml`, GitHub environment

@@ -19,8 +19,14 @@ from bundlewalker.backups import (
     restore_workspace_backup,
     verify_backup_archive,
 )
-from bundlewalker.compatibility import MigrationStep, read_workspace_format_version
+from bundlewalker.compatibility import (
+    CompatibilityStatus,
+    MigrationStep,
+    inspect_workspace,
+    read_workspace_format_version,
+)
 from bundlewalker.errors import MigrationExecutionError, MigrationUnavailableError
+from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.transactions import QuiescentWorkspace, quiescent_workspace
 from bundlewalker.upgrades import upgrade_workspace
 from bundlewalker.workspace import Workspace, initialize_workspace
@@ -105,6 +111,15 @@ def test_failed_migration_reports_restorable_preupgrade_backup(tmp_path: Path) -
     assert (workspace.root / "bundlewalker.toml").read_bytes() == b"version = 2\n"
     restored = restore_workspace_backup(backup.archive_path, tmp_path / "rollback")
     assert _tree_bytes(restored.workspace.root) == original
+    compatibility = inspect_workspace(restored.workspace.root)
+    assert compatibility.status is CompatibilityStatus.CURRENT
+    assert compatibility.readable is True
+    assert compatibility.writable is True
+    deterministic_findings = lint_bundle(
+        restored.workspace.wiki_dir,
+        restored.workspace.root,
+    )
+    assert not has_errors(deterministic_findings)
 
 
 def test_incomplete_path_refuses_before_backup(tmp_path: Path) -> None:

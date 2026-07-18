@@ -207,3 +207,32 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     verify_commands = _run_commands(workflow, "verify")
     assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_workspace_lifecycle_policy_and_commands_are_published() -> None:
+    policy = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    tutorial = (PROJECT_ROOT / "docs/tutorial.md").read_text(encoding="utf-8")
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+
+    for command in (
+        "bundlewalker workspace status",
+        "bundlewalker workspace backup",
+        "bundlewalker workspace restore",
+        "bundlewalker workspace upgrade",
+    ):
+        assert command in policy
+        assert command in user_guide
+    for warning in (
+        "unencrypted",
+        "raw source",
+        ".bundlewalker",
+        "pending review",
+        "new or empty",
+    ):
+        assert warning in policy.lower()
+    assert "docs/workspace-compatibility.md" in readme
+    assert "workspace backup" in tutorial.lower()
+    assert "pre-upgrade backup" in releases.lower()
+    assert "sha-256" in releases.lower()

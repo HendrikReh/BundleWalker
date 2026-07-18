@@ -126,6 +126,23 @@ Run these from a workspace with `PROJECT_ROOT` pointing to the BundleWalker chec
 | Run offline checks | `uv run --project "$PROJECT_ROOT" bundlewalker lint` | [Maintain the bundle](docs/user-guide.md#maintain-and-recover-the-bundle) |
 | Add semantic advisories | `uv run --project "$PROJECT_ROOT" bundlewalker lint --semantic` | [Semantic lint](docs/user-guide.md#maintain-and-recover-the-bundle) |
 
+## Workspace lifecycle
+
+Inspect compatibility before copying or changing a workspace, create a verified backup outside it,
+restore only to a separate target, and request upgrades explicitly:
+
+```text
+bundlewalker workspace status [PATH]
+bundlewalker workspace backup OUTPUT [--workspace PATH]
+bundlewalker workspace restore ARCHIVE TARGET
+bundlewalker workspace upgrade [PATH] [--backup-dir DIRECTORY]
+```
+
+Backups may contain exact raw source bytes. Read the authoritative
+[workspace compatibility and portable-backup policy](docs/workspace-compatibility.md) before
+backup, restore, upgrade, or rollback; the [user guide](docs/user-guide.md#back-up-restore-upgrade-and-roll-back)
+provides the task procedures.
+
 ## Current scope
 
 Version 3 ingests one regular UTF-8 `.md` or `.txt` file per command, with a default limit of
@@ -184,6 +201,8 @@ Each document has one primary job:
   save, newer evidence, refresh, and final health checks.
 - The [User Guide](docs/user-guide.md) is authoritative for detailed user tasks, CLI behavior,
   provider setup, recovery, limits, and troubleshooting.
+- The [Workspace Compatibility Policy](docs/workspace-compatibility.md) is authoritative for
+  supported formats, archive scope, portability, explicit upgrades, and rollback boundaries.
 - The [Hermes MCP Setup Guide](docs/hermes-mcp-setup.md) connects a Hermes Agent installation to
   one local BundleWalker workspace with a minimal, review-first tool surface.
 - The [Changelog](CHANGELOG.md) records the public capability changes in each tagged release.
