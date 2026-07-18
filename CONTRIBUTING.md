@@ -73,6 +73,9 @@ uv sync --locked
 uv run bundlewalker --help
 ```
 
+Maintainers must follow the [Release Procedure](docs/maintainers/releases.md); contributors must
+not create tags or publish package artifacts from feature branches.
+
 ## Change workflow
 
 Work on a focused `codex/` branch or a branch following the project's normal naming convention.

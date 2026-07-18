@@ -192,6 +192,8 @@ Each document has one primary job:
   guidance.
 - The [Support Policy](SUPPORT.md) defines supported platforms, issue reporting, and the
   best-effort maintenance boundary.
+- The [Release Procedure](docs/maintainers/releases.md) defines maintainer-only build,
+  TestPyPI, versioning, and failure handling.
 
 ## Development
 

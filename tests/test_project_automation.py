@@ -168,3 +168,26 @@ def test_codeql_scans_python_on_changes_and_schedule() -> None:
     assert workflow["on"]["schedule"] == [{"cron": "23 4 * * 1"}]
     assert workflow["jobs"]["analyze"]["strategy"]["matrix"] == {"language": ["python"]}
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> None:
+    workflow = _yaml(".github/workflows/publish-testpypi.yml")
+
+    workflow_dispatch = workflow["on"]["workflow_dispatch"]
+    assert workflow_dispatch["inputs"]["version"]["required"] == "true"
+    assert workflow_dispatch["inputs"]["version"]["type"] == "string"
+    assert workflow["permissions"] == {"contents": "read"}
+    assert "uv build --clear --no-sources" in _run_commands(workflow, "build")
+    assert "uv run twine check dist/*" in _run_commands(workflow, "build")
+
+    publish = workflow["jobs"]["publish"]
+    assert publish["environment"]["name"] == "testpypi"
+    assert publish["permissions"] == {"id-token": "write"}
+    publish_steps = _steps(workflow, "publish")
+    assert publish_steps[-1]["uses"].startswith(
+        "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b"
+    )
+    assert publish_steps[-1]["with"]["repository-url"] == "https://test.pypi.org/legacy/"
+    verify_commands = _run_commands(workflow, "verify")
+    assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
+    _assert_actions_are_sha_pinned(workflow)
