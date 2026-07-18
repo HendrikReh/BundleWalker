@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import io
@@ -270,14 +271,14 @@ def test_restore_preserves_existing_empty_target_when_rmdir_fails(
     create_workspace_backup(workspace, archive)
     target = tmp_path / "target"
     target.mkdir()
-    original_rmdir = Path.rmdir
+    original_rmdir = os.rmdir
 
-    def fail_target_rmdir(path: Path) -> None:
-        if path == target:
+    def fail_target_rmdir(path: Any, *, dir_fd: int | None = None) -> None:
+        if os.fspath(path) == target.name and dir_fd is not None:
             raise OSError("injected target removal failure")
-        original_rmdir(path)
+        original_rmdir(path, dir_fd=dir_fd)
 
-    monkeypatch.setattr(Path, "rmdir", fail_target_rmdir)
+    monkeypatch.setattr(backups_module.os, "rmdir", fail_target_rmdir)
 
     with pytest.raises(BackupError):
         restore_workspace_backup(archive, target)
@@ -320,21 +321,25 @@ def test_restore_refuses_target_populated_after_initial_validation(
     target = tmp_path / "target"
     target.mkdir()
     original_require_empty = cast(
-        Callable[[Path], None],
-        vars(backups_module)["_require_empty_target"],
+        Callable[[int, str, Any], None],
+        vars(backups_module)["_require_original_empty_target"],
     )
     inspections = 0
 
-    def populate_before_second_inspection(path: Path) -> None:
+    def populate_before_second_inspection(
+        parent_descriptor: int,
+        name: str,
+        existing_target: Any,
+    ) -> None:
         nonlocal inspections
         inspections += 1
         if inspections == 2:
             (target / "keep.txt").write_text("competitor", encoding="utf-8")
-        original_require_empty(path)
+        original_require_empty(parent_descriptor, name, existing_target)
 
     monkeypatch.setattr(
         backups_module,
-        "_require_empty_target",
+        "_require_original_empty_target",
         populate_before_second_inspection,
     )
 
@@ -354,13 +359,18 @@ def test_restore_does_not_replace_concurrent_empty_target(
     create_workspace_backup(workspace, archive)
     target = tmp_path / "target"
     original_rename = cast(
-        Callable[[str, str, int], None],
+        Callable[[str, str, int, int], None],
         vars(backups_module)["_rename_noreplace"],
     )
 
-    def race_empty_target(source: str, destination: str, directory: int) -> None:
+    def race_empty_target(
+        source: str,
+        destination: str,
+        source_directory: int,
+        destination_directory: int,
+    ) -> None:
         target.mkdir()
-        original_rename(source, destination, directory)
+        original_rename(source, destination, source_directory, destination_directory)
 
     monkeypatch.setattr(backups_module, "_rename_noreplace", race_empty_target)
 
@@ -442,7 +452,7 @@ def test_restore_cleanup_never_deletes_replacement_staging_inode(
     target = tmp_path / "target"
     replacement: Path | None = None
 
-    def replace_staging(root: Path, _manifest: BackupManifest) -> None:
+    def replace_staging(root: Path) -> Workspace:
         nonlocal replacement
         parked = tmp_path / "parked-owned-staging"
         root.rename(parked)
@@ -451,7 +461,7 @@ def test_restore_cleanup_never_deletes_replacement_staging_inode(
         (root / "keep.txt").write_text("competitor", encoding="utf-8")
         raise BackupVerificationError("injected replacement race")
 
-    monkeypatch.setattr(backups_module, "_verify_extracted_tree", replace_staging)
+    monkeypatch.setattr(backups_module, "discover_workspace", replace_staging)
 
     with pytest.raises(BackupVerificationError):
         restore_workspace_backup(archive, target)
@@ -560,12 +570,12 @@ def test_restore_detects_parent_replacement_after_staging(
     outside.mkdir()
     target = parent / "target"
     original_verify_tree = cast(
-        Callable[[Path, BackupManifest], None],
+        Callable[[int, BackupManifest], None],
         vars(backups_module)["_verify_extracted_tree"],
     )
 
     def replace_parent_after_tree_verification(
-        root: Path,
+        root: int,
         manifest: BackupManifest,
     ) -> None:
         original_verify_tree(root, manifest)
@@ -683,15 +693,24 @@ def test_restore_preserves_actor_replacement_after_publication(
     target = tmp_path / "target"
     parked = tmp_path / "parked-published-restore"
     original_rename = cast(
-        Callable[[str, str, int], None],
+        Callable[[str, str, int, int], None],
         vars(backups_module)["_rename_noreplace"],
     )
+    replaced = False
 
-    def replace_after_publication(source: str, destination: str, directory: int) -> None:
-        original_rename(source, destination, directory)
-        target.rename(parked)
-        target.mkdir()
-        (target / "keep.txt").write_text("competitor", encoding="utf-8")
+    def replace_after_publication(
+        source: str,
+        destination: str,
+        source_directory: int,
+        destination_directory: int,
+    ) -> None:
+        nonlocal replaced
+        original_rename(source, destination, source_directory, destination_directory)
+        if not replaced and source == "workspace":
+            replaced = True
+            target.rename(parked)
+            target.mkdir()
+            (target / "keep.txt").write_text("competitor", encoding="utf-8")
 
     monkeypatch.setattr(
         backups_module,
@@ -702,7 +721,10 @@ def test_restore_preserves_actor_replacement_after_publication(
     with pytest.raises(BackupError):
         restore_workspace_backup(archive, target)
 
-    assert (target / "keep.txt").read_text(encoding="utf-8") == "competitor"
+    actor_files = list(tmp_path.rglob("keep.txt"))
+    assert len(actor_files) == 1
+    assert actor_files[0].read_text(encoding="utf-8") == "competitor"
+    assert not target.exists()
     assert not parked.exists()
 
 
@@ -720,16 +742,17 @@ def test_restore_detects_parent_replacement_after_publication(
     outside.mkdir()
     target = parent / "target"
     original_rename = cast(
-        Callable[[str, str, int], None],
+        Callable[[str, str, int, int], None],
         vars(backups_module)["_rename_noreplace"],
     )
 
     def replace_parent_after_publication(
         source: str,
         destination: str,
-        directory: int,
+        source_directory: int,
+        destination_directory: int,
     ) -> None:
-        original_rename(source, destination, directory)
+        original_rename(source, destination, source_directory, destination_directory)
         parent.rename(parked)
         parent.symlink_to(outside, target_is_directory=True)
 
@@ -760,16 +783,17 @@ def test_restore_rejects_archive_replacement_during_publication(
     )
     target = tmp_path / "target"
     original_rename = cast(
-        Callable[[str, str, int], None],
+        Callable[[str, str, int, int], None],
         vars(backups_module)["_rename_noreplace"],
     )
 
     def replace_archive_after_publication(
         source: str,
         destination: str,
-        directory: int,
+        source_directory: int,
+        destination_directory: int,
     ) -> None:
-        original_rename(source, destination, directory)
+        original_rename(source, destination, source_directory, destination_directory)
         os.replace(replacement, archive)
 
     monkeypatch.setattr(
@@ -844,6 +868,484 @@ def test_restore_creates_private_files_and_directories(tmp_path: Path) -> None:
     assert stat.S_IMODE(restored.workspace.root.stat().st_mode) & 0o077 == 0
     for path in restored.workspace.root.rglob("*"):
         assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+
+
+def test_restore_review_replacement_root_receives_no_payload_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    parked = tmp_path / "owned-stage-parked"
+    actor_root: Path | None = None
+    original_create = cast(
+        Callable[[int, str], Any],
+        vars(backups_module)["_create_restore_staging"],
+    )
+
+    def create_then_replace(
+        parent_descriptor: int,
+        target_name: str,
+    ) -> Any:
+        nonlocal actor_root
+        staging = original_create(parent_descriptor, target_name)
+        container_name = cast(str, staging.container_name)
+        os.rename(
+            container_name,
+            parked.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        os.mkdir(container_name, mode=0o700, dir_fd=parent_descriptor)
+        actor = tmp_path / container_name
+        actor_root = actor
+        (actor / "actor.txt").write_text("actor", encoding="utf-8")
+        return staging
+
+    monkeypatch.setattr(backups_module, "_create_restore_staging", create_then_replace)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert actor_root is not None
+    assert sorted(path.name for path in actor_root.iterdir()) == ["actor.txt"]
+    assert (actor_root / "actor.txt").read_text(encoding="utf-8") == "actor"
+    assert not parked.exists()
+    assert not target.exists()
+
+
+def test_restore_review_replaced_parent_receives_no_payload_before_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    parent = tmp_path / "destination"
+    parent.mkdir()
+    parked = tmp_path / "destination-parked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = parent / "target"
+    actor_root: Path | None = None
+    original_create = cast(
+        Callable[[int, str], Any],
+        vars(backups_module)["_create_restore_staging"],
+    )
+
+    def create_then_replace_parent(
+        parent_descriptor: int,
+        target_name: str,
+    ) -> Any:
+        nonlocal actor_root
+        staging = original_create(parent_descriptor, target_name)
+        container_name = cast(str, staging.container_name)
+        parent.rename(parked)
+        parent.symlink_to(outside, target_is_directory=True)
+        actor = outside / container_name
+        actor_root = actor
+        actor.mkdir()
+        (actor / "actor.txt").write_text("actor", encoding="utf-8")
+        return staging
+
+    monkeypatch.setattr(
+        backups_module,
+        "_create_restore_staging",
+        create_then_replace_parent,
+    )
+
+    with pytest.raises((BackupError, RestoreTargetError)):
+        restore_workspace_backup(archive, target)
+
+    assert actor_root is not None
+    assert sorted(path.name for path in actor_root.iterdir()) == ["actor.txt"]
+    assert (actor_root / "actor.txt").read_text(encoding="utf-8") == "actor"
+    assert not list(parked.glob(".target-restore-*"))
+
+
+def test_restore_review_revalidates_staged_bytes_after_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_discover = backups_module.discover_workspace
+
+    def mutate_after_discovery(path: Path) -> Workspace:
+        discovered = original_discover(path)
+        (path / "conventions.md").write_bytes(b"mutated after verification")
+        return discovered
+
+    monkeypatch.setattr(backups_module, "discover_workspace", mutate_after_discovery)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+@pytest.mark.parametrize("existing_empty", [False, True])
+def test_restore_review_recovers_actor_replacement_moved_by_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_empty: bool,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    if existing_empty:
+        target.mkdir()
+    original_rename = cast(
+        Callable[[str, str, int, int], None],
+        vars(backups_module)["_rename_noreplace"],
+    )
+    replaced = False
+
+    def replace_source_at_rename(
+        source: str,
+        destination: str,
+        source_directory: int,
+        destination_directory: int,
+    ) -> None:
+        nonlocal replaced
+        if not replaced and source == "workspace":
+            replaced = True
+            os.rename(
+                source,
+                "owned-workspace-parked",
+                src_dir_fd=source_directory,
+                dst_dir_fd=source_directory,
+            )
+            os.mkdir(source, mode=0o700, dir_fd=source_directory)
+            actor_descriptor = os.open(
+                source,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                dir_fd=source_directory,
+            )
+            try:
+                file_descriptor = os.open(
+                    "actor-rename.txt",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=actor_descriptor,
+                )
+                with os.fdopen(file_descriptor, "wb") as actor_file:
+                    actor_file.write(b"actor-at-rename")
+            finally:
+                os.close(actor_descriptor)
+        original_rename(
+            source,
+            destination,
+            source_directory,
+            destination_directory,
+        )
+
+    monkeypatch.setattr(backups_module, "_rename_noreplace", replace_source_at_rename)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    if existing_empty:
+        assert target.is_dir()
+        assert list(target.iterdir()) == []
+    else:
+        assert not target.exists()
+    actor_files = list(tmp_path.rglob("actor-rename.txt"))
+    assert len(actor_files) == 1
+    assert actor_files[0].read_bytes() == b"actor-at-rename"
+    assert not list(tmp_path.rglob("owned-workspace-parked"))
+
+
+def test_restore_review_removes_empty_target_descriptor_relatively(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+
+    def reject_absolute_rmdir(_path: Path) -> None:
+        raise AssertionError("restore must remove the target relative to its held parent")
+
+    monkeypatch.setattr(Path, "rmdir", reject_absolute_rmdir)
+
+    restored = restore_workspace_backup(archive, target)
+
+    assert restored.workspace.root == target
+    assert (target / "bundlewalker.toml").is_file()
+
+
+def test_restore_review_parent_replacement_during_target_removal_preserves_actor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    parent = tmp_path / "destination"
+    parent.mkdir()
+    parked = tmp_path / "destination-parked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = parent / "target"
+    target.mkdir()
+    actor_target = outside / "target"
+    actor_target.mkdir()
+    original_rmdir = os.rmdir
+    replaced = False
+
+    def replace_parent_during_rmdir(
+        path: Any,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        name = cast(str | bytes, os.fspath(path))
+        if not replaced and (name == target or name == target.name):
+            replaced = True
+            parent.rename(parked)
+            parent.symlink_to(outside, target_is_directory=True)
+        original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(backups_module.os, "rmdir", replace_parent_during_rmdir)
+
+    with pytest.raises((BackupError, RestoreTargetError)):
+        restore_workspace_backup(archive, target)
+
+    assert replaced is True
+    assert actor_target.is_dir()
+    assert list(actor_target.iterdir()) == []
+    assert not list(parked.glob(".target-restore-*"))
+
+
+def test_restore_review_cleanup_never_uses_path_recursive_rmtree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+
+    def fail_tree_verification(*_args: object, **_kwargs: object) -> None:
+        raise BackupVerificationError("injected cleanup trigger")
+
+    def reject_rmtree(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("restore cleanup must not recurse through a pathname")
+
+    monkeypatch.setattr(backups_module, "_verify_extracted_tree", fail_tree_verification)
+    monkeypatch.setattr(backups_module.shutil, "rmtree", reject_rmtree)
+
+    with pytest.raises(BackupVerificationError, match="cleanup trigger"):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_review_cleanup_preserves_substitution_at_final_root_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    parked = tmp_path / "cleanup-owned-parked"
+
+    def fail_tree_verification(*_args: object, **_kwargs: object) -> None:
+        raise BackupVerificationError("injected cleanup trigger")
+
+    original_rmdir = os.rmdir
+    substituted = False
+
+    def substitute_at_root_rmdir(
+        path: Any,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal substituted
+        name = cast(str | bytes, os.fspath(path))
+        if (
+            not substituted
+            and dir_fd is not None
+            and isinstance(name, str)
+            and name.startswith(".target-restore-")
+        ):
+            substituted = True
+            os.rename(
+                name,
+                parked.name,
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir(name, mode=0o700, dir_fd=dir_fd)
+            actor_root = tmp_path / name
+            (actor_root / "actor-cleanup.txt").write_text("actor", encoding="utf-8")
+        original_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(backups_module, "_verify_extracted_tree", fail_tree_verification)
+    monkeypatch.setattr(backups_module.os, "rmdir", substitute_at_root_rmdir)
+
+    with pytest.raises(BackupVerificationError, match="cleanup trigger"):
+        restore_workspace_backup(archive, target)
+
+    assert substituted is True
+    actor_files = list(tmp_path.rglob("actor-cleanup.txt"))
+    assert len(actor_files) == 1
+    assert actor_files[0].read_text(encoding="utf-8") == "actor"
+    assert not parked.exists()
+    assert not target.exists()
+
+
+def test_restore_review_detects_in_place_mutation_during_final_archive_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "source.zip"
+    _write_archive(archive)
+    target = tmp_path / "target"
+    original_verify = backups_module.verify_backup_archive
+    original_sha256 = cast(
+        Callable[[IO[bytes]], str],
+        vars(backups_module)["_file_sha256"],
+    )
+
+    def verify_then_arm_hash(path: Path) -> VerifiedBackup:
+        verified = original_verify(path)
+        hash_calls = 0
+        archive_identity = (
+            verified.archive_path.stat().st_dev,
+            verified.archive_path.stat().st_ino,
+        )
+
+        def mutate_during_final_hash(source: IO[bytes]) -> str:
+            nonlocal hash_calls
+            digest = original_sha256(source)
+            metadata = os.fstat(source.fileno())
+            if (metadata.st_dev, metadata.st_ino) != archive_identity:
+                return digest
+            hash_calls += 1
+            if hash_calls == 3:
+                with archive.open("ab") as destination:
+                    destination.write(b"mutated-during-final-hash")
+                    destination.flush()
+                    os.fsync(destination.fileno())
+            return digest
+
+        monkeypatch.setattr(backups_module, "_file_sha256", mutate_during_final_hash)
+        return verified
+
+    monkeypatch.setattr(backups_module, "verify_backup_archive", verify_then_arm_hash)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_review_propagates_directory_fsync_eio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_fsync = os.fsync
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EIO, "injected directory fsync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(backups_module.os, "fsync", fail_directory_fsync)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_review_wraps_expanduser_failure_as_target_error(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "unused.zip"
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, Path("~bundlewalker-user-that-does-not-exist/target"))
+
+
+def test_restore_review_unsupported_publication_platform_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_parent = tmp_path / "source-parent"
+    destination_parent = tmp_path / "destination-parent"
+    source_parent.mkdir()
+    destination_parent.mkdir()
+    (source_parent / "workspace").mkdir()
+    source_descriptor = os.open(source_parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    destination_descriptor = os.open(
+        destination_parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    rename_noreplace = cast(
+        Callable[[str, str, int, int], None],
+        vars(backups_module)["_rename_noreplace"],
+    )
+    monkeypatch.setattr(backups_module.sys, "platform", "unsupported-test-platform")
+
+    try:
+        with pytest.raises(OSError) as raised:
+            rename_noreplace(
+                "workspace",
+                "target",
+                source_descriptor,
+                destination_descriptor,
+            )
+    finally:
+        os.close(destination_descriptor)
+        os.close(source_descriptor)
+
+    assert raised.value.errno == errno.ENOSYS
+    assert (source_parent / "workspace").is_dir()
+    assert not (destination_parent / "target").exists()
+
+
+def test_restore_review_recreates_empty_target_with_original_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir(mode=0o750)
+    target.chmod(0o750)
+
+    def fail_publication(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(backups_module, "_rename_noreplace", fail_publication)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert stat.S_IMODE(target.stat().st_mode) == 0o750
+    _assert_no_restore_temporary(target)
 
 
 def _valid_payload() -> dict[str, bytes]:
