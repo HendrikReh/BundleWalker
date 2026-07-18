@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from bundlewalker.backups import create_workspace_backup, verify_backup_archive
 from bundlewalker.compatibility import CompatibilityStatus, inspect_workspace
 from bundlewalker.errors import ConfigurationError
 from bundlewalker.okf.repository import OkfRepository
@@ -34,6 +35,21 @@ def test_released_clean_workspace_remains_current_and_readable(
     assert compatibility.workspace_format_version == 1
     assert "sources/index" not in documents
     assert (workspace.wiki_dir / "index.md").is_file()
+
+
+@pytest.mark.parametrize("release", ["v1", "v2", "v3"])
+def test_released_clean_workspace_creates_a_current_verified_backup(
+    tmp_path: Path,
+    release: str,
+) -> None:
+    root = tmp_path / release
+    shutil.copytree(FIXTURES / f"{release}-clean", root)
+    workspace = discover_workspace(root)
+
+    verified = create_workspace_backup(workspace, tmp_path / f"{release}.zip")
+
+    assert verified.manifest.workspace_format_version == 1
+    assert verify_backup_archive(verified.archive_path) == verified
 
 
 def test_v1_interrupted_schema1_transaction_recovers_exact_base(tmp_path: Path) -> None:

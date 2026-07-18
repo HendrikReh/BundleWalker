@@ -3,17 +3,20 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
 import os
+import shutil
 import stat
 import struct
 import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import IO, Literal, cast
+from types import SimpleNamespace
+from typing import IO, Any, Literal, cast
 
 import pytest
 
@@ -26,12 +29,99 @@ from bundlewalker.backups import (
     MAX_MANIFEST_BYTES,
     BackupManifest,
     VerifiedBackup,
+    create_quiescent_backup,
+    create_workspace_backup,
     verify_backup_archive,
 )
-from bundlewalker.errors import BackupVerificationError
-from bundlewalker.workspace import DEFAULT_CONFIG_TEXT, MAX_WORKSPACE_CONFIG_BYTES
+from bundlewalker.changes import ChangeValidationContext
+from bundlewalker.domain import (
+    ChangeOperation,
+    ChangeSet,
+    Citation,
+    ConceptType,
+    DraftConcept,
+)
+from bundlewalker.errors import BackupError, BackupVerificationError, ReviewPendingError
+from bundlewalker.okf.repository import OkfRepository
+from bundlewalker.transactions import (
+    PreparedTransaction,
+    ReviewKind,
+    ReviewStatus,
+    discard_pending_review,
+    get_pending_review,
+    prepare_transaction,
+    quiescent_workspace,
+)
+from bundlewalker.workspace import (
+    DEFAULT_CONFIG_TEXT,
+    MAX_WORKSPACE_CONFIG_BYTES,
+    Workspace,
+    discover_workspace,
+    initialize_workspace,
+    load_raw_source,
+)
 
 CREATED_AT = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+
+
+def _prepared_review(tmp_path: Path) -> PreparedTransaction:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    source_path = tmp_path / "Source Notes.txt"
+    source_path.write_bytes(b"first line\r\nsecond line\n")
+    source = load_raw_source(source_path, workspace)
+    draft = DraftConcept(
+        operation=ChangeOperation.CREATE,
+        path=source.concept_id,
+        type=ConceptType.SOURCE,
+        title="Source notes",
+        description="Knowledge about Source notes.",
+        tags=["test"],
+        body="# Source notes\n\nA grounded claim [1].\n",
+        citations=[
+            Citation(
+                number=1,
+                concept_id=source.concept_id,
+                start_line=1,
+                end_line=2,
+            )
+        ],
+        base_digest=None,
+    )
+    change_set = ChangeSet(
+        summary="Integrated source notes.",
+        source_sha256=source.sha256,
+        drafts=[draft],
+    )
+    context = ChangeValidationContext(
+        mode="ingest",
+        repository=OkfRepository(workspace.wiki_dir),
+        readable_concepts=frozenset(),
+        source=source,
+    )
+    return prepare_transaction(
+        workspace,
+        change_set,
+        context,
+        source,
+        CREATED_AT,
+        kind=ReviewKind.INGESTION,
+    )
+
+
+def _managed_tree_bytes(workspace: Workspace) -> dict[str, bytes]:
+    roots = (
+        workspace.root / "bundlewalker.toml",
+        workspace.conventions_file,
+        workspace.raw_dir,
+        workspace.wiki_dir,
+    )
+    files: dict[str, bytes] = {}
+    for root in roots:
+        candidates = (root,) if root.is_file() else tuple(sorted(root.rglob("*")))
+        for candidate in candidates:
+            if candidate.is_file() and not candidate.is_symlink():
+                files[candidate.relative_to(workspace.root).as_posix()] = candidate.read_bytes()
+    return files
 
 
 def _valid_payload() -> dict[str, bytes]:
@@ -1021,3 +1111,743 @@ def test_verify_rejects_non_utc_manifest_timestamp(tmp_path: Path) -> None:
 
     with pytest.raises(BackupVerificationError, match="manifest"):
         verify_backup_archive(archive)
+
+
+def test_create_backup_is_verified_and_contains_only_managed_bytes(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    unrelated = workspace.root / "private-note.txt"
+    unrelated.write_text("outside managed scope\n", encoding="utf-8")
+    git_marker = workspace.root / ".git" / "config"
+    git_marker.parent.mkdir()
+    git_marker.write_text("private git config\n", encoding="utf-8")
+    output = tmp_path / "knowledge.zip"
+
+    verified = create_workspace_backup(
+        workspace,
+        output,
+        clock=lambda: CREATED_AT,
+        bundlewalker_version="0.4.0a1",
+    )
+
+    assert verified == verify_backup_archive(output)
+    archived = {record.path for record in verified.manifest.files}
+    assert "bundlewalker.toml" in archived
+    assert "conventions.md" in archived
+    assert "private-note.txt" not in archived
+    assert not any(path.startswith(".git") for path in archived)
+    assert not any(path.startswith(".bundlewalker") for path in archived)
+    assert stat.S_IMODE(output.stat().st_mode) & 0o077 == 0
+
+
+def test_create_backup_preserves_every_managed_file_byte_for_byte(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    (workspace.raw_dir / "exact-source.bin").write_bytes(b"first line\r\nsecond line\n\x00\xff")
+    before = _managed_tree_bytes(workspace)
+    output = tmp_path / "exact-bytes.zip"
+
+    create_workspace_backup(
+        workspace,
+        output,
+        clock=lambda: CREATED_AT,
+        bundlewalker_version="0.4.0a1",
+    )
+
+    with zipfile.ZipFile(output) as archive:
+        archived = {
+            name.removeprefix("workspace/"): archive.read(name)
+            for name in archive.namelist()
+            if name.startswith("workspace/") and not name.endswith("/")
+        }
+    assert archived == before
+
+
+def test_create_backup_preserves_custom_paths_and_empty_directories(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    configured = workspace.root / "configured"
+    configured.mkdir()
+    workspace.wiki_dir.rename(configured / "wiki")
+    workspace.raw_dir.rename(configured / "raw")
+    workspace.conventions_file.rename(configured / "conventions.md")
+    (workspace.root / "bundlewalker.toml").write_text(
+        "version = 1\n"
+        'wiki_dir = "configured/wiki"\n'
+        'raw_dir = "configured/raw"\n'
+        'conventions_file = "configured/conventions.md"\n'
+        "max_source_characters = 100000\n",
+        encoding="utf-8",
+    )
+    workspace = discover_workspace(workspace.root)
+
+    verified = create_workspace_backup(workspace, tmp_path / "custom.zip")
+
+    assert "configured/raw" in verified.manifest.directories
+    assert "configured/conventions.md" in {record.path for record in verified.manifest.files}
+
+
+def test_create_backup_refuses_existing_or_internal_output(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    existing = tmp_path / "existing.zip"
+    existing.write_bytes(b"keep")
+
+    with pytest.raises(BackupError):
+        create_workspace_backup(workspace, existing)
+    with pytest.raises(BackupError):
+        create_workspace_backup(workspace, workspace.root / "inside.zip")
+
+    assert existing.read_bytes() == b"keep"
+    assert not (workspace.root / "inside.zip").exists()
+
+
+def test_create_backup_rejects_output_ancestor_swap_into_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    outside_ancestor = tmp_path / "outside-ancestor"
+    outside_parent = outside_ancestor / "destination"
+    outside_parent.mkdir(parents=True)
+    parked_ancestor = tmp_path / "outside-ancestor-parked"
+    internal_ancestor = workspace.root / "internal-ancestor"
+    internal_parent = internal_ancestor / "destination"
+    internal_parent.mkdir(parents=True)
+    output = outside_parent / "backup.zip"
+    original_open = os.open
+    swapped = False
+
+    def swap_ancestor_on_parent_open(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and dir_fd is None and Path(path) == output.parent:
+            swapped = True
+            outside_ancestor.rename(parked_ancestor)
+            outside_ancestor.symlink_to(internal_ancestor, target_is_directory=True)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(backups_module.os, "open", swap_ancestor_on_parent_open)
+
+    with pytest.raises(BackupError, match=r"outside|parent changed"):
+        create_workspace_backup(workspace, output)
+
+    outside_ancestor.unlink()
+    parked_ancestor.rename(outside_ancestor)
+    assert swapped is True
+    assert not output.exists()
+    assert not (internal_parent / output.name).exists()
+
+
+def test_create_backup_refuses_pending_review_without_discarding_it(tmp_path: Path) -> None:
+    prepared = _prepared_review(tmp_path)
+
+    with pytest.raises(ReviewPendingError):
+        create_workspace_backup(prepared.workspace, tmp_path / "blocked.zip")
+
+    assert prepared.transaction_dir.is_dir()
+    assert not (tmp_path / "blocked.zip").exists()
+
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    discard_pending_review(prepared.workspace, pending.review_id)
+    assert get_pending_review(prepared.workspace) is None
+
+
+def _assert_failed_creation_is_atomic(
+    workspace: Workspace,
+    output: Path,
+    before: dict[str, bytes],
+) -> None:
+    assert not output.exists()
+    assert not list(output.parent.glob(".bundlewalker-backup-*"))
+    assert _managed_tree_bytes(workspace) == before
+
+
+def test_create_backup_cleans_up_after_stream_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "stream-failure.zip"
+    before = _managed_tree_bytes(workspace)
+
+    def fail_stream(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected stream failure")
+
+    monkeypatch.setattr(backups_module, "_stream_stable_file", fail_stream)
+
+    with pytest.raises(BackupError, match="read managed data"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+def test_create_backup_does_not_reopen_temporary_path_for_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "secure-temporary.zip"
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"must remain unchanged")
+    original_zipfile = zipfile.ZipFile
+    intercepted = False
+
+    def replace_temporary_before_zip_open(
+        file: Any,
+        mode: Any = "r",
+        *args: Any,
+        **kwargs: Any,
+    ) -> zipfile.ZipFile:
+        nonlocal intercepted
+        if not intercepted and mode == "w":
+            intercepted = True
+            if isinstance(file, (str, os.PathLike)):
+                path_file = cast(str | os.PathLike[str], file)
+                temporary = Path(path_file)
+                if temporary.name.startswith(".bundlewalker-backup-"):
+                    temporary.unlink()
+                    temporary.symlink_to(victim)
+                    return original_zipfile(path_file, mode, *args, **kwargs)
+            raise OSError("stop after secure temporary descriptor handoff")
+        return original_zipfile(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(backups_module.zipfile, "ZipFile", replace_temporary_before_zip_open)
+
+    with pytest.raises(BackupError):
+        create_workspace_backup(workspace, output)
+
+    assert intercepted is True
+    assert victim.read_bytes() == b"must remain unchanged"
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_cleans_up_after_verification_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "verification-failure.zip"
+    before = _managed_tree_bytes(workspace)
+
+    def fail_verification(_path: Path) -> VerifiedBackup:
+        raise BackupVerificationError("injected verification failure")
+
+    monkeypatch.setattr(backups_module, "verify_backup_archive", fail_verification)
+
+    with pytest.raises(BackupVerificationError, match="injected verification"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+def test_create_backup_rejects_temporary_mutation_after_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "post-verification-mutation.zip"
+    original_verify = backups_module.verify_backup_archive
+
+    def mutate_verified_temporary(path: Path) -> VerifiedBackup:
+        verified = original_verify(path)
+        with path.open("ab") as destination:
+            destination.write(b"post-verification mutation")
+        return verified
+
+    monkeypatch.setattr(
+        backups_module,
+        "verify_backup_archive",
+        mutate_verified_temporary,
+    )
+
+    with pytest.raises(BackupError, match="temporary output changed"):
+        create_workspace_backup(workspace, output)
+
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_cleans_temporary_from_renamed_output_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    moved_destination = tmp_path / "destination-moved"
+    output = destination / "backup.zip"
+
+    def rename_parent_before_verification(_path: Path) -> VerifiedBackup:
+        destination.rename(moved_destination)
+        destination.mkdir()
+        raise BackupVerificationError("injected parent replacement")
+
+    monkeypatch.setattr(
+        backups_module,
+        "verify_backup_archive",
+        rename_parent_before_verification,
+    )
+
+    with pytest.raises(BackupVerificationError, match="parent replacement"):
+        create_workspace_backup(workspace, output)
+
+    assert not output.exists()
+    assert not list(destination.glob(".bundlewalker-backup-*"))
+    assert not list(moved_destination.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_cleans_up_after_publication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "publication-failure.zip"
+    before = _managed_tree_bytes(workspace)
+
+    def fail_link(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(backups_module.os, "link", fail_link)
+
+    with pytest.raises(BackupError, match="creation failed"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+def test_create_backup_refuses_insufficient_free_space_without_temporary_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "too-small.zip"
+    before = _managed_tree_bytes(workspace)
+
+    def report_no_space(_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(free=0)
+
+    monkeypatch.setattr(
+        backups_module.shutil,
+        "disk_usage",
+        report_no_space,
+    )
+
+    with pytest.raises(BackupError, match="insufficient free space"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+def test_create_backup_rejects_invalid_clock_value_as_typed_failure(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    invalid_clock = cast(Callable[[], datetime], lambda: object())
+
+    with pytest.raises(BackupError, match="clock"):
+        create_workspace_backup(
+            workspace,
+            tmp_path / "invalid-clock.zip",
+            clock=invalid_clock,
+        )
+
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_does_not_clobber_concurrent_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "raced.zip"
+    before = _managed_tree_bytes(workspace)
+
+    def publish_competitor(
+        _source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        assert src_dir_fd == dst_dir_fd
+        assert follow_symlinks is False
+        assert destination == output.name
+        output.write_bytes(b"competitor")
+        raise FileExistsError(destination)
+
+    monkeypatch.setattr(backups_module.os, "link", publish_competitor)
+
+    with pytest.raises(BackupError, match="already exists"):
+        create_workspace_backup(workspace, output)
+
+    assert output.read_bytes() == b"competitor"
+    assert not list(output.parent.glob(".bundlewalker-backup-*"))
+    assert _managed_tree_bytes(workspace) == before
+
+
+def test_create_backup_refuses_output_parent_replacement_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    moved_destination = tmp_path / "destination-moved"
+    output = destination / "backup.zip"
+    original_link = os.link
+
+    def publish_then_replace_parent(
+        source: str,
+        target: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        original_link(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        destination.rename(moved_destination)
+        destination.mkdir()
+
+    monkeypatch.setattr(backups_module.os, "link", publish_then_replace_parent)
+
+    with pytest.raises(BackupError, match="output parent"):
+        create_workspace_backup(workspace, output)
+
+    assert not output.exists()
+    assert not (moved_destination / output.name).exists()
+    assert not list(destination.glob(".bundlewalker-backup-*"))
+    assert not list(moved_destination.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_rejects_source_mutation_inside_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "publication-mutation.zip"
+    original_link = os.link
+
+    def mutate_then_publish(
+        source: str,
+        target: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        descriptor = os.open(source, os.O_WRONLY | os.O_APPEND, dir_fd=src_dir_fd)
+        try:
+            os.write(descriptor, b"publication mutation")
+        finally:
+            os.close(descriptor)
+        original_link(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(backups_module.os, "link", mutate_then_publish)
+
+    with pytest.raises(BackupError, match="output changed"):
+        create_workspace_backup(workspace, output)
+
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_rejects_managed_symlink(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    (workspace.raw_dir / "linked.txt").symlink_to(outside)
+    output = tmp_path / "symlink.zip"
+    before = _managed_tree_bytes(workspace)
+
+    with pytest.raises(BackupError, match="symlink"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable")
+def test_create_backup_rejects_managed_fifo(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    os.mkfifo(workspace.raw_dir / "pipe")
+    output = tmp_path / "fifo.zip"
+    before = _managed_tree_bytes(workspace)
+
+    with pytest.raises(BackupError, match="regular file or directory"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+def test_create_backup_rejects_configured_internal_state_overlap(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    (workspace.root / "bundlewalker.toml").write_text(
+        "version = 1\n"
+        'wiki_dir = "wiki"\n'
+        'raw_dir = "raw"\n'
+        'conventions_file = ".bundlewalker/conventions.md"\n'
+        "max_source_characters = 100000\n",
+        encoding="utf-8",
+    )
+    workspace = discover_workspace(workspace.root)
+    output = tmp_path / "internal.zip"
+    before = _managed_tree_bytes(workspace)
+
+    with pytest.raises(BackupError, match="reserved internal state"):
+        create_workspace_backup(workspace, output)
+
+    _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+@pytest.mark.parametrize("mutation", ["replacement", "truncation", "append", "disappearance"])
+def test_create_backup_detects_file_mutation_during_streaming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    target = workspace.conventions_file
+    original_content = target.read_bytes()
+    original_read = os.read
+    original_inode = target.stat().st_ino
+    parked = target.with_name("parked-conventions.md")
+    mutated = False
+
+    def mutate_once(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(descriptor, size)
+        if not mutated and os.fstat(descriptor).st_ino == original_inode:
+            mutated = True
+            if mutation == "replacement":
+                target.rename(parked)
+                target.write_bytes(b"replacement conventions\n")
+            elif mutation == "truncation":
+                target.write_bytes(b"")
+            elif mutation == "append":
+                with target.open("ab") as destination:
+                    destination.write(b"appended mutation\n")
+            else:
+                target.unlink()
+        return chunk
+
+    monkeypatch.setattr(backups_module.os, "read", mutate_once)
+    output = tmp_path / f"{mutation}.zip"
+
+    with pytest.raises(BackupError, match=r"changed|read managed data"):
+        create_workspace_backup(workspace, output)
+
+    if mutation == "replacement":
+        target.unlink()
+        parked.rename(target)
+    else:
+        target.write_bytes(original_content)
+    assert mutated is True
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_detects_metadata_change_during_streaming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    target = workspace.conventions_file
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    original_read = os.read
+    original_inode = target.stat().st_ino
+    mutated = False
+
+    def chmod_once(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(descriptor, size)
+        if not mutated and os.fstat(descriptor).st_ino == original_inode:
+            mutated = True
+            target.chmod(0o600 if original_mode != 0o600 else 0o400)
+        return chunk
+
+    monkeypatch.setattr(backups_module.os, "read", chmod_once)
+    output = tmp_path / "metadata.zip"
+
+    with pytest.raises(BackupError, match="changed"):
+        create_workspace_backup(workspace, output)
+
+    target.chmod(original_mode)
+    assert mutated is True
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_rejects_managed_ancestor_swap_before_file_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    configured = workspace.root / "configured"
+    configured.mkdir()
+    workspace.wiki_dir.rename(configured / "wiki")
+    workspace.raw_dir.rename(configured / "raw")
+    workspace.conventions_file.rename(configured / "conventions.md")
+    (workspace.root / "bundlewalker.toml").write_text(
+        "version = 1\n"
+        'wiki_dir = "configured/wiki"\n'
+        'raw_dir = "configured/raw"\n'
+        'conventions_file = "configured/conventions.md"\n'
+        "max_source_characters = 100000\n",
+        encoding="utf-8",
+    )
+    workspace = discover_workspace(workspace.root)
+    outside = tmp_path / "outside-managed"
+    shutil.copytree(configured, outside)
+    (outside / "conventions.md").write_text("outside secret\n", encoding="utf-8")
+    parked = workspace.root / "configured-parked"
+    original_stream = cast(
+        Callable[[zipfile.ZipFile, object], object],
+        vars(backups_module)["_stream_stable_file"],
+    )
+    swapped = False
+
+    def swap_ancestor_then_stream(
+        archive: zipfile.ZipFile,
+        entry: object,
+    ) -> object:
+        nonlocal swapped
+        if not swapped and getattr(entry, "relative", None) == "configured/conventions.md":
+            swapped = True
+            configured.rename(parked)
+            configured.symlink_to(outside, target_is_directory=True)
+        return original_stream(archive, entry)
+
+    monkeypatch.setattr(backups_module, "_stream_stable_file", swap_ancestor_then_stream)
+    output = tmp_path / "ancestor-swap.zip"
+
+    with pytest.raises(BackupError):
+        create_workspace_backup(workspace, output)
+
+    configured.unlink()
+    parked.rename(configured)
+    assert swapped is True
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_holds_quiescent_lock_through_verification_and_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "locked.zip"
+    original_verify = backups_module.verify_backup_archive
+    original_link = os.link
+    observations: list[str] = []
+
+    def assert_lock_is_held(stage: str) -> None:
+        descriptor = os.open(workspace.root / ".bundlewalker/transaction.lock", os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+        observations.append(stage)
+
+    def inspect_temporary(path: Path) -> VerifiedBackup:
+        assert_lock_is_held("verification")
+        assert path.parent == output.parent
+        assert path.name.startswith(".bundlewalker-backup-")
+        assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+        return original_verify(path)
+
+    def inspect_publication(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        assert_lock_is_held("publication")
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(backups_module, "verify_backup_archive", inspect_temporary)
+    monkeypatch.setattr(backups_module.os, "link", inspect_publication)
+
+    verified = create_workspace_backup(workspace, output)
+
+    assert verified.archive_path == output
+    assert observations == ["verification", "publication"]
+
+
+def test_create_quiescent_backup_reuses_held_guard(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "guarded.zip"
+
+    with quiescent_workspace(workspace) as quiescent:
+        verified = create_quiescent_backup(
+            quiescent,
+            output,
+            clock=lambda: CREATED_AT,
+            bundlewalker_version="0.4.0a1",
+        )
+
+    assert verified == verify_backup_archive(output)
+
+
+def test_create_backup_is_deterministic_for_fixed_source_and_metadata(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    first = tmp_path / "first.zip"
+    second = tmp_path / "second.zip"
+
+    create_workspace_backup(
+        workspace,
+        first,
+        clock=lambda: CREATED_AT,
+        bundlewalker_version="0.4.0a1",
+    )
+    create_workspace_backup(
+        workspace,
+        second,
+        clock=lambda: CREATED_AT,
+        bundlewalker_version="0.4.0a1",
+    )
+
+    assert first.read_bytes() == second.read_bytes()
+    with zipfile.ZipFile(first) as archive:
+        assert {info.date_time for info in archive.infolist()} == {(1980, 1, 1, 0, 0, 0)}
+
+
+def test_create_backup_refuses_stale_review_and_keeps_it_discardable(tmp_path: Path) -> None:
+    prepared = _prepared_review(tmp_path)
+    (prepared.workspace.wiki_dir / "index.md").write_text(
+        "# Concurrent edit\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "stale-blocked.zip"
+
+    with pytest.raises(ReviewPendingError):
+        create_workspace_backup(prepared.workspace, output)
+
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    assert pending.status is ReviewStatus.STALE
+    discard_pending_review(prepared.workspace, pending.review_id)
+    assert get_pending_review(prepared.workspace) is None
+    assert not output.exists()

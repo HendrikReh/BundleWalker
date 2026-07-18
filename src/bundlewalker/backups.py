@@ -5,23 +5,30 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
 import struct
 import unicodedata
 import zipfile
 import zlib
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from tempfile import mkstemp
 from typing import IO, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from bundlewalker import __version__
 from bundlewalker.compatibility import CURRENT_WORKSPACE_FORMAT
-from bundlewalker.errors import BackupVerificationError, BundleWalkerError
+from bundlewalker.errors import BackupError, BackupVerificationError, BundleWalkerError
+from bundlewalker.transactions import QuiescentWorkspace, quiescent_workspace
 from bundlewalker.workspace import (
     CONFIG_FILENAME,
     MAX_WORKSPACE_CONFIG_BYTES,
+    Workspace,
     WorkspaceConfig,
     parse_workspace_config,
 )
@@ -117,6 +124,550 @@ class VerifiedBackup:
     @property
     def byte_count(self) -> int:
         return sum(record.size for record in self.manifest.files)
+
+
+@dataclass(frozen=True, slots=True)
+class _ManagedEntry:
+    relative: str
+    absolute: Path
+    is_directory: bool
+    state: tuple[int, int, int, int, int, int, int]
+
+
+def create_workspace_backup(
+    workspace: Workspace,
+    output: Path,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    bundlewalker_version: str = __version__,
+) -> VerifiedBackup:
+    with quiescent_workspace(workspace) as quiescent:
+        return create_quiescent_backup(
+            quiescent,
+            output,
+            clock=clock,
+            bundlewalker_version=bundlewalker_version,
+        )
+
+
+def create_quiescent_backup(
+    quiescent: QuiescentWorkspace,
+    output: Path,
+    *,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    bundlewalker_version: str = __version__,
+) -> VerifiedBackup:
+    workspace = quiescent.workspace
+    output_path: Path | None = None
+    temporary: Path | None = None
+    temporary_name: str | None = None
+    temporary_identity: tuple[int, int] | None = None
+    temporary_archive_state: tuple[int, int, int, int, int, int, int] | None = None
+    output_parent_descriptor: int | None = None
+    output_parent_identity: tuple[int, int, int] | None = None
+    published_identity: tuple[int, int] | None = None
+    completed = False
+    try:
+        output_path = output.expanduser().absolute()
+        resolved_output = output_path.resolve(strict=False)
+        workspace_root = workspace.root.resolve(strict=True)
+        if resolved_output == workspace_root or resolved_output.is_relative_to(workspace_root):
+            raise BackupError("backup output must be outside the workspace")
+        if output_path.exists() or output_path.is_symlink():
+            raise BackupError("backup output already exists")
+        if not output_path.parent.is_dir() or output_path.parent.is_symlink():
+            raise BackupError("backup output parent must be a regular directory")
+        output_parent_descriptor = os.open(
+            output_path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        parent_descriptor_state = os.fstat(output_parent_descriptor)
+        output_parent_identity = _managed_identity(parent_descriptor_state)
+        _require_output_parent_stable(
+            output_path,
+            output_parent_descriptor,
+            output_parent_identity,
+            resolved_output=resolved_output,
+            workspace_root=workspace_root,
+        )
+        if workspace.config.version != CURRENT_WORKSPACE_FORMAT:
+            raise BackupError("workspace is not current")
+        try:
+            entries = _managed_entries(workspace)
+            file_entries = tuple(entry for entry in entries if not entry.is_directory)
+            byte_count = sum(entry.absolute.lstat().st_size for entry in file_entries)
+        except OSError as exc:
+            raise BackupError("workspace backup could not read managed data") from exc
+        if shutil.disk_usage(output_path.parent).free < byte_count:
+            raise BackupError("backup destination has insufficient free space")
+        observed_at = clock()
+        if not isinstance(  # pyright: ignore[reportUnnecessaryIsInstance]
+            observed_at, datetime
+        ):
+            raise BackupError("backup clock must return a timezone-aware timestamp")
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise BackupError("backup clock must return a timezone-aware timestamp")
+        created_at = observed_at.astimezone(UTC)
+        descriptor, temporary_name = mkstemp(
+            prefix=".bundlewalker-backup-",
+            dir=output_path.parent,
+        )
+        temporary = Path(temporary_name)
+        temporary_name = temporary.name
+        try:
+            descriptor_state = os.fstat(descriptor)
+            temporary_identity = (descriptor_state.st_dev, descriptor_state.st_ino)
+            os.fchmod(descriptor, 0o600)
+            descriptor_state = os.fstat(descriptor)
+            relative_state = os.stat(
+                temporary_name,
+                dir_fd=output_parent_descriptor,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(descriptor_state.st_mode) or _managed_identity(
+                descriptor_state
+            ) != _managed_identity(relative_state):
+                raise BackupError("backup temporary output changed during creation")
+            with os.fdopen(descriptor, "w+b") as temporary_file:
+                descriptor = -1
+                records: list[BackupFileRecord] = []
+                with zipfile.ZipFile(
+                    temporary_file,
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    allowZip64=True,
+                ) as archive:
+                    for entry in entries:
+                        if entry.is_directory:
+                            archive.writestr(
+                                _archive_info(entry.relative, is_directory=True),
+                                b"",
+                            )
+                    for entry in file_entries:
+                        try:
+                            records.append(_stream_stable_file(archive, entry))
+                        except OSError as exc:
+                            raise BackupError(
+                                "workspace backup could not read managed data"
+                            ) from exc
+                    try:
+                        _require_managed_entries_stable(entries)
+                    except OSError as exc:
+                        raise BackupError("workspace backup could not read managed data") from exc
+                    manifest = BackupManifest(
+                        archive_format=ARCHIVE_FORMAT,
+                        schema_version=ARCHIVE_SCHEMA_VERSION,
+                        created_at=created_at,
+                        bundlewalker_version=bundlewalker_version,
+                        workspace_format_version=workspace.config.version,
+                        directories=tuple(
+                            entry.relative for entry in entries if entry.is_directory
+                        ),
+                        files=tuple(records),
+                    )
+                    archive.writestr(
+                        _archive_info(MANIFEST_NAME, payload_prefix=False),
+                        manifest.model_dump_json(indent=2) + "\n",
+                    )
+                temporary_file.flush()
+        finally:
+            if descriptor >= 0:
+                with suppress(OSError):
+                    os.close(descriptor)
+        archive_state = os.stat(
+            temporary_name,
+            dir_fd=output_parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(archive_state.st_mode)
+            or (archive_state.st_dev, archive_state.st_ino) != temporary_identity
+        ):
+            raise BackupError("backup temporary output changed during creation")
+        temporary_archive_state = _managed_state(archive_state)
+        verified = verify_backup_archive(temporary)
+        _require_output_parent_stable(
+            output_path,
+            output_parent_descriptor,
+            output_parent_identity,
+            resolved_output=resolved_output,
+            workspace_root=workspace_root,
+        )
+        sync_descriptor: int | None = None
+        try:
+            sync_descriptor = os.open(
+                temporary_name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=output_parent_descriptor,
+            )
+            sync_state = os.fstat(sync_descriptor)
+            if (
+                not stat.S_ISREG(sync_state.st_mode)
+                or _managed_state(sync_state) != temporary_archive_state
+            ):
+                raise BackupError("backup temporary output changed after verification")
+            os.fsync(sync_descriptor)
+            try:
+                os.link(
+                    temporary_name,
+                    output_path.name,
+                    src_dir_fd=output_parent_descriptor,
+                    dst_dir_fd=output_parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise BackupError("backup output already exists") from exc
+            published_state = os.stat(
+                output_path.name,
+                dir_fd=output_parent_descriptor,
+                follow_symlinks=False,
+            )
+            published_identity = (published_state.st_dev, published_state.st_ino)
+            if (
+                not stat.S_ISREG(published_state.st_mode)
+                or published_identity != temporary_identity
+            ):
+                raise BackupError("backup output changed during publication")
+            hash_before = os.fstat(sync_descriptor)
+            with os.fdopen(os.dup(sync_descriptor), "rb") as published_source:
+                published_sha256 = _file_sha256(published_source)
+            hash_after = os.fstat(sync_descriptor)
+            final_output_state = os.stat(
+                output_path.name,
+                dir_fd=output_parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                _managed_state(hash_before) != _managed_state(hash_after)
+                or _managed_state(hash_after) != _managed_state(final_output_state)
+                or published_sha256 != verified.archive_sha256
+            ):
+                raise BackupError("backup output changed during publication")
+            _require_output_parent_stable(
+                output_path,
+                output_parent_descriptor,
+                output_parent_identity,
+                resolved_output=resolved_output,
+                workspace_root=workspace_root,
+            )
+            _sync_directory_descriptor(output_parent_descriptor)
+            _require_output_parent_stable(
+                output_path,
+                output_parent_descriptor,
+                output_parent_identity,
+                resolved_output=resolved_output,
+                workspace_root=workspace_root,
+            )
+            completed = True
+            return VerifiedBackup(output_path, verified.archive_sha256, verified.manifest)
+        finally:
+            if sync_descriptor is not None:
+                with suppress(OSError):
+                    os.close(sync_descriptor)
+    except BackupError:
+        raise
+    except (BundleWalkerError, OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise BackupError("workspace backup creation failed") from exc
+    finally:
+        removed_temporary = False
+        if (
+            output_parent_descriptor is not None
+            and temporary_name is not None
+            and temporary_identity is not None
+        ):
+            removed_temporary = _unlink_owned_entry(
+                temporary_name,
+                temporary_identity,
+                dir_fd=output_parent_descriptor,
+            )
+        if not removed_temporary and temporary is not None and temporary_identity is not None:
+            _unlink_owned_entry(temporary, temporary_identity)
+        if not completed and output_path is not None and published_identity is not None:
+            removed_output = False
+            if output_parent_descriptor is not None:
+                removed_output = _unlink_owned_entry(
+                    output_path.name,
+                    published_identity,
+                    dir_fd=output_parent_descriptor,
+                )
+            if not removed_output:
+                _unlink_owned_entry(output_path, published_identity)
+        if output_parent_descriptor is not None:
+            with suppress(OSError):
+                os.close(output_parent_descriptor)
+
+
+def _managed_entries(workspace: Workspace) -> tuple[_ManagedEntry, ...]:
+    file_roots = (
+        PurePosixPath(CONFIG_FILENAME),
+        PurePosixPath(workspace.config.conventions_file),
+    )
+    directory_roots = (
+        PurePosixPath(workspace.config.raw_dir),
+        PurePosixPath(workspace.config.wiki_dir),
+    )
+    roots = (*file_roots, *directory_roots)
+    for path in roots:
+        try:
+            _canonical_relative_path(path.as_posix())
+        except ValueError as exc:
+            raise BackupError("configured managed path is unsafe") from exc
+    reserved_key = _portable_path_component(".bundlewalker")
+    if any(
+        path.parts and _portable_path_component(path.parts[0]) == reserved_key for path in roots
+    ):
+        raise BackupError("configured managed path overlaps reserved internal state")
+    entries: dict[str, _ManagedEntry] = {}
+
+    def add(candidate: Path) -> None:
+        relative = candidate.relative_to(workspace.root).as_posix()
+        _canonical_relative_path(relative)
+        metadata = candidate.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise BackupError(f"managed path is a symlink: {relative}")
+        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode)):
+            raise BackupError(f"managed path is not a regular file or directory: {relative}")
+        incoming = _ManagedEntry(
+            relative,
+            candidate,
+            stat.S_ISDIR(metadata.st_mode),
+            _managed_state(metadata),
+        )
+        existing = entries.get(relative)
+        if existing is not None and existing.is_directory != incoming.is_directory:
+            raise BackupError(f"managed path changes type: {relative}")
+        entries[relative] = incoming
+
+    for relative_root in roots:
+        for parent in reversed(relative_root.parents):
+            if parent != PurePosixPath("."):
+                add(workspace.root.joinpath(*parent.parts))
+        absolute_root = workspace.root.joinpath(*relative_root.parts)
+        candidates = (absolute_root, *sorted(absolute_root.rglob("*")))
+        for candidate in candidates:
+            add(candidate)
+    return tuple(entries[path] for path in sorted(entries))
+
+
+def _stream_stable_file(
+    archive: zipfile.ZipFile,
+    entry: _ManagedEntry,
+) -> BackupFileRecord:
+    parts = PurePosixPath(entry.relative).parts
+    workspace_root = entry.absolute
+    for _part in parts:
+        workspace_root = workspace_root.parent
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    directory_descriptors: list[tuple[Path, int, tuple[int, int, int]]] = []
+    descriptor: int | None = None
+    digest = hashlib.sha256()
+    count = 0
+    try:
+        root_before = workspace_root.lstat()
+        current = os.open(workspace_root, directory_flags)
+        directory_descriptors.append((workspace_root, current, (0, 0, 0)))
+        root_descriptor = os.fstat(current)
+        root_after = workspace_root.lstat()
+        _require_stable_directory_identity(
+            root_descriptor,
+            root_before,
+            root_after,
+        )
+        directory_descriptors[-1] = (
+            workspace_root,
+            current,
+            _managed_identity(root_descriptor),
+        )
+        traversed = workspace_root
+        for part in parts[:-1]:
+            traversed /= part
+            relative_before = os.stat(part, dir_fd=current, follow_symlinks=False)
+            absolute_before = traversed.lstat()
+            child = os.open(part, directory_flags, dir_fd=current)
+            directory_descriptors.append((traversed, child, (0, 0, 0)))
+            child_descriptor = os.fstat(child)
+            relative_after = os.stat(part, dir_fd=current, follow_symlinks=False)
+            absolute_after = traversed.lstat()
+            _require_stable_directory_identity(
+                child_descriptor,
+                relative_before,
+                absolute_before,
+                relative_after,
+                absolute_after,
+            )
+            directory_descriptors[-1] = (
+                traversed,
+                child,
+                _managed_identity(child_descriptor),
+            )
+            current = child
+        filename = parts[-1]
+        path_before = os.stat(filename, dir_fd=current, follow_symlinks=False)
+        absolute_before = entry.absolute.lstat()
+        descriptor = os.open(filename, file_flags, dir_fd=current)
+        descriptor_before = os.fstat(descriptor)
+        path_after_open = os.stat(filename, dir_fd=current, follow_symlinks=False)
+        absolute_after_open = entry.absolute.lstat()
+        snapshots_before = (
+            path_before,
+            absolute_before,
+            descriptor_before,
+            path_after_open,
+            absolute_after_open,
+        )
+        if any(
+            not stat.S_ISREG(snapshot.st_mode) or _managed_state(snapshot) != entry.state
+            for snapshot in snapshots_before
+        ):
+            raise BackupError("managed backup entry changed before it was read")
+        if not stat.S_ISREG(descriptor_before.st_mode):
+            raise BackupError("managed backup entry is not a regular file")
+        with archive.open(_archive_info(entry.relative), "w", force_zip64=True) as destination:
+            while chunk := os.read(descriptor, 1024 * 1024):
+                count += len(chunk)
+                digest.update(chunk)
+                destination.write(chunk)
+        descriptor_after = os.fstat(descriptor)
+        path_after = os.stat(filename, dir_fd=current, follow_symlinks=False)
+        absolute_after = entry.absolute.lstat()
+        snapshots_after = (descriptor_after, path_after, absolute_after)
+        if any(
+            not stat.S_ISREG(snapshot.st_mode) or _managed_state(snapshot) != entry.state
+            for snapshot in snapshots_after
+        ):
+            raise BackupError("managed backup entry changed while it was read")
+        for directory_path, directory_descriptor, identity in directory_descriptors:
+            descriptor_state = os.fstat(directory_descriptor)
+            path_state = directory_path.lstat()
+            if (
+                not stat.S_ISDIR(descriptor_state.st_mode)
+                or not stat.S_ISDIR(path_state.st_mode)
+                or _managed_identity(descriptor_state) != identity
+                or _managed_identity(path_state) != identity
+            ):
+                raise BackupError("managed backup path changed while it was read")
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+        for _path, directory_descriptor, _identity in reversed(directory_descriptors):
+            with suppress(OSError):
+                os.close(directory_descriptor)
+    if count != descriptor_after.st_size:
+        raise BackupError("managed backup entry size changed while it was read")
+    return BackupFileRecord(
+        path=entry.relative,
+        size=count,
+        sha256=digest.hexdigest(),
+    )
+
+
+def _require_managed_entries_stable(entries: tuple[_ManagedEntry, ...]) -> None:
+    for entry in entries:
+        metadata = entry.absolute.lstat()
+        if (
+            stat.S_ISDIR(metadata.st_mode) != entry.is_directory
+            or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
+            or _managed_state(metadata) != entry.state
+        ):
+            raise BackupError("managed backup path changed during archive creation")
+
+
+def _require_stable_directory_identity(
+    reference: os.stat_result,
+    *observed: os.stat_result,
+) -> None:
+    identity = _managed_identity(reference)
+    if not stat.S_ISDIR(reference.st_mode) or any(
+        not stat.S_ISDIR(metadata.st_mode) or _managed_identity(metadata) != identity
+        for metadata in observed
+    ):
+        raise BackupError("managed backup path contains a symlink or changed directory")
+
+
+def _managed_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    return (metadata.st_mode, metadata.st_dev, metadata.st_ino)
+
+
+def _managed_state(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_mode,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _archive_info(
+    relative: str,
+    *,
+    is_directory: bool = False,
+    payload_prefix: bool = True,
+) -> zipfile.ZipInfo:
+    name = f"{PAYLOAD_PREFIX}{relative}" if payload_prefix else relative
+    if is_directory:
+        name = f"{name}/"
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.create_system = 3
+    info.external_attr = ((stat.S_IFDIR | 0o700) if is_directory else (stat.S_IFREG | 0o600)) << 16
+    info.compress_type = zipfile.ZIP_STORED if is_directory else zipfile.ZIP_DEFLATED
+    return info
+
+
+def _require_output_parent_stable(
+    output_path: Path,
+    descriptor: int,
+    identity: tuple[int, int, int],
+    *,
+    resolved_output: Path,
+    workspace_root: Path,
+) -> None:
+    try:
+        descriptor_state = os.fstat(descriptor)
+        path_state = output_path.parent.lstat()
+        current_output = output_path.resolve(strict=False)
+    except OSError as exc:
+        raise BackupError("backup output parent changed during creation") from exc
+    if (
+        not stat.S_ISDIR(descriptor_state.st_mode)
+        or not stat.S_ISDIR(path_state.st_mode)
+        or _managed_identity(descriptor_state) != identity
+        or _managed_identity(path_state) != identity
+        or current_output != resolved_output
+        or current_output == workspace_root
+        or current_output.is_relative_to(workspace_root)
+    ):
+        raise BackupError("backup output parent changed during creation")
+
+
+def _sync_directory_descriptor(descriptor: int) -> None:
+    with suppress(OSError):
+        os.fsync(descriptor)
+
+
+def _unlink_owned_entry(
+    path: str | Path,
+    identity: tuple[int, int],
+    *,
+    dir_fd: int | None = None,
+) -> bool:
+    try:
+        metadata = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+        if (metadata.st_dev, metadata.st_ino) != identity:
+            return False
+        os.unlink(path, dir_fd=dir_fd)
+        return True
+    except OSError:
+        return False
 
 
 def verify_backup_archive(path: Path) -> VerifiedBackup:
