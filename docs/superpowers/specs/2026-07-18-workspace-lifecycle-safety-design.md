@@ -135,6 +135,13 @@ not interpret transaction phases.
 Archive creation requires a quiescent-workspace token. Restore accepts only an archive and a
 target path because it never mutates or relies on a source workspace.
 
+### `upgrades.py`
+
+Own backup-first explicit upgrade orchestration and its result contract. Compatibility remains a
+read-only dependency of backup verification, while upgrade orchestration depends on both
+compatibility and backups; keeping orchestration separate prevents a compatibility/backup import
+cycle.
+
 ### `application/lifecycle.py`
 
 Expose adapter-safe lifecycle use cases and structured result records for:
@@ -284,10 +291,10 @@ Directories are explicit so an empty configured raw directory survives restore. 
 overlapping file/directory identities, unknown manifest fields, unsafe paths, and non-canonical
 path spellings are invalid.
 
-Defensive parser ceilings are not capacity claims: the manifest is limited to 32 MiB, the combined
-file-and-directory count to 100,000, and each relative path to 4,096 Unicode characters. Restore
-stops streaming an entry as soon as it exceeds its declared size rather than trusting a ZIP size
-field and discovering the mismatch only after decompression.
+Defensive parser ceilings are not capacity claims: workspace configuration is limited to 1 MiB,
+the manifest to 32 MiB, the combined file-and-directory count to 100,000, and each relative path
+to 4,096 Unicode characters. Restore stops streaming an entry as soon as it exceeds its declared
+size rather than trusting a ZIP size field and discovering the mismatch only after decompression.
 
 The archive itself is not self-hashed inside its manifest. The application result and CLI print
 the SHA-256 digest of the completed ZIP so users can record or compare the exact artifact.
