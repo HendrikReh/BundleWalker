@@ -86,6 +86,7 @@ and resolving common failures.
 - [Ingest and review a source](#ingest-and-review-a-source)
 - [Ask, save, and refresh](#ask-save-and-refresh)
 - [Maintain and recover the bundle](#maintain-and-recover-the-bundle)
+- [Back up, restore, upgrade, and roll back](#back-up-restore-upgrade-and-roll-back)
 - [Complete CLI reference](#complete-cli-reference)
 - [Use BundleWalker through a local MCP host](#use-bundlewalker-through-a-local-mcp-host)
 - [Workspace and process reference](#workspace-and-process-reference)
@@ -394,16 +395,125 @@ the only retained file; `transactions/` may remain as an empty directory. The lo
 coordination state, not a pending write. If recovery fails, stop and preserve `.bundlewalker/`
 for diagnosis rather than editing its manifests or staged trees.
 
+## Back up, restore, upgrade, and roll back
+
+The [workspace compatibility and portable-backup policy](workspace-compatibility.md) is the one
+authority for supported formats, compatibility statuses, exact archive scope, exit behavior, and
+the portability boundary. Use these procedures for the four lifecycle commands.
+
+### Inspect compatibility
+
+From the BundleWalker checkout, inspect a workspace without changing it:
+
+```bash
+uv run bundlewalker workspace status ./knowledge
+```
+
+The report includes the installed BundleWalker version, workspace format, compatibility status,
+readable and writable decisions, and whether an upgrade path is registered. Check it before backup
+or upgrade and after every restore.
+
+### Create a verified workspace backup
+
+First resolve any pending review. Inspect it, then apply or discard its exact ID:
+
+```bash
+cd ./knowledge
+uv run --project "$PROJECT_ROOT" bundlewalker review show
+uv run --project "$PROJECT_ROOT" bundlewalker review apply REVIEW_ID
+# Or discard instead of applying:
+uv run --project "$PROJECT_ROOT" bundlewalker review discard REVIEW_ID
+cd "$PROJECT_ROOT"
+```
+
+Stop editors, synchronizers, and other external writers, choose an absent output path outside the
+workspace, then run:
+
+```bash
+mkdir -p ./backups
+uv run bundlewalker workspace backup ./backups/knowledge.zip --workspace ./knowledge
+```
+
+Record the printed `SHA-256` with the archive. The ZIP is unencrypted and may contain exact raw
+source bytes, including private, licensed, regulated, or secret material. Store it at an encrypted
+destination or protect it with an external encryption tool. BundleWalker never overwrites an
+existing archive.
+
+### Restore into a separate target
+
+Restore accepts only a new or empty target and does not need a current workspace:
+
+```bash
+uv run bundlewalker workspace restore ./backups/knowledge.zip ./knowledge-restored
+uv run bundlewalker workspace status ./knowledge-restored
+(
+  cd ./knowledge-restored
+  uv run --project "$PROJECT_ROOT" bundlewalker lint
+)
+```
+
+Compare the restore output's `SHA-256` with the digest recorded during backup. Restore verifies
+the complete archive before publishing the target and never replaces a non-empty workspace.
+Deterministic lint then checks knowledge health separately from byte preservation.
+
+### Request an upgrade and rehearse rollback
+
+Upgrade is always explicit:
+
+```bash
+uv run bundlewalker workspace status ./knowledge
+uv run bundlewalker workspace upgrade ./knowledge --backup-dir ./backups
+```
+
+The current format reports an exact no-op. Production has no registered migration, so do not
+expect a pre-upgrade archive from the current command. A future registered migration must create
+and verify that archive before mutation.
+
+If a future migration requires rollback, use the reported pre-upgrade backup and restore it to a
+different new or empty path. Never restore over the original:
+
+```bash
+uv run bundlewalker workspace restore ./backups/knowledge-pre-upgrade.zip ./knowledge-restored
+uv run bundlewalker workspace status ./knowledge-restored
+(
+  cd ./knowledge-restored
+  uv run --project "$PROJECT_ROOT" bundlewalker lint
+)
+```
+
+Inspect compatibility and deterministic lint, then switch consumers to the restored path only
+after accepting the result. Retain the original workspace until that decision.
+
 <a id="command-reference"></a>
 
 ## Complete CLI reference
 
 Live `--help` output is authoritative for command names, arguments, and options. The public CLI
-contains `init`, `ingest`, `ask`, `lint`, and `review`:
+contains `init`, `ingest`, `ask`, `lint`, `review`, and `workspace`:
 
 ```bash
 uv run bundlewalker --help
 ```
+
+### `workspace`
+
+```text
+bundlewalker workspace status [PATH]
+bundlewalker workspace backup OUTPUT [--workspace PATH]
+bundlewalker workspace restore ARCHIVE TARGET
+bundlewalker workspace upgrade [PATH] [--backup-dir DIRECTORY]
+```
+
+| Command | Arguments and options | Meaning |
+| --- | --- | --- |
+| `status` | optional `PATH` | Inspect format compatibility without mutation; defaults to discovery. |
+| `backup` | required `OUTPUT`; optional `--workspace PATH` | Create and verify one absent archive outside a current workspace. |
+| `restore` | required `ARCHIVE TARGET` | Verify and restore to a new or empty target without current-workspace discovery. |
+| `upgrade` | optional `PATH`; optional `--backup-dir DIRECTORY` | Request an explicit registered migration; current format `1` is a no-op. |
+
+Run `uv run bundlewalker workspace COMMAND --help` for the live signature. See
+[Back up, restore, upgrade, and roll back](#back-up-restore-upgrade-and-roll-back) for procedures
+and the [workspace compatibility policy](workspace-compatibility.md) for normative semantics.
 
 ### `init`
 
@@ -649,8 +759,8 @@ may complete or roll back an already-reviewed interrupted transaction.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success; duplicate-ingest or already-current refresh no-op; declined or interrupted review; or lint with only warnings and semantic advisories |
-| `1` | Model/provider failure, invalid model output, source or OKF validation error, deterministic lint error, transaction failure, or unrecoverable workspace state |
-| `2` | Command usage or configuration error, including a missing model for a model-backed operation |
+| `1` | Model/provider failure, invalid model output, source or OKF validation error, deterministic lint error, archive/backup/restore failure, migration-execution or verification failure, transaction failure, or unrecoverable workspace state |
+| `2` | Command usage or configuration error, including a missing model, incompatible workspace/target, invalid restore target, or unavailable migration path |
 
 Tracebacks are hidden by default. Errors report a concise primary cause without printing source
 content or provider credentials.
@@ -755,7 +865,6 @@ Run `ingest`, `ask`, or `lint` again to invoke authenticated recovery. Preserve
 BundleWalker never commits or pushes for you. Review durable files—especially exact bytes under
 `raw/`—before sharing them, and ignore `.bundlewalker/`. See
 [Git and privacy boundary](#git-and-privacy-boundary).
-
 ````
 
 - [ ] **Step 3: Link the guide from the README**

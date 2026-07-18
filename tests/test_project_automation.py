@@ -236,3 +236,18 @@ def test_workspace_lifecycle_policy_and_commands_are_published() -> None:
     assert "workspace backup" in tutorial.lower()
     assert "pre-upgrade backup" in releases.lower()
     assert "sha-256" in releases.lower()
+
+
+def test_historical_plan_embeds_current_user_guide_byte_for_byte() -> None:
+    guide = (PROJECT_ROOT / "docs/user-guide.md").read_bytes()
+    plan = (PROJECT_ROOT / "docs/superpowers/plans/2026-07-16-end-user-guide.md").read_bytes()
+    start_marker = b"Create `docs/user-guide.md` with exactly:\n\n````markdown\n"
+    end_marker = b"\n````\n\n- [ ] **Step 3: Link the guide from the README**"
+
+    assert plan.count(start_marker) == 1
+    assert plan.count(end_marker) == 1
+    embedded_start = plan.index(start_marker) + len(start_marker)
+    embedded_end = plan.index(end_marker, embedded_start)
+    embedded_guide = plan[embedded_start:embedded_end] + b"\n"
+
+    assert embedded_guide == guide
