@@ -10,7 +10,7 @@ import pytest
 
 import bundlewalker.workspace as workspace_module
 from bundlewalker.conventions import ConventionsStyle, load_conventions
-from bundlewalker.errors import WorkspaceError
+from bundlewalker.errors import ConfigurationError, WorkspaceError
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.lint import has_errors, lint_bundle
 from bundlewalker.workspace import (
@@ -116,6 +116,16 @@ def test_initialize_rolls_back_a_conventions_loader_failure(
 def test_discovery_rejects_paths_outside_a_workspace(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceError, match=r"bundlewalker\.toml"):
         discover_workspace(tmp_path)
+
+
+def test_workspace_configuration_has_a_bounded_parser(tmp_path: Path) -> None:
+    root = tmp_path / "knowledge"
+    root.mkdir()
+    config = root / "bundlewalker.toml"
+    config.write_bytes(b"#" * (workspace_module.MAX_WORKSPACE_CONFIG_BYTES + 1))
+
+    with pytest.raises(ConfigurationError, match="supported size"):
+        discover_workspace(root)
 
 
 @pytest.mark.parametrize("name", ["source.MD", "source.rst", "source"])

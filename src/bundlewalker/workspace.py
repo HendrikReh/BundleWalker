@@ -22,6 +22,7 @@ from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.paths import normalize_workspace_config_path
 
 CONFIG_FILENAME = "bundlewalker.toml"
+MAX_WORKSPACE_CONFIG_BYTES = 1_048_576
 DEFAULT_CONFIG_TEXT = (
     "version = 1\n"
     'wiki_dir = "wiki"\n'
@@ -78,14 +79,18 @@ class RawSource:
 
 
 def discover_workspace(start: Path | None = None) -> Workspace:
+    config_path = find_workspace_config(start)
+    return Workspace(root=config_path.parent, config=load_workspace_config(config_path))
+
+
+def find_workspace_config(start: Path | None = None) -> Path:
     candidate = (start or Path.cwd()).expanduser().resolve(strict=False)
     if candidate.is_file():
         candidate = candidate.parent
-
     for directory in (candidate, *candidate.parents):
         config_path = directory / CONFIG_FILENAME
         if config_path.is_file() and not config_path.is_symlink():
-            return Workspace(root=directory, config=_load_config(config_path))
+            return config_path
     raise WorkspaceError(f"could not find {CONFIG_FILENAME} from {candidate}")
 
 
@@ -125,7 +130,7 @@ def initialize_workspace(
             date=occurred_at or datetime.now(UTC),
             kind="Initialization",
         )
-        workspace = Workspace(root=root, config=_load_config(root / CONFIG_FILENAME))
+        workspace = Workspace(root=root, config=load_workspace_config(root / CONFIG_FILENAME))
         findings = lint_bundle(workspace.wiki_dir, workspace.root)
         if has_errors(findings):
             codes = ", ".join(sorted({finding.code for finding in findings}))
@@ -250,11 +255,11 @@ def _raw_source_from_content(
     )
 
 
-def _load_config(path: Path) -> WorkspaceConfig:
+def parse_workspace_config(text: str, *, source: str = CONFIG_FILENAME) -> WorkspaceConfig:
     try:
-        values = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigurationError(f"could not read workspace configuration: {path}") from exc
+        values = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigurationError(f"could not read workspace configuration: {source}") from exc
 
     expected = {
         "version",
@@ -264,7 +269,7 @@ def _load_config(path: Path) -> WorkspaceConfig:
         "max_source_characters",
     }
     if set(values) != expected:
-        raise ConfigurationError(f"workspace configuration has unexpected keys: {path}")
+        raise ConfigurationError(f"workspace configuration has unexpected keys: {source}")
 
     version = values["version"]
     max_characters = values["max_source_characters"]
@@ -287,6 +292,20 @@ def _load_config(path: Path) -> WorkspaceConfig:
         conventions_file=path_values["conventions_file"],
         max_source_characters=max_characters,
     )
+
+
+def load_workspace_config(path: Path) -> WorkspaceConfig:
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ConfigurationError(f"could not read workspace configuration: {path}") from exc
+    if len(content) > MAX_WORKSPACE_CONFIG_BYTES:
+        raise ConfigurationError("workspace configuration exceeds the supported size")
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError(f"could not read workspace configuration: {path}") from exc
+    return parse_workspace_config(text, source=str(path))
 
 
 def _slugify(value: str) -> str:

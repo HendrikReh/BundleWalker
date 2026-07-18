@@ -16,6 +16,12 @@ class ConfigurationError(UsageError):
     pass
 
 
+class WorkspaceCompatibilityError(ConfigurationError):
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(f"workspace is not current: {status}")
+
+
 class WorkspaceError(BundleWalkerError):
     pass
 
