@@ -317,15 +317,15 @@ def create_quiescent_backup(
                 )
             except FileExistsError as exc:
                 raise BackupError("backup output already exists") from exc
+            published_identity = temporary_identity
             published_state = os.stat(
                 output_path.name,
                 dir_fd=output_parent_descriptor,
                 follow_symlinks=False,
             )
-            published_identity = (published_state.st_dev, published_state.st_ino)
             if (
                 not stat.S_ISREG(published_state.st_mode)
-                or published_identity != temporary_identity
+                or (published_state.st_dev, published_state.st_ino) != published_identity
             ):
                 raise BackupError("backup output changed during publication")
             hash_before = os.fstat(sync_descriptor)
@@ -443,8 +443,8 @@ def _managed_entries(workspace: Workspace) -> tuple[_ManagedEntry, ...]:
             if parent != PurePosixPath("."):
                 add(workspace.root.joinpath(*parent.parts))
         absolute_root = workspace.root.joinpath(*relative_root.parts)
-        candidates = (absolute_root, *sorted(absolute_root.rglob("*")))
-        for candidate in candidates:
+        add(absolute_root)
+        for candidate in sorted(absolute_root.rglob("*")):
             add(candidate)
     return tuple(entries[path] for path in sorted(entries))
 

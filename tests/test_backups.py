@@ -12,7 +12,7 @@ import shutil
 import stat
 import struct
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -1488,6 +1488,104 @@ def test_create_backup_does_not_clobber_concurrent_destination(
     assert _managed_tree_bytes(workspace) == before
 
 
+def test_create_backup_cleans_owned_output_when_post_link_stat_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "post-link-stat-failure.zip"
+    original_link = os.link
+    original_stat = os.stat
+    linked = False
+    failed = False
+
+    def link_then_mark(
+        source: str,
+        target: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        nonlocal linked
+        original_link(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        linked = True
+
+    def fail_first_destination_stat(
+        path: Any,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal failed
+        if linked and not failed and path == output.name and dir_fd is not None:
+            failed = True
+            raise OSError("injected post-link stat failure")
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(backups_module.os, "link", link_then_mark)
+    monkeypatch.setattr(backups_module.os, "stat", fail_first_destination_stat)
+
+    with pytest.raises(BackupError, match="creation failed"):
+        create_workspace_backup(workspace, output)
+
+    assert linked is True
+    assert failed is True
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
+def test_create_backup_preserves_actor_replacement_after_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    output = tmp_path / "post-link-replacement.zip"
+    actor_content = b"actor-owned replacement"
+    original_link = os.link
+
+    def publish_then_replace(
+        source: str,
+        target: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        original_link(
+            source,
+            target,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        os.unlink(target, dir_fd=dst_dir_fd)
+        descriptor = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=dst_dir_fd,
+        )
+        try:
+            os.write(descriptor, actor_content)
+        finally:
+            os.close(descriptor)
+
+    monkeypatch.setattr(backups_module.os, "link", publish_then_replace)
+
+    with pytest.raises(BackupError, match="output changed"):
+        create_workspace_backup(workspace, output)
+
+    assert output.read_bytes() == actor_content
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
+
+
 def test_create_backup_refuses_output_parent_replacement_after_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1578,6 +1676,62 @@ def test_create_backup_rejects_managed_symlink(tmp_path: Path) -> None:
         create_workspace_backup(workspace, output)
 
     _assert_failed_creation_is_atomic(workspace, output, before)
+
+
+@pytest.mark.parametrize(
+    ("config_key", "default_root"),
+    [("raw_dir", "raw"), ("wiki_dir", "wiki")],
+)
+def test_create_backup_rejects_configured_directory_root_symlink_before_recursion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_key: str,
+    default_root: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=CREATED_AT)
+    outside = tmp_path / "outside-managed"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("must never be enumerated\n", encoding="utf-8")
+    managed_root = workspace.root / "linked-managed"
+    managed_root.symlink_to(outside, target_is_directory=True)
+    (workspace.root / "bundlewalker.toml").write_text(
+        DEFAULT_CONFIG_TEXT.replace(
+            f'{config_key} = "{default_root}"',
+            f'{config_key} = "{managed_root.name}"',
+        ),
+        encoding="utf-8",
+    )
+    workspace = discover_workspace(workspace.root)
+    original_rglob = Path.rglob
+    recursion_attempted = False
+
+    def reject_managed_root_recursion(
+        path: Path,
+        pattern: str,
+        *,
+        case_sensitive: bool | None = None,
+        recurse_symlinks: bool = False,
+    ) -> Iterator[Path]:
+        nonlocal recursion_attempted
+        if path == managed_root:
+            recursion_attempted = True
+            raise AssertionError("configured symlink root must be rejected before recursion")
+        return original_rglob(
+            path,
+            pattern,
+            case_sensitive=case_sensitive,
+            recurse_symlinks=recurse_symlinks,
+        )
+
+    monkeypatch.setattr(Path, "rglob", reject_managed_root_recursion)
+    output = tmp_path / f"{config_key}.zip"
+
+    with pytest.raises(BackupError, match="symlink"):
+        create_workspace_backup(workspace, output)
+
+    assert recursion_attempted is False
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bundlewalker-backup-*"))
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are unavailable")
