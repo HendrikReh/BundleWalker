@@ -68,7 +68,13 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
 
     required = workflow["jobs"]["required"]
     assert required["if"] == "always()"
-    assert required["needs"] == ["supported", "build", "artifact-smoke", "sdist-smoke"]
+    assert required["needs"] == [
+        "supported",
+        "build",
+        "artifact-smoke",
+        "sdist-smoke",
+        "dependency-audit",
+    ]
     _assert_actions_are_sha_pinned(workflow)
 
 
@@ -95,4 +101,70 @@ def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
     required_needs = workflow["jobs"]["required"]["needs"]
     for dependency in ("supported", "build", "artifact-smoke", "sdist-smoke"):
         assert dependency in required_needs
+    _assert_actions_are_sha_pinned(workflow)
+
+
+def test_ci_requires_dependency_audit() -> None:
+    workflow = _yaml(".github/workflows/ci.yml")
+
+    audit_commands = _run_commands(workflow, "dependency-audit")
+    assert (
+        "uv export --frozen --no-emit-project --output-file "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null' in audit_commands
+    )
+    assert (
+        "uv run pip-audit --strict --requirement "
+        '"$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip'
+        in audit_commands
+    )
+    assert workflow["jobs"]["required"]["needs"] == [
+        "supported",
+        "build",
+        "artifact-smoke",
+        "sdist-smoke",
+        "dependency-audit",
+    ]
+
+
+def test_dependabot_updates_uv_and_actions_weekly() -> None:
+    config = _yaml(".github/dependabot.yml")
+
+    assert config["version"] == "2"
+    assert config["updates"] == [
+        {
+            "package-ecosystem": "uv",
+            "directory": "/",
+            "schedule": {
+                "interval": "weekly",
+                "day": "monday",
+                "time": "05:00",
+                "timezone": "Europe/Berlin",
+            },
+            "open-pull-requests-limit": "5",
+        },
+        {
+            "package-ecosystem": "github-actions",
+            "directory": "/",
+            "schedule": {
+                "interval": "weekly",
+                "day": "monday",
+                "time": "05:30",
+                "timezone": "Europe/Berlin",
+            },
+            "open-pull-requests-limit": "5",
+        },
+    ]
+
+
+def test_codeql_scans_python_on_changes_and_schedule() -> None:
+    workflow = _yaml(".github/workflows/codeql.yml")
+
+    assert workflow["permissions"] == {
+        "contents": "read",
+        "security-events": "write",
+    }
+    assert workflow["on"]["push"]["branches"] == ["master"]
+    assert "pull_request" in workflow["on"]
+    assert workflow["on"]["schedule"] == [{"cron": "23 4 * * 1"}]
+    assert workflow["jobs"]["analyze"]["strategy"]["matrix"] == {"language": ["python"]}
     _assert_actions_are_sha_pinned(workflow)

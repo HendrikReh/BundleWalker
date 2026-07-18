@@ -49,6 +49,7 @@ bundlewalker-mcp = "bundlewalker.interfaces.mcp:main"
 
 [dependency-groups]
 dev = [
+    "pip-audit>=2.9,<3",
     "pyright>=1.1.400",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.1.0",

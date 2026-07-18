@@ -164,10 +164,33 @@ jobs:
           .sdist-venv/bin/bundlewalker --help
           .sdist-venv/bin/bundlewalker-mcp --help
 
+  dependency-audit:
+    name: Dependency audit
+    needs: [supported]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.13"
+          enable-cache: true
+          cache-suffix: dependency-audit
+      - name: Synchronize locked environment
+        run: uv sync --locked
+      - name: Export locked third-party requirements
+        run: uv export --frozen --no-emit-project --output-file "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" >/dev/null
+      - name: Audit locked third-party dependencies
+        run: uv run pip-audit --strict --requirement "$RUNNER_TEMP/bundlewalker-audit-requirements.txt" --require-hashes --disable-pip
+
   required:
     name: Required
     if: always()
-    needs: [supported, build, artifact-smoke, sdist-smoke]
+    needs: [supported, build, artifact-smoke, sdist-smoke, dependency-audit]
     runs-on: ubuntu-24.04
     steps:
       - name: Require supported jobs
@@ -177,3 +200,4 @@ jobs:
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.artifact-smoke.result }}" = "success"
           test "${{ needs.sdist-smoke.result }}" = "success"
+          test "${{ needs.dependency-audit.result }}" = "success"
