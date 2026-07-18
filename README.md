@@ -169,6 +169,10 @@ source path, and it does not provide a hosted, remote, HTTP, or web-server trans
 [local MCP guide](docs/user-guide.md#use-bundlewalker-through-a-local-mcp-host) for resources,
 tools, review recovery, provider behavior, and the inline-ingestion boundary.
 
+Hermes Agent users can follow the dedicated
+[Hermes MCP setup guide](docs/hermes-mcp-setup.md) for registration, tool filtering, credential
+forwarding, reload, and troubleshooting.
+
 ## Documentation
 
 Each document has one primary job:
@@ -178,6 +182,8 @@ Each document has one primary job:
   save, newer evidence, refresh, and final health checks.
 - The [User Guide](docs/user-guide.md) is authoritative for detailed user tasks, CLI behavior,
   provider setup, recovery, limits, and troubleshooting.
+- The [Hermes MCP Setup Guide](docs/hermes-mcp-setup.md) connects a Hermes Agent installation to
+  one local BundleWalker workspace with a minimal, review-first tool surface.
 - The [Changelog](CHANGELOG.md) records the public capability changes in each tagged release.
 - [Contributing](CONTRIBUTING.md) is authoritative for architecture, development workflow,
   verification, and compatibility expectations.

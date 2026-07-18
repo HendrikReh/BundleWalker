@@ -425,6 +425,10 @@ The MCP adapter is a local `stdio` server, not a hosted or remote service. It fi
 when the host starts it; no tool can select another workspace or accept a workspace path. Configure
 the host with this exact command, replacing the placeholders with local absolute paths:
 
+If your MCP host is Hermes Agent, follow the dedicated
+[Hermes MCP setup guide](hermes-mcp-setup.md) for registration, tool filtering, provider-variable
+forwarding, reload, and Hermes-specific troubleshooting.
+
 ```text
 uv run --project PROJECT_ROOT bundlewalker-mcp --workspace WORKSPACE
 ```
