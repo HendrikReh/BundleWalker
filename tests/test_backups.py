@@ -28,9 +28,11 @@ from bundlewalker.backups import (
     MAX_BACKUP_ENTRIES,
     MAX_MANIFEST_BYTES,
     BackupManifest,
+    RestoredWorkspace,
     VerifiedBackup,
     create_quiescent_backup,
     create_workspace_backup,
+    restore_workspace_backup,
     verify_backup_archive,
 )
 from bundlewalker.changes import ChangeValidationContext
@@ -41,7 +43,12 @@ from bundlewalker.domain import (
     ConceptType,
     DraftConcept,
 )
-from bundlewalker.errors import BackupError, BackupVerificationError, ReviewPendingError
+from bundlewalker.errors import (
+    BackupError,
+    BackupVerificationError,
+    RestoreTargetError,
+    ReviewPendingError,
+)
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import (
     PreparedTransaction,
@@ -122,6 +129,721 @@ def _managed_tree_bytes(workspace: Workspace) -> dict[str, bytes]:
             if candidate.is_file() and not candidate.is_symlink():
                 files[candidate.relative_to(workspace.root).as_posix()] = candidate.read_bytes()
     return files
+
+
+def test_restore_publishes_verified_bytes_to_absent_target(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    backup = create_workspace_backup(workspace, archive)
+    target = tmp_path / "restored"
+
+    restored = restore_workspace_backup(archive, target)
+
+    assert isinstance(restored, RestoredWorkspace)
+    assert restored.workspace.root == target.resolve()
+    assert restored.backup.archive_path == backup.archive_path
+    assert restored.backup.archive_sha256 == backup.archive_sha256
+    assert _managed_tree_bytes(restored.workspace) == _managed_tree_bytes(workspace)
+    assert discover_workspace(target).root == target.resolve()
+
+
+def test_restore_replaces_only_an_existing_empty_directory(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "empty"
+    target.mkdir()
+
+    restored = restore_workspace_backup(archive, target)
+
+    assert restored.workspace.root == target.resolve()
+    assert (target / "bundlewalker.toml").is_file()
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "nonempty"])
+def test_restore_refuses_occupied_or_linked_target(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    if kind == "file":
+        target.write_text("keep", encoding="utf-8")
+    elif kind == "symlink":
+        destination = tmp_path / "outside"
+        destination.mkdir()
+        target.symlink_to(destination, target_is_directory=True)
+    else:
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, target)
+
+    if kind == "file":
+        assert target.read_text(encoding="utf-8") == "keep"
+    elif kind == "symlink":
+        assert target.is_symlink()
+        assert list((tmp_path / "outside").iterdir()) == []
+    else:
+        assert (target / "keep.txt").read_text(encoding="utf-8") == "keep"
+        assert not (target / "bundlewalker.toml").exists()
+
+
+def _assert_no_restore_temporary(target: Path) -> None:
+    assert not list(target.parent.glob(f".{target.name}-restore-*"))
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ["archive_open", "archive_runtime", "write", "tree_verification", "discovery"],
+)
+def test_restore_cleans_staging_after_prepublication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_verify = backups_module.verify_backup_archive
+
+    if failure_point in {"archive_open", "archive_runtime"}:
+
+        def verify_then_break_open(path: Path) -> VerifiedBackup:
+            verified = original_verify(path)
+
+            def fail_open(*_args: object, **_kwargs: object) -> None:
+                if failure_point == "archive_runtime":
+                    raise RuntimeError("injected archive runtime failure")
+                raise OSError("injected archive open failure")
+
+            monkeypatch.setattr(zipfile.ZipFile, "open", fail_open)
+            return verified
+
+        monkeypatch.setattr(backups_module, "verify_backup_archive", verify_then_break_open)
+    elif failure_point == "write":
+
+        def verify_then_break_write(path: Path) -> VerifiedBackup:
+            verified = original_verify(path)
+
+            def fail_write(*_args: object, **_kwargs: object) -> None:
+                raise OSError("injected write failure")
+
+            monkeypatch.setattr(backups_module.os, "write", fail_write)
+            return verified
+
+        monkeypatch.setattr(backups_module, "verify_backup_archive", verify_then_break_write)
+    elif failure_point == "tree_verification":
+
+        def fail_tree_verification(*_args: object, **_kwargs: object) -> None:
+            raise BackupVerificationError("injected tree verification failure")
+
+        monkeypatch.setattr(
+            backups_module,
+            "_verify_extracted_tree",
+            fail_tree_verification,
+        )
+    else:
+
+        def fail_discovery(*_args: object, **_kwargs: object) -> None:
+            raise OSError("injected discovery failure")
+
+        monkeypatch.setattr(backups_module, "discover_workspace", fail_discovery)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_preserves_existing_empty_target_when_rmdir_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+    original_rmdir = Path.rmdir
+
+    def fail_target_rmdir(path: Path) -> None:
+        if path == target:
+            raise OSError("injected target removal failure")
+        original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", fail_target_rmdir)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_recreates_original_empty_target_when_publication_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+
+    def fail_rename(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(backups_module, "_rename_noreplace", fail_rename)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_refuses_target_populated_after_initial_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+    original_require_empty = cast(
+        Callable[[Path], None],
+        vars(backups_module)["_require_empty_target"],
+    )
+    inspections = 0
+
+    def populate_before_second_inspection(path: Path) -> None:
+        nonlocal inspections
+        inspections += 1
+        if inspections == 2:
+            (target / "keep.txt").write_text("competitor", encoding="utf-8")
+        original_require_empty(path)
+
+    monkeypatch.setattr(
+        backups_module,
+        "_require_empty_target",
+        populate_before_second_inspection,
+    )
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, target)
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "competitor"
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_does_not_replace_concurrent_empty_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_rename = cast(
+        Callable[[str, str, int], None],
+        vars(backups_module)["_rename_noreplace"],
+    )
+
+    def race_empty_target(source: str, destination: str, directory: int) -> None:
+        target.mkdir()
+        original_rename(source, destination, directory)
+
+    monkeypatch.setattr(backups_module, "_rename_noreplace", race_empty_target)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_rejects_archive_replaced_after_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "source.zip"
+    replacement = tmp_path / "replacement.zip"
+    _write_archive(archive)
+    _write_archive(
+        replacement,
+        manifest_updates={"bundlewalker_version": "replacement"},
+    )
+    target = tmp_path / "target"
+    original_verify = backups_module.verify_backup_archive
+
+    def replace_after_verification(path: Path) -> VerifiedBackup:
+        verified = original_verify(path)
+        os.replace(replacement, archive)
+        return verified
+
+    monkeypatch.setattr(
+        backups_module,
+        "verify_backup_archive",
+        replace_after_verification,
+    )
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_rejects_archive_replaced_during_staged_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "source.zip"
+    replacement = tmp_path / "replacement.zip"
+    _write_archive(archive)
+    _write_archive(
+        replacement,
+        manifest_updates={"bundlewalker_version": "replacement"},
+    )
+    target = tmp_path / "target"
+    original_discover = backups_module.discover_workspace
+
+    def replace_during_discovery(path: Path) -> Workspace:
+        workspace = original_discover(path)
+        os.replace(replacement, archive)
+        return workspace
+
+    monkeypatch.setattr(backups_module, "discover_workspace", replace_during_discovery)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_cleanup_never_deletes_replacement_staging_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    replacement: Path | None = None
+
+    def replace_staging(root: Path, _manifest: BackupManifest) -> None:
+        nonlocal replacement
+        parked = tmp_path / "parked-owned-staging"
+        root.rename(parked)
+        root.mkdir()
+        replacement = root
+        (root / "keep.txt").write_text("competitor", encoding="utf-8")
+        raise BackupVerificationError("injected replacement race")
+
+    monkeypatch.setattr(backups_module, "_verify_extracted_tree", replace_staging)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert replacement is not None
+    assert (replacement / "keep.txt").read_text(encoding="utf-8") == "competitor"
+    assert not (tmp_path / "parked-owned-staging").exists()
+    assert not target.exists()
+
+
+def test_restore_does_not_adopt_staging_replacement_during_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    parked = tmp_path / "parked-created-staging"
+    replacement: Path | None = None
+    original_stat = os.stat
+    replaced = False
+
+    def replace_before_creation_identity(
+        path: Any,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal replaced, replacement
+        name = cast(str | bytes, os.fspath(path))
+        if (
+            not replaced
+            and dir_fd is not None
+            and isinstance(name, str)
+            and name.startswith(".target-restore-")
+        ):
+            replaced = True
+            staging = tmp_path / name
+            staging.rename(parked)
+            staging.mkdir()
+            replacement = staging
+            (staging / "keep.txt").write_text("competitor", encoding="utf-8")
+        return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(backups_module.os, "stat", replace_before_creation_identity)
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert replaced is True
+    assert replacement is not None
+    assert (replacement / "keep.txt").read_text(encoding="utf-8") == "competitor"
+    assert not parked.exists()
+    assert not target.exists()
+
+
+def test_restore_rejects_parent_replaced_after_initial_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    parent = tmp_path / "destination"
+    parent.mkdir()
+    parked = tmp_path / "destination-parked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = parent / "target"
+    original_validate = cast(
+        Callable[[Path], bool],
+        vars(backups_module)["_validate_restore_target"],
+    )
+
+    def replace_parent_after_validation(path: Path) -> bool:
+        result = original_validate(path)
+        parent.rename(parked)
+        parent.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(
+        backups_module,
+        "_validate_restore_target",
+        replace_parent_after_validation,
+    )
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, target)
+
+    assert list(outside.iterdir()) == []
+    assert list(parked.iterdir()) == []
+
+
+def test_restore_detects_parent_replacement_after_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    parent = tmp_path / "destination"
+    parent.mkdir()
+    parked = tmp_path / "destination-parked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = parent / "target"
+    original_verify_tree = cast(
+        Callable[[Path, BackupManifest], None],
+        vars(backups_module)["_verify_extracted_tree"],
+    )
+
+    def replace_parent_after_tree_verification(
+        root: Path,
+        manifest: BackupManifest,
+    ) -> None:
+        original_verify_tree(root, manifest)
+        parent.rename(parked)
+        parent.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(
+        backups_module,
+        "_verify_extracted_tree",
+        replace_parent_after_tree_verification,
+    )
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert list(outside.iterdir()) == []
+    assert not (parked / "target").exists()
+    assert not list(parked.glob(".target-restore-*"))
+
+
+def test_restore_verifies_before_creating_staging_or_removing_empty_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "invalid.zip"
+    archive.write_bytes(b"not a ZIP")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    def fail_verification(_path: Path) -> VerifiedBackup:
+        raise BackupVerificationError("injected verification failure")
+
+    monkeypatch.setattr(backups_module, "verify_backup_archive", fail_verification)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_refuses_insufficient_space_before_creating_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+
+    def report_no_space(_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(free=0)
+
+    monkeypatch.setattr(backups_module.shutil, "disk_usage", report_no_space)
+
+    with pytest.raises(BackupError, match="insufficient free space"):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_refuses_special_target_without_altering_it(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    os.mkfifo(target)
+    before = target.lstat()
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, target)
+
+    after = target.lstat()
+    assert stat.S_ISFIFO(after.st_mode)
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+
+
+def test_restore_preserves_concurrent_content_after_original_target_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    target.mkdir()
+
+    def publish_competitor_then_fail(*_args: object, **_kwargs: object) -> None:
+        target.mkdir()
+        (target / "keep.txt").write_text("competitor", encoding="utf-8")
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(
+        backups_module,
+        "_rename_noreplace",
+        publish_competitor_then_fail,
+    )
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "competitor"
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_preserves_actor_replacement_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    parked = tmp_path / "parked-published-restore"
+    original_rename = cast(
+        Callable[[str, str, int], None],
+        vars(backups_module)["_rename_noreplace"],
+    )
+
+    def replace_after_publication(source: str, destination: str, directory: int) -> None:
+        original_rename(source, destination, directory)
+        target.rename(parked)
+        target.mkdir()
+        (target / "keep.txt").write_text("competitor", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backups_module,
+        "_rename_noreplace",
+        replace_after_publication,
+    )
+
+    with pytest.raises(BackupError):
+        restore_workspace_backup(archive, target)
+
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "competitor"
+    assert not parked.exists()
+
+
+def test_restore_detects_parent_replacement_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    parent = tmp_path / "destination"
+    parent.mkdir()
+    parked = tmp_path / "destination-parked"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = parent / "target"
+    original_rename = cast(
+        Callable[[str, str, int], None],
+        vars(backups_module)["_rename_noreplace"],
+    )
+
+    def replace_parent_after_publication(
+        source: str,
+        destination: str,
+        directory: int,
+    ) -> None:
+        original_rename(source, destination, directory)
+        parent.rename(parked)
+        parent.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(
+        backups_module,
+        "_rename_noreplace",
+        replace_parent_after_publication,
+    )
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, target)
+
+    assert list(outside.iterdir()) == []
+    assert not (parked / "target").exists()
+    assert not list(parked.glob(".target-restore-*"))
+
+
+def test_restore_rejects_archive_replacement_during_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "source.zip"
+    replacement = tmp_path / "replacement.zip"
+    _write_archive(archive)
+    _write_archive(
+        replacement,
+        manifest_updates={"bundlewalker_version": "replacement"},
+    )
+    target = tmp_path / "target"
+    original_rename = cast(
+        Callable[[str, str, int], None],
+        vars(backups_module)["_rename_noreplace"],
+    )
+
+    def replace_archive_after_publication(
+        source: str,
+        destination: str,
+        directory: int,
+    ) -> None:
+        original_rename(source, destination, directory)
+        os.replace(replacement, archive)
+
+    monkeypatch.setattr(
+        backups_module,
+        "_rename_noreplace",
+        replace_archive_after_publication,
+    )
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_revalidates_streamed_member_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_verify = backups_module.verify_backup_archive
+    original_open = zipfile.ZipFile.open
+
+    def verify_then_tamper_stream(path: Path) -> VerifiedBackup:
+        verified = original_verify(path)
+
+        def tamper_stream(
+            archive_file: zipfile.ZipFile,
+            name: str | zipfile.ZipInfo,
+            mode: Literal["r", "w"] = "r",
+            pwd: bytes | None = None,
+            *,
+            force_zip64: bool = False,
+        ) -> IO[bytes]:
+            if name == "workspace/conventions.md":
+                return io.BytesIO(b"x" * verified.manifest.files[1].size)
+            return original_open(
+                archive_file,
+                name,
+                mode,
+                pwd,
+                force_zip64=force_zip64,
+            )
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", tamper_stream)
+        return verified
+
+    monkeypatch.setattr(
+        backups_module,
+        "verify_backup_archive",
+        verify_then_tamper_stream,
+    )
+
+    with pytest.raises(BackupVerificationError, match="identity mismatch"):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+def test_restore_creates_private_files_and_directories(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+
+    restored = restore_workspace_backup(archive, target)
+
+    assert stat.S_IMODE(restored.workspace.root.stat().st_mode) & 0o077 == 0
+    for path in restored.workspace.root.rglob("*"):
+        assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
 
 
 def _valid_payload() -> dict[str, bytes]:

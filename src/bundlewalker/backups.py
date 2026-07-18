@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import os
+import secrets
 import shutil
 import stat
 import struct
+import sys
 import unicodedata
 import zipfile
 import zlib
@@ -23,13 +27,19 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from bundlewalker import __version__
 from bundlewalker.compatibility import CURRENT_WORKSPACE_FORMAT
-from bundlewalker.errors import BackupError, BackupVerificationError, BundleWalkerError
+from bundlewalker.errors import (
+    BackupError,
+    BackupVerificationError,
+    BundleWalkerError,
+    RestoreTargetError,
+)
 from bundlewalker.transactions import QuiescentWorkspace, quiescent_workspace
 from bundlewalker.workspace import (
     CONFIG_FILENAME,
     MAX_WORKSPACE_CONFIG_BYTES,
     Workspace,
     WorkspaceConfig,
+    discover_workspace,
     parse_workspace_config,
 )
 
@@ -127,6 +137,12 @@ class VerifiedBackup:
 
 
 @dataclass(frozen=True, slots=True)
+class RestoredWorkspace:
+    workspace: Workspace
+    backup: VerifiedBackup
+
+
+@dataclass(frozen=True, slots=True)
 class _ManagedEntry:
     relative: str
     absolute: Path
@@ -148,6 +164,741 @@ def create_workspace_backup(
             clock=clock,
             bundlewalker_version=bundlewalker_version,
         )
+
+
+def restore_workspace_backup(archive: Path, target: Path) -> RestoredWorkspace:
+    requested_target = target.expanduser().absolute()
+    target_existed = _validate_restore_target(requested_target)
+    requested_parent = requested_target.parent
+    target_path = requested_target
+    parent_descriptor: int | None = None
+    parent_identity: tuple[int, int, int] | None = None
+    original_target_identity: tuple[int, int] | None = None
+    verified_source: IO[bytes] | None = None
+    temporary: Path | None = None
+    temporary_name: str | None = None
+    temporary_identity: tuple[int, int] | None = None
+    removed_empty_target = False
+    completed = False
+    try:
+        parent_descriptor, parent_identity = _open_restore_parent(requested_parent)
+        resolved_parent = _resolve_restore_parent(
+            requested_parent,
+            parent_descriptor,
+            parent_identity,
+        )
+        target_path = resolved_parent / requested_target.name
+        original_target_identity = _capture_restore_target(
+            parent_descriptor,
+            target_path.name,
+            expected_to_exist=target_existed,
+        )
+        verified = verify_backup_archive(archive)
+        verified_source = _open_verified_archive(verified)
+        if shutil.disk_usage(target_path.parent).free < verified.byte_count:
+            raise BackupError("restore destination has insufficient free space")
+        _require_restore_parent_stable(
+            requested_parent,
+            resolved_parent,
+            parent_descriptor,
+            parent_identity,
+        )
+        temporary_name, temporary_identity = _create_restore_staging(
+            parent_descriptor,
+            target_path.name,
+        )
+        temporary = target_path.parent / temporary_name
+        _extract_verified_backup(verified, temporary, verified_source)
+        _require_owned_staging(temporary, temporary_identity)
+        _verify_extracted_tree(temporary, verified.manifest)
+        _require_owned_staging(temporary, temporary_identity)
+        restored_workspace = discover_workspace(temporary)
+        if (
+            restored_workspace.root != temporary
+            or restored_workspace.config.version != verified.manifest.workspace_format_version
+        ):
+            raise BackupVerificationError("restored workspace version does not match manifest")
+        _validate_managed_payload(verified.manifest, restored_workspace.config)
+        _require_verified_archive_open(verified, verified_source)
+        _require_owned_staging(temporary, temporary_identity)
+        _require_restore_parent_stable(
+            requested_parent,
+            resolved_parent,
+            parent_descriptor,
+            parent_identity,
+        )
+        if target_existed:
+            _require_empty_target(target_path)
+            if original_target_identity is None:
+                raise RestoreTargetError("restore target changed during restoration")
+            _require_original_empty_target(
+                parent_descriptor,
+                target_path.name,
+                original_target_identity,
+            )
+            target_path.rmdir()
+            removed_empty_target = True
+        else:
+            _require_absent_restore_target(parent_descriptor, target_path.name)
+        _require_restore_parent_stable(
+            requested_parent,
+            resolved_parent,
+            parent_descriptor,
+            parent_identity,
+        )
+        _require_owned_staging(temporary, temporary_identity)
+        _rename_noreplace(
+            temporary_name,
+            target_path.name,
+            parent_descriptor,
+        )
+        _require_published_restore(
+            parent_descriptor,
+            target_path.name,
+            temporary_identity,
+        )
+        _require_restore_parent_stable(
+            requested_parent,
+            resolved_parent,
+            parent_descriptor,
+            parent_identity,
+        )
+        _sync_directory_descriptor(parent_descriptor)
+        _require_verified_archive_open(verified, verified_source)
+        _require_published_restore(
+            parent_descriptor,
+            target_path.name,
+            temporary_identity,
+        )
+        _require_restore_parent_stable(
+            requested_parent,
+            resolved_parent,
+            parent_descriptor,
+            parent_identity,
+        )
+        completed = True
+        published = Workspace(root=target_path, config=restored_workspace.config)
+        return RestoredWorkspace(published, verified)
+    except (BackupError, RestoreTargetError):
+        raise
+    except (
+        BundleWalkerError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+        zlib.error,
+    ) as exc:
+        raise BackupError("workspace restore failed") from exc
+    finally:
+        if verified_source is not None:
+            with suppress(OSError):
+                verified_source.close()
+        if not completed and parent_descriptor is not None and temporary_identity is not None:
+            _remove_owned_restore_tree(parent_descriptor, temporary_identity)
+        if removed_empty_target and not completed and parent_descriptor is not None:
+            _recreate_empty_restore_target(parent_descriptor, target_path.name)
+        if parent_descriptor is not None:
+            with suppress(OSError):
+                os.close(parent_descriptor)
+
+
+def _validate_restore_target(target: Path) -> bool:
+    if not target.name or not target.parent.is_dir() or target.parent.is_symlink():
+        raise RestoreTargetError("restore target parent must be a regular directory")
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
+        raise RestoreTargetError("restore target must be a new or empty directory")
+    if target.is_dir():
+        _require_empty_target(target)
+        return True
+    return False
+
+
+def _open_restore_parent(parent: Path) -> tuple[int, tuple[int, int, int]]:
+    descriptor: int | None = None
+    succeeded = False
+    try:
+        before = parent.lstat()
+        if not stat.S_ISDIR(before.st_mode):
+            raise RestoreTargetError("restore target parent must be a regular directory")
+        descriptor = os.open(
+            parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+        )
+        descriptor_state = os.fstat(descriptor)
+        after = parent.lstat()
+        identity = _managed_identity(descriptor_state)
+        if (
+            not stat.S_ISDIR(descriptor_state.st_mode)
+            or _managed_identity(before) != identity
+            or _managed_identity(after) != identity
+        ):
+            raise RestoreTargetError("restore target parent changed during inspection")
+        succeeded = True
+        return descriptor, identity
+    except RestoreTargetError:
+        raise
+    except OSError as exc:
+        raise RestoreTargetError("restore target parent could not be inspected") from exc
+    finally:
+        if descriptor is not None and not succeeded:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _capture_restore_target(
+    parent_descriptor: int,
+    name: str,
+    *,
+    expected_to_exist: bool,
+) -> tuple[int, int] | None:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        if expected_to_exist:
+            raise RestoreTargetError("restore target changed during inspection") from None
+        return None
+    except OSError as exc:
+        raise RestoreTargetError("restore target could not be inspected") from exc
+    if not expected_to_exist:
+        raise RestoreTargetError("restore target changed during inspection")
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RestoreTargetError("restore target must be an empty regular directory")
+    identity = (metadata.st_dev, metadata.st_ino)
+    _require_original_empty_target(parent_descriptor, name, identity)
+    return identity
+
+
+def _resolve_restore_parent(
+    requested_parent: Path,
+    descriptor: int,
+    identity: tuple[int, int, int],
+) -> Path:
+    try:
+        resolved_parent = requested_parent.resolve(strict=True)
+        resolved_state = resolved_parent.lstat()
+        descriptor_state = os.fstat(descriptor)
+    except OSError as exc:
+        raise RestoreTargetError("restore target parent changed during inspection") from exc
+    if (
+        _managed_identity(resolved_state) != identity
+        or _managed_identity(descriptor_state) != identity
+    ):
+        raise RestoreTargetError("restore target parent changed during inspection")
+    return resolved_parent
+
+
+def _require_restore_parent_stable(
+    requested_parent: Path,
+    resolved_parent: Path,
+    descriptor: int,
+    identity: tuple[int, int, int],
+) -> None:
+    try:
+        descriptor_state = os.fstat(descriptor)
+        requested_state = requested_parent.lstat()
+        resolved_state = resolved_parent.lstat()
+        current_resolved = requested_parent.resolve(strict=True)
+    except OSError as exc:
+        raise RestoreTargetError("restore target parent changed during restoration") from exc
+    if (
+        not stat.S_ISDIR(descriptor_state.st_mode)
+        or not stat.S_ISDIR(requested_state.st_mode)
+        or not stat.S_ISDIR(resolved_state.st_mode)
+        or _managed_identity(descriptor_state) != identity
+        or _managed_identity(requested_state) != identity
+        or _managed_identity(resolved_state) != identity
+        or current_resolved != resolved_parent
+    ):
+        raise RestoreTargetError("restore target parent changed during restoration")
+
+
+def _require_empty_target(target: Path) -> None:
+    descriptor: int | None = None
+    try:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
+        descriptor = os.open(target, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RestoreTargetError("restore target must be an empty regular directory")
+        if os.listdir(descriptor):
+            raise RestoreTargetError("restore target must be empty")
+    except RestoreTargetError:
+        raise
+    except OSError as exc:
+        raise RestoreTargetError("restore target could not be inspected") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _require_original_empty_target(
+    parent_descriptor: int,
+    name: str,
+    identity: tuple[int, int],
+) -> None:
+    descriptor: int | None = None
+    try:
+        before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+            dir_fd=parent_descriptor,
+        )
+        descriptor_state = os.fstat(descriptor)
+        after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if any(
+            not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity
+            for metadata in (before, descriptor_state, after)
+        ):
+            raise RestoreTargetError("restore target changed during restoration")
+        if os.listdir(descriptor):
+            raise RestoreTargetError("restore target must be empty")
+    except RestoreTargetError:
+        raise
+    except OSError as exc:
+        raise RestoreTargetError("restore target changed during restoration") from exc
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _require_absent_restore_target(parent_descriptor: int, name: str) -> None:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RestoreTargetError("restore target could not be inspected") from exc
+    raise RestoreTargetError("restore target appeared during restoration")
+
+
+def _open_verified_archive(verified: VerifiedBackup) -> IO[bytes]:
+    descriptor: int | None = None
+    try:
+        before = verified.archive_path.lstat()
+        descriptor = os.open(
+            verified.archive_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+        )
+        descriptor_state = os.fstat(descriptor)
+        after = verified.archive_path.lstat()
+        _require_unchanged_archive(descriptor_state, before, after)
+        source = os.fdopen(descriptor, "rb")
+        descriptor = None
+        if _file_sha256(source) != verified.archive_sha256:
+            source.close()
+            raise BackupVerificationError("backup archive changed after verification")
+        source.seek(0)
+        return source
+    except BackupVerificationError:
+        raise
+    except OSError as exc:
+        raise BackupVerificationError("backup archive changed after verification") from exc
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _require_verified_archive_open(verified: VerifiedBackup, source: IO[bytes]) -> None:
+    try:
+        descriptor_state = os.fstat(source.fileno())
+        path_state = verified.archive_path.lstat()
+        if _file_sha256(source) != verified.archive_sha256:
+            raise BackupVerificationError("backup archive changed during restoration")
+        _require_unchanged_archive(descriptor_state, path_state)
+    except BackupVerificationError:
+        raise
+    except OSError as exc:
+        raise BackupVerificationError("backup archive changed during restoration") from exc
+
+
+def _create_restore_staging(
+    parent_descriptor: int,
+    target_name: str,
+) -> tuple[str, tuple[int, int]]:
+    for _attempt in range(100):
+        name = f".{target_name}-restore-{secrets.token_hex(8)}"
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+        descriptor: int | None = None
+        identity: tuple[int, int] | None = None
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0),
+                dir_fd=parent_descriptor,
+            )
+            descriptor_state = os.fstat(descriptor)
+            identity = (descriptor_state.st_dev, descriptor_state.st_ino)
+            relative_state = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISDIR(descriptor_state.st_mode)
+                or not stat.S_ISDIR(relative_state.st_mode)
+                or (relative_state.st_dev, relative_state.st_ino) != identity
+            ):
+                raise BackupError("restore staging directory changed during creation")
+            return name, identity
+        except BaseException:
+            if identity is not None:
+                _remove_owned_restore_tree(parent_descriptor, identity)
+            raise
+        finally:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+    raise BackupError("restore staging directory could not be allocated")
+
+
+def _require_owned_staging(temporary: Path, identity: tuple[int, int]) -> None:
+    try:
+        metadata = temporary.lstat()
+    except OSError as exc:
+        raise BackupError("restore staging directory changed") from exc
+    if not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity:
+        raise BackupError("restore staging directory changed")
+
+
+def _extract_verified_backup(
+    verified: VerifiedBackup,
+    temporary: Path,
+    source: IO[bytes],
+) -> None:
+    root_descriptor: int | None = None
+    try:
+        root_descriptor = os.open(
+            temporary,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+        )
+        with zipfile.ZipFile(source) as archive_file:
+            for relative in verified.manifest.directories:
+                descriptor = _open_restore_directory(
+                    root_descriptor,
+                    PurePosixPath(relative).parts,
+                    create=True,
+                )
+                _sync_directory_descriptor(descriptor)
+                os.close(descriptor)
+            for record in verified.manifest.files:
+                parts = PurePosixPath(record.path).parts
+                parent = _open_restore_directory(
+                    root_descriptor,
+                    parts[:-1],
+                    create=True,
+                )
+                try:
+                    flags = (
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_BINARY", 0)
+                    )
+                    descriptor = os.open(parts[-1], flags, 0o600, dir_fd=parent)
+                    digest = hashlib.sha256()
+                    count = 0
+                    try:
+                        with archive_file.open(f"{PAYLOAD_PREFIX}{record.path}") as member:
+                            while chunk := member.read(1024 * 1024):
+                                count += len(chunk)
+                                if count > record.size:
+                                    raise BackupVerificationError(
+                                        f"backup member exceeds declared size: {record.path}"
+                                    )
+                                digest.update(chunk)
+                                view = memoryview(chunk)
+                                while view:
+                                    written = os.write(descriptor, view)
+                                    if written == 0:
+                                        raise OSError("restore write made no progress")
+                                    view = view[written:]
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    if count != record.size or digest.hexdigest() != record.sha256:
+                        raise BackupVerificationError(
+                            f"restored member identity mismatch: {record.path}"
+                        )
+                    _sync_directory_descriptor(parent)
+                finally:
+                    os.close(parent)
+        _sync_directory_descriptor(root_descriptor)
+    finally:
+        if root_descriptor is not None:
+            with suppress(OSError):
+                os.close(root_descriptor)
+
+
+def _open_restore_directory(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    create: bool,
+) -> int:
+    current = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current)
+                    _sync_directory_descriptor(current)
+                except FileExistsError:
+                    pass
+            child = os.open(
+                part,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_BINARY", 0),
+                dir_fd=current,
+            )
+            child_state = os.fstat(child)
+            relative_state = os.stat(part, dir_fd=current, follow_symlinks=False)
+            if not stat.S_ISDIR(child_state.st_mode) or _managed_identity(
+                child_state
+            ) != _managed_identity(relative_state):
+                os.close(child)
+                raise BackupVerificationError("restore staging path changed during extraction")
+            os.close(current)
+            current = child
+        return current
+    except BaseException:
+        with suppress(OSError):
+            os.close(current)
+        raise
+
+
+def _verify_extracted_tree(root: Path, manifest: BackupManifest) -> None:
+    root_descriptor: int | None = None
+    try:
+        root_descriptor = os.open(
+            root,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+        )
+        expected_files = {record.path: record for record in manifest.files}
+        actual_files: set[str] = set()
+        actual_directories: set[str] = set()
+        _walk_extracted_tree(
+            root_descriptor,
+            PurePosixPath(),
+            expected_files,
+            actual_files,
+            actual_directories,
+        )
+        if actual_files != set(expected_files) or actual_directories != set(manifest.directories):
+            raise BackupVerificationError("restored workspace entries do not match manifest")
+    finally:
+        if root_descriptor is not None:
+            with suppress(OSError):
+                os.close(root_descriptor)
+
+
+def _walk_extracted_tree(
+    directory_descriptor: int,
+    parent: PurePosixPath,
+    expected_files: dict[str, BackupFileRecord],
+    actual_files: set[str],
+    actual_directories: set[str],
+) -> None:
+    for name in sorted(os.listdir(directory_descriptor)):
+        path = parent / name
+        relative = path.as_posix()
+        metadata = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            actual_directories.add(relative)
+            child = _open_restore_directory(
+                directory_descriptor,
+                (name,),
+                create=False,
+            )
+            try:
+                _walk_extracted_tree(
+                    child,
+                    path,
+                    expected_files,
+                    actual_files,
+                    actual_directories,
+                )
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(metadata.st_mode):
+            actual_files.add(relative)
+            record = expected_files.get(relative)
+            if record is None:
+                raise BackupVerificationError("restored workspace file identity mismatch")
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+                dir_fd=directory_descriptor,
+            )
+            try:
+                descriptor_state = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(descriptor_state.st_mode)
+                    or _managed_identity(descriptor_state) != _managed_identity(metadata)
+                    or descriptor_state.st_size != record.size
+                ):
+                    raise BackupVerificationError("restored workspace file identity mismatch")
+                with os.fdopen(os.dup(descriptor), "rb") as restored_file:
+                    digest = _file_sha256(restored_file)
+                after = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if digest != record.sha256 or _managed_state(after) != _managed_state(
+                    descriptor_state
+                ):
+                    raise BackupVerificationError("restored workspace file identity mismatch")
+            finally:
+                os.close(descriptor)
+        else:
+            raise BackupVerificationError("restored workspace contains a special file")
+
+
+def _rename_noreplace(source: str, destination: str, directory_descriptor: int) -> None:
+    library = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        try:
+            rename = library.renameatx_np
+        except AttributeError as exc:
+            raise OSError(errno.ENOSYS, "atomic no-replace rename is unavailable") from exc
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            directory_descriptor,
+            source_bytes,
+            directory_descriptor,
+            destination_bytes,
+            0x00000004,
+        )
+    elif sys.platform.startswith("linux"):
+        try:
+            rename = library.renameat2
+        except AttributeError as exc:
+            raise OSError(errno.ENOSYS, "atomic no-replace rename is unavailable") from exc
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            directory_descriptor,
+            source_bytes,
+            directory_descriptor,
+            destination_bytes,
+            0x00000001,
+        )
+    else:
+        os.rename(
+            source,
+            destination,
+            src_dir_fd=directory_descriptor,
+            dst_dir_fd=directory_descriptor,
+        )
+        return
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _require_published_restore(
+    parent_descriptor: int,
+    name: str,
+    identity: tuple[int, int],
+) -> None:
+    descriptor: int | None = None
+    try:
+        before = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+            dir_fd=parent_descriptor,
+        )
+        descriptor_state = os.fstat(descriptor)
+        after = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if any(
+            not stat.S_ISDIR(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity
+            for metadata in (before, descriptor_state, after)
+        ):
+            raise BackupError("restored workspace changed during publication")
+    except BackupError:
+        raise
+    except OSError as exc:
+        raise BackupError("restored workspace changed during publication") from exc
+    finally:
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _remove_owned_restore_tree(
+    parent_descriptor: int,
+    identity: tuple[int, int],
+) -> None:
+    if not shutil.rmtree.avoids_symlink_attacks:
+        return
+    with suppress(OSError):
+        for name in os.listdir(parent_descriptor):
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                continue
+            if stat.S_ISDIR(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == identity:
+                shutil.rmtree(name, dir_fd=parent_descriptor)
+                return
+
+
+def _recreate_empty_restore_target(parent_descriptor: int, name: str) -> None:
+    with suppress(OSError):
+        os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
 
 
 def create_quiescent_backup(

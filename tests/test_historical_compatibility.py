@@ -9,12 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from bundlewalker.backups import create_workspace_backup, verify_backup_archive
+from bundlewalker.backups import (
+    create_workspace_backup,
+    restore_workspace_backup,
+    verify_backup_archive,
+)
 from bundlewalker.compatibility import CompatibilityStatus, inspect_workspace
 from bundlewalker.errors import ConfigurationError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import get_pending_review, recover_transactions
-from bundlewalker.workspace import discover_workspace
+from bundlewalker.workspace import Workspace, discover_workspace
 
 FIXTURES = Path(__file__).parent / "fixtures" / "historical"
 
@@ -50,6 +54,26 @@ def test_released_clean_workspace_creates_a_current_verified_backup(
 
     assert verified.manifest.workspace_format_version == 1
     assert verify_backup_archive(verified.archive_path) == verified
+
+
+@pytest.mark.parametrize("release", ["v1", "v2", "v3"])
+def test_released_workspace_round_trips_through_backup_and_restore(
+    tmp_path: Path,
+    release: str,
+) -> None:
+    source = tmp_path / f"{release}-source"
+    shutil.copytree(FIXTURES / f"{release}-clean", source)
+    archive = tmp_path / f"{release}.zip"
+    original = discover_workspace(source)
+    create_workspace_backup(original, archive)
+
+    restored = restore_workspace_backup(archive, tmp_path / f"{release}-restored")
+
+    assert _workspace_bytes(restored.workspace) == _workspace_bytes(original)
+    assert set(OkfRepository(restored.workspace.wiki_dir).scan()) == set(
+        OkfRepository(original.wiki_dir).scan()
+    )
+    assert (restored.workspace.wiki_dir / "index.md").is_file()
 
 
 def test_v1_interrupted_schema1_transaction_recovers_exact_base(tmp_path: Path) -> None:
@@ -121,3 +145,19 @@ def _tree_digest(root: Path) -> str:
             digest.update(b"F" + len(relative).to_bytes(8, "big") + relative)
             digest.update(len(content).to_bytes(8, "big") + content)
     return digest.hexdigest()
+
+
+def _workspace_bytes(workspace: Workspace) -> dict[str, bytes]:
+    roots = (
+        workspace.root / "bundlewalker.toml",
+        workspace.conventions_file,
+        workspace.raw_dir,
+        workspace.wiki_dir,
+    )
+    files: dict[str, bytes] = {}
+    for root in roots:
+        candidates = (root,) if root.is_file() else tuple(sorted(root.rglob("*")))
+        for candidate in candidates:
+            if candidate.is_file() and not candidate.is_symlink():
+                files[candidate.relative_to(workspace.root).as_posix()] = candidate.read_bytes()
+    return files

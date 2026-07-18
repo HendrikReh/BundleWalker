@@ -34,6 +34,10 @@ class BackupVerificationError(BackupError):
     pass
 
 
+class RestoreTargetError(UsageError):
+    pass
+
+
 class OkfError(BundleWalkerError):
     pass
 
