@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path

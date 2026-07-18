@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 import hashlib
 import tomllib
 from importlib.metadata import version as distribution_version
@@ -20,6 +23,7 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/research-agent.md",
     "src/bundlewalker/convention_presets/software-agent.md",
 }
+PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
 
 
 def test_v2_release_versions_are_consistent() -> None:
@@ -62,3 +66,16 @@ def test_cc0_scope_matches_the_packaged_convention_presets() -> None:
     assert all(f"`{relative}`" in scope for relative in CC0_PRESET_PATHS)
     assert "All other project-owned files are licensed under GPL-3.0-or-later." in scope
     assert "generated `conventions.md`" in scope
+
+
+def test_all_python_files_have_gpl_spdx_headers() -> None:
+    python_files = sorted((PROJECT_ROOT / "src").rglob("*.py"))
+    python_files.extend(sorted((PROJECT_ROOT / "tests").rglob("*.py")))
+    missing = [
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in python_files
+        if not path.read_text(encoding="utf-8").startswith(PYTHON_HEADER)
+    ]
+
+    assert python_files
+    assert not missing, "missing GPL SPDX header:\n" + "\n".join(missing)

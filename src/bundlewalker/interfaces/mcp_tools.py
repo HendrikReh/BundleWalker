@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Low-level MCP tool definitions and workspace-application dispatch."""
 
 import logging

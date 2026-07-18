@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Closed, safe-by-construction error translation for every delivery adapter."""
 
 import re

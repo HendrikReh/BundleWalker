@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Workspace-bound async read use cases shared by delivery adapters."""
 
 import binascii

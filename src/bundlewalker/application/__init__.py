@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """Stable adapter-neutral application contracts and public errors."""
 
 from bundlewalker.application.contracts import (
