@@ -1,0 +1,11 @@
+{
+  "changed_paths": [
+    "sources/7fb0df98f02f-v3-source-notes"
+  ],
+  "created_at": "2026-07-15T12:00:00+00:00",
+  "diff": "--- wiki/log.md\n+++ wiki/log.md\n@@ -2,4 +2,5 @@\n \n ## 2026-07-15\n \n+* **Update**: Integrated source notes.\n * **Initialization**: Initialized the knowledge workspace.\n--- /dev/null\n+++ wiki/sources/7fb0df98f02f-v3-source-notes.md\n@@ -0,0 +1,18 @@\n+---\n+type: Source\n+title: Source notes\n+description: Knowledge about Source notes.\n+resource: urn:bundlewalker:source:sha256:7fb0df98f02f6cec71181a2ef29544a158e70157cc9bc6107c968d5ceb6aa45b\n+tags:\n+- test\n+timestamp: 2026-07-15 12:00:00+00:00\n+source_sha256: 7fb0df98f02f6cec71181a2ef29544a158e70157cc9bc6107c968d5ceb6aa45b\n+raw_path: raw/7fb0df98f02f-v3-source-notes.txt\n+---\n+# Source notes\n+\n+A grounded claim [1].\n+\n+# Citations\n+\n+[1] [Source notes](/sources/7fb0df98f02f-v3-source-notes.md) \u2014 raw lines 1\u20132\n--- wiki/sources/index.md\n+++ wiki/sources/index.md\n@@ -1 +1,5 @@\n # Sources\n+\n+## Concepts\n+\n+* [Source notes](7fb0df98f02f-v3-source-notes.md) - Knowledge about Source notes.\n",
+  "kind": "ingestion",
+  "schema_version": 1,
+  "summary": "Integrated source notes.",
+  "transaction_id": "7e68e64967bd4619b876fc6eb7b68630"
+}
