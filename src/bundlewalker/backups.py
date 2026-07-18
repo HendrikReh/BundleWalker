@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 import struct
 import unicodedata
 import zipfile
 import zlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import IO, Literal, Self
 
@@ -73,8 +74,8 @@ class BackupManifest(BaseModel):
 
     @model_validator(mode="after")
     def validate_manifest(self) -> Self:
-        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
-            raise ValueError("backup timestamp must include a timezone")
+        if self.created_at.utcoffset() != timedelta(0):
+            raise ValueError("backup timestamp must be UTC")
         if self.workspace_format_version != CURRENT_WORKSPACE_FORMAT:
             raise ValueError("unsupported backup workspace format")
         if len(self.directories) + len(self.files) > MAX_BACKUP_ENTRIES:
@@ -120,77 +121,119 @@ class VerifiedBackup:
 
 def verify_backup_archive(path: Path) -> VerifiedBackup:
     candidate = path.expanduser().absolute()
-    if candidate.is_symlink() or not candidate.is_file():
-        raise BackupVerificationError("backup archive must be a regular file")
     try:
-        archive_path = candidate.resolve(strict=True)
-        _preflight_archive(archive_path)
-        archive_sha256 = _file_sha256(archive_path)
-        with zipfile.ZipFile(archive_path) as archive:
-            infos = archive.infolist()
-            _validate_member_metadata(infos)
-            names = [info.filename for info in infos]
-            if len(names) != len(set(names)):
-                raise BackupVerificationError("backup contains duplicate ZIP members")
-            if names.count(MANIFEST_NAME) != 1:
-                raise BackupVerificationError("backup must contain exactly one manifest")
-            info_by_name = {info.filename: info for info in infos}
-            manifest_info = info_by_name[MANIFEST_NAME]
-            manifest_content = _read_member(archive, manifest_info, MAX_MANIFEST_BYTES)
-            try:
-                manifest = BackupManifest.model_validate_json(manifest_content, strict=True)
-            except ValidationError as exc:
-                raise BackupVerificationError("backup manifest is invalid") from exc
-            if manifest_info.is_dir():
-                raise BackupVerificationError("backup manifest must be a regular file")
-            expected_names = {MANIFEST_NAME}
-            expected_names.update(f"{PAYLOAD_PREFIX}{path}/" for path in manifest.directories)
-            expected_names.update(f"{PAYLOAD_PREFIX}{record.path}" for record in manifest.files)
-            if set(names) != expected_names:
-                raise BackupVerificationError("backup members do not match its manifest")
-            if any(
-                not info_by_name[f"{PAYLOAD_PREFIX}{path}/"].is_dir()
-                for path in manifest.directories
-            ):
-                raise BackupVerificationError("backup directory member has the wrong type")
-            if any(
-                info_by_name[f"{PAYLOAD_PREFIX}{record.path}"].is_dir() for record in manifest.files
-            ):
-                raise BackupVerificationError("backup file member has the wrong type")
-            records = {record.path: record for record in manifest.files}
-            config_record = records.get(CONFIG_FILENAME)
-            if config_record is None:
-                raise BackupVerificationError("backup does not contain bundlewalker.toml")
-            if config_record.size > MAX_WORKSPACE_CONFIG_BYTES:
-                raise BackupVerificationError("backup workspace configuration is too large")
-            config_content: bytes | None = None
-            for record in manifest.files:
-                member = info_by_name[f"{PAYLOAD_PREFIX}{record.path}"]
-                content = _verify_member(
-                    archive,
-                    member,
-                    record,
-                    capture=record.path == CONFIG_FILENAME,
-                )
-                if content is not None:
-                    config_content = content
-            if config_content is None:
-                raise BackupVerificationError("backup workspace configuration is unavailable")
-            try:
-                config = parse_workspace_config(
-                    config_content.decode("utf-8", errors="strict"),
-                    source=f"{archive_path}:{CONFIG_FILENAME}",
-                )
-            except (BundleWalkerError, UnicodeDecodeError) as exc:
-                raise BackupVerificationError("backup workspace configuration is invalid") from exc
-            _validate_managed_payload(manifest, config)
+        path_before = candidate.lstat()
+    except OSError as exc:
+        raise BackupVerificationError("backup archive must be a regular file") from exc
+    if not stat.S_ISREG(path_before.st_mode):
+        raise BackupVerificationError("backup archive must be a regular file")
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(candidate, flags)
+        descriptor_before = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_before.st_mode):
+            raise BackupVerificationError("backup archive must be a regular file")
+        path_after_open = candidate.lstat()
+        _require_unchanged_archive(descriptor_before, path_before, path_after_open)
+        source = os.fdopen(descriptor, "rb")
+        descriptor = None
+        with source:
+            archive_path = candidate.resolve(strict=True)
+            path_after_resolve = candidate.lstat()
+            resolved_after_open = archive_path.lstat()
+            _require_unchanged_archive(
+                descriptor_before,
+                path_after_resolve,
+                resolved_after_open,
+            )
+            _preflight_archive(source)
+            archive_sha256 = _file_sha256(source)
+            with zipfile.ZipFile(source) as archive:
+                infos = archive.infolist()
+                _validate_member_metadata(infos)
+                names = [info.filename for info in infos]
+                if len(names) != len(set(names)):
+                    raise BackupVerificationError("backup contains duplicate ZIP members")
+                if names.count(MANIFEST_NAME) != 1:
+                    raise BackupVerificationError("backup must contain exactly one manifest")
+                info_by_name = {info.filename: info for info in infos}
+                manifest_info = info_by_name[MANIFEST_NAME]
+                manifest_content = _read_member(archive, manifest_info, MAX_MANIFEST_BYTES)
+                try:
+                    manifest = BackupManifest.model_validate_json(manifest_content, strict=True)
+                except ValidationError as exc:
+                    raise BackupVerificationError("backup manifest is invalid") from exc
+                if manifest_info.is_dir():
+                    raise BackupVerificationError("backup manifest must be a regular file")
+                expected_names = {MANIFEST_NAME}
+                expected_names.update(f"{PAYLOAD_PREFIX}{path}/" for path in manifest.directories)
+                expected_names.update(f"{PAYLOAD_PREFIX}{record.path}" for record in manifest.files)
+                if set(names) != expected_names:
+                    raise BackupVerificationError("backup members do not match its manifest")
+                if any(
+                    not info_by_name[f"{PAYLOAD_PREFIX}{path}/"].is_dir()
+                    for path in manifest.directories
+                ):
+                    raise BackupVerificationError("backup directory member has the wrong type")
+                if any(
+                    info_by_name[f"{PAYLOAD_PREFIX}{record.path}"].is_dir()
+                    for record in manifest.files
+                ):
+                    raise BackupVerificationError("backup file member has the wrong type")
+                records = {record.path: record for record in manifest.files}
+                config_record = records.get(CONFIG_FILENAME)
+                if config_record is None:
+                    raise BackupVerificationError("backup does not contain bundlewalker.toml")
+                if config_record.size > MAX_WORKSPACE_CONFIG_BYTES:
+                    raise BackupVerificationError("backup workspace configuration is too large")
+                config_content: bytes | None = None
+                for record in manifest.files:
+                    member = info_by_name[f"{PAYLOAD_PREFIX}{record.path}"]
+                    content = _verify_member(
+                        archive,
+                        member,
+                        record,
+                        capture=record.path == CONFIG_FILENAME,
+                    )
+                    if content is not None:
+                        config_content = content
+                if config_content is None:
+                    raise BackupVerificationError("backup workspace configuration is unavailable")
+                try:
+                    config = parse_workspace_config(
+                        config_content.decode("utf-8", errors="strict"),
+                        source=f"{archive_path}:{CONFIG_FILENAME}",
+                    )
+                except (BundleWalkerError, UnicodeDecodeError) as exc:
+                    raise BackupVerificationError(
+                        "backup workspace configuration is invalid"
+                    ) from exc
+                _validate_managed_payload(manifest, config)
+            descriptor_after = os.fstat(source.fileno())
+            final_path_before_resolve = candidate.lstat()
+            final_archive_path = candidate.resolve(strict=True)
+            final_path_after_resolve = candidate.lstat()
+            resolved_final = final_archive_path.lstat()
+            if final_archive_path != archive_path:
+                raise BackupVerificationError("backup archive changed while it was verified")
+            _require_unchanged_archive(
+                descriptor_before,
+                descriptor_after,
+                final_path_before_resolve,
+                final_path_after_resolve,
+                resolved_final,
+            )
+            return VerifiedBackup(archive_path, archive_sha256, manifest)
     except zipfile.BadZipFile as exc:
         raise BackupVerificationError("backup archive is not a valid ZIP") from exc
     except (NotImplementedError, RuntimeError, UnicodeDecodeError, zlib.error) as exc:
         raise BackupVerificationError("backup archive uses an unsupported ZIP feature") from exc
     except OSError as exc:
         raise BackupVerificationError("backup archive could not be read") from exc
-    return VerifiedBackup(archive_path, archive_sha256, manifest)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _canonical_relative_path(value: str) -> str:
@@ -207,7 +250,10 @@ def _canonical_relative_path(value: str) -> str:
         path.is_absolute()
         or path == PurePosixPath(".")
         or any(part in {"", ".", ".."} for part in path.parts)
-        or (path.parts and path.parts[0].endswith(":"))
+        or any(
+            len(part) >= 2 and part[0].isascii() and part[0].isalpha() and part[1] == ":"
+            for part in path.parts
+        )
         or path.as_posix() != value
     ):
         raise ValueError("backup path is unsafe")
@@ -320,11 +366,35 @@ def _validate_managed_payload(manifest: BackupManifest, config: WorkspaceConfig)
             raise BackupVerificationError("backup contains an unmanaged directory")
 
 
-def _file_sha256(path: Path) -> str:
+def _require_unchanged_archive(
+    reference: os.stat_result,
+    *observed: os.stat_result,
+) -> None:
+    reference_state = _archive_state(reference)
+    if any(
+        not stat.S_ISREG(metadata.st_mode) or _archive_state(metadata) != reference_state
+        for metadata in observed
+    ):
+        raise BackupVerificationError("backup archive changed while it was verified")
+
+
+def _archive_state(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_mode,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _file_sha256(source: IO[bytes]) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
+    source.seek(0)
+    while chunk := source.read(1024 * 1024):
+        digest.update(chunk)
     return digest.hexdigest()
 
 
@@ -332,49 +402,48 @@ def _portable_path_component(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold()
 
 
-def _preflight_archive(path: Path) -> None:
-    with path.open("rb") as source:
-        source.seek(0, 2)
-        archive_size = source.tell()
-        if archive_size < _EOCD_SIZE:
-            raise BackupVerificationError("backup archive is not a valid ZIP")
-        tail_size = min(archive_size, _EOCD_SIZE + _MAX_ZIP_COMMENT_BYTES)
-        source.seek(archive_size - tail_size)
-        tail = _read_exact(source, tail_size)
-        eocd_position = _find_eocd(tail)
-        eocd_offset = archive_size - tail_size + eocd_position
+def _preflight_archive(source: IO[bytes]) -> None:
+    source.seek(0, 2)
+    archive_size = source.tell()
+    if archive_size < _EOCD_SIZE:
+        raise BackupVerificationError("backup archive is not a valid ZIP")
+    tail_size = min(archive_size, _EOCD_SIZE + _MAX_ZIP_COMMENT_BYTES)
+    source.seek(archive_size - tail_size)
+    tail = _read_exact(source, tail_size)
+    eocd_position = _find_eocd(tail)
+    eocd_offset = archive_size - tail_size + eocd_position
+    (
+        _,
+        disk_number,
+        directory_disk,
+        disk_entries,
+        total_entries,
+        directory_size,
+        directory_offset,
+        _,
+    ) = struct.unpack_from("<4sHHHHIIH", tail, eocd_position)
+    directory_end = eocd_offset
+    if (
+        directory_size == 0xFFFFFFFF
+        or directory_offset == 0xFFFFFFFF
+        or _has_zip64_locator(source, eocd_offset)
+    ):
         (
-            _,
-            disk_number,
-            directory_disk,
             disk_entries,
             total_entries,
             directory_size,
             directory_offset,
-            _,
-        ) = struct.unpack_from("<4sHHHHIIH", tail, eocd_position)
-        directory_end = eocd_offset
-        if (
-            directory_size == 0xFFFFFFFF
-            or directory_offset == 0xFFFFFFFF
-            or _has_zip64_locator(source, eocd_offset)
-        ):
-            (
-                disk_entries,
-                total_entries,
-                directory_size,
-                directory_offset,
-                directory_end,
-            ) = _read_zip64_directory_metadata(source, eocd_offset)
-        elif disk_number != 0 or directory_disk != 0 or disk_entries != total_entries:
-            raise BackupVerificationError("multi-disk backup archives are unsupported")
-        _preflight_central_directory(
-            source,
-            directory_offset=directory_offset,
-            directory_size=directory_size,
-            directory_end=directory_end,
-            declared_entries=total_entries,
-        )
+            directory_end,
+        ) = _read_zip64_directory_metadata(source, eocd_offset)
+    elif disk_number != 0 or directory_disk != 0 or disk_entries != total_entries:
+        raise BackupVerificationError("multi-disk backup archives are unsupported")
+    _preflight_central_directory(
+        source,
+        directory_offset=directory_offset,
+        directory_size=directory_size,
+        directory_end=directory_end,
+        declared_entries=total_entries,
+    )
 
 
 def _find_eocd(tail: bytes) -> int:

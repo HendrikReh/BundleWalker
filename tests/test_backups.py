@@ -13,7 +13,7 @@ import zipfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import IO, Literal
+from typing import IO, Literal, cast
 
 import pytest
 
@@ -902,3 +902,122 @@ def test_verify_wraps_corrupt_deflate_stream_as_typed_error_without_extracting(
     with pytest.raises(BackupVerificationError):
         verify_backup_archive(archive)
     assert list(tmp_path.iterdir()) == [archive]
+
+
+def test_verify_rejects_path_replacement_between_hash_and_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "replaced.zip"
+    replacement = tmp_path / "replacement.zip"
+    _write_archive(archive)
+    _write_archive(
+        replacement,
+        manifest_updates={"bundlewalker_version": "replacement-archive"},
+    )
+    original_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    original_file_sha256 = cast(
+        Callable[[IO[bytes]], str],
+        vars(backups_module)["_file_sha256"],
+    )
+
+    def replace_after_hash(source: IO[bytes]) -> str:
+        digest = original_file_sha256(source)
+        assert digest == original_digest
+        os.replace(replacement, archive)
+        return digest
+
+    monkeypatch.setattr(backups_module, "_file_sha256", replace_after_hash)
+
+    with pytest.raises(BackupVerificationError):
+        verify_backup_archive(archive)
+
+
+def test_verify_rejects_symlink_swap_between_hash_and_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "symlink-swapped.zip"
+    moved = tmp_path / "moved.zip"
+    _write_archive(archive)
+    original_file_sha256 = cast(
+        Callable[[IO[bytes]], str],
+        vars(backups_module)["_file_sha256"],
+    )
+
+    def symlink_after_hash(source: IO[bytes]) -> str:
+        digest = original_file_sha256(source)
+        archive.rename(moved)
+        archive.symlink_to(moved.name)
+        return digest
+
+    monkeypatch.setattr(backups_module, "_file_sha256", symlink_after_hash)
+
+    with pytest.raises(BackupVerificationError):
+        verify_backup_archive(archive)
+
+
+def test_verify_rejects_in_place_mutation_between_hash_and_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "mutated.zip"
+    _write_archive(archive)
+    original_file_sha256 = cast(
+        Callable[[IO[bytes]], str],
+        vars(backups_module)["_file_sha256"],
+    )
+
+    def append_after_hash(source: IO[bytes]) -> str:
+        digest = original_file_sha256(source)
+        with archive.open("ab") as destination:
+            destination.write(b"trailing mutation")
+        return digest
+
+    monkeypatch.setattr(backups_module, "_file_sha256", append_after_hash)
+
+    with pytest.raises(BackupVerificationError):
+        verify_backup_archive(archive)
+
+
+@pytest.mark.parametrize("unsafe_path", ["C:escape", "raw/C:escape"])
+def test_verify_rejects_drive_relative_manifest_path(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    archive = tmp_path / "drive-relative-manifest.zip"
+    records = _file_records()
+    for record in records:
+        if record["path"] == "wiki/index.md":
+            record["path"] = unsafe_path
+    records.sort(key=lambda record: str(record["path"]))
+    _write_archive(archive, manifest_updates={"files": records})
+
+    with pytest.raises(BackupVerificationError, match="manifest"):
+        verify_backup_archive(archive)
+
+
+@pytest.mark.parametrize(
+    "unsafe_name",
+    ["workspace/C:escape", "workspace/raw/C:escape"],
+)
+def test_verify_rejects_drive_relative_raw_member_name(
+    tmp_path: Path,
+    unsafe_name: str,
+) -> None:
+    archive = tmp_path / "drive-relative-member.zip"
+    _write_archive(archive, extra_members=((unsafe_name, b"unsafe"),))
+
+    with pytest.raises(BackupVerificationError, match="unsafe member path"):
+        verify_backup_archive(archive)
+
+
+def test_verify_rejects_non_utc_manifest_timestamp(tmp_path: Path) -> None:
+    archive = tmp_path / "non-utc-timestamp.zip"
+    _write_archive(
+        archive,
+        manifest_updates={"created_at": "2026-07-18T14:00:00+02:00"},
+    )
+
+    with pytest.raises(BackupVerificationError, match="manifest"):
+        verify_backup_archive(archive)
