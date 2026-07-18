@@ -360,22 +360,30 @@ def _resume_accepted_commit_locked(
     transaction_dir: Path,
     manifest: _Manifest,
 ) -> None:
-    if manifest.phase != "accepted":
-        raise TransactionError(f"transaction decision is not accepted: {manifest.phase}")
+    if manifest.phase not in {"accepted", "raw-persisted", "swapping"}:
+        raise TransactionError(f"transaction decision cannot resume from phase: {manifest.phase}")
     identity = _load_authenticated_identity(transaction_dir, manifest)
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
 
-    try:
-        _persist_raw_source(workspace, transaction_dir, manifest)
-    except _RawDestinationCompatibilityError as exc:
-        _restore_accepted_review_after_raw_conflict(
+    if manifest.phase == "accepted":
+        try:
+            _persist_raw_source(workspace, transaction_dir, manifest)
+        except _RawDestinationCompatibilityError as exc:
+            _restore_accepted_review_after_raw_conflict(
+                workspace,
+                transaction_dir,
+                manifest,
+            )
+            raise ReviewStaleError(f"pending review is stale because {exc}") from exc
+        manifest = replace(manifest, phase="raw-persisted")
+        _write_manifest(transaction_dir, manifest)
+    else:
+        _persist_raw_source(
             workspace,
             transaction_dir,
             manifest,
+            require_existing=True,
         )
-        raise ReviewStaleError(f"pending review is stale because {exc}") from exc
-    manifest = replace(manifest, phase="raw-persisted")
-    _write_manifest(transaction_dir, manifest)
     _verify_prospective(
         prospective,
         workspace,
@@ -384,8 +392,9 @@ def _resume_accepted_commit_locked(
     )
     _sync_tree(prospective)
 
-    manifest = replace(manifest, phase="swapping")
-    _write_manifest(transaction_dir, manifest)
+    if manifest.phase != "swapping":
+        manifest = replace(manifest, phase="swapping")
+        _write_manifest(transaction_dir, manifest)
     try:
         _rename_workspace_entry(workspace, workspace.wiki_dir, backup)
         _sync_tree(backup)
@@ -926,14 +935,26 @@ def _recover_accepted_transaction(
 ) -> None:
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
     recovery_backup = _recovery_backup_path(transaction_dir, backup)
+    resumes_before_swap = False
     if manifest.phase != "accepted":
+        live_exists = _directory_exists(workspace.wiki_dir, "live wiki")
+        prospective_exists = _directory_exists(prospective, "prospective wiki")
+        backup_exists = _directory_exists(recovery_backup, "transaction backup")
         resumes_before_swap = (
             manifest.phase in {"raw-persisted", "swapping"}
-            and _directory_exists(workspace.wiki_dir, "live wiki")
-            and _directory_exists(prospective, "prospective wiki")
-            and not _directory_exists(recovery_backup, "transaction backup")
+            and live_exists
+            and prospective_exists
+            and not backup_exists
         )
         if not resumes_before_swap:
+            invalid_pre_swap = manifest.phase == "raw-persisted" or (
+                manifest.phase == "swapping"
+                and live_exists
+                and not backup_exists
+                and _classify_tree(workspace.wiki_dir, transaction_dir, identity) == "base"
+            )
+            if invalid_pre_swap:
+                raise TransactionError("later accepted transaction has invalid pre-swap topology")
             _recover_known_topology(
                 workspace,
                 transaction_dir,
@@ -943,7 +964,6 @@ def _recover_accepted_transaction(
                 identity,
             )
             return
-        manifest = replace(manifest, phase="accepted")
 
     backup = recovery_backup
     _verify_pending_raw_payload(transaction_dir, manifest)
@@ -954,6 +974,13 @@ def _recover_accepted_transaction(
         raise TransactionError("accepted transaction has no authenticated live wiki")
 
     live_identity = _classify_tree(workspace.wiki_dir, transaction_dir, identity)
+    if resumes_before_swap:
+        if live_identity != "base":
+            raise TransactionError("later accepted transaction live wiki identity is invalid")
+        _validate_configured_wiki(workspace)
+        _revalidate_operations(workspace, manifest.drafts)
+        _resume_accepted_commit_locked(workspace, transaction_dir, manifest)
+        return
     if live_identity == "base":
         _validate_configured_wiki(workspace)
         _revalidate_operations(workspace, manifest.drafts)
@@ -1322,6 +1349,8 @@ def _persist_raw_source(
     workspace: Workspace,
     transaction_dir: Path,
     manifest: _Manifest,
+    *,
+    require_existing: bool = False,
 ) -> None:
     if manifest.raw_path is None:
         if manifest.raw_sha256 is not None:
@@ -1345,7 +1374,7 @@ def _persist_raw_source(
         with open_workspace_directory(
             workspace,
             parent_parts,
-            create_from=len(configured.parts),
+            create_from=None if require_existing else len(configured.parts),
             label="raw destination parent",
         ) as parent_descriptor:
             destination_stat = _compatible_raw_destination_stat_at(
@@ -1354,6 +1383,8 @@ def _persist_raw_source(
                 manifest.raw_sha256,
             )
             if destination_stat is None:
+                if require_existing:
+                    raise _RawDestinationCompatibilityError("persisted raw destination is missing")
                 current_payload = _require_authenticated_raw_payload_links(
                     transaction_dir,
                     manifest,
