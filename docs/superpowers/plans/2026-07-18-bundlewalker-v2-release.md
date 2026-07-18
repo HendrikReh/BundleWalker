@@ -406,7 +406,10 @@ from urllib.parse import unquote
 from markdown_it import MarkdownIt
 
 ROOT = Path.cwd().resolve()
-HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+HTML_ANCHOR = re.compile(
+    r"\b(?:id|name)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+))",
+    re.IGNORECASE,
+)
 
 MARKDOWN = MarkdownIt("commonmark")
 SOURCES = [
@@ -428,11 +431,26 @@ def slug(text: str) -> str:
 def anchors(path: Path) -> set[str]:
     counts: dict[str, int] = {}
     result: set[str] = set()
-    for heading in HEADING.findall(path.read_text(encoding="utf-8")):
-        base = slug(heading)
-        count = counts.get(base, 0)
-        counts[base] = count + 1
-        result.add(base if count == 0 else f"{base}-{count}")
+    tokens = MARKDOWN.parse(path.read_text(encoding="utf-8"))
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open":
+            heading = tokens[index + 1]
+            text = "".join(
+                child.content
+                for child in heading.children or []
+                if child.type in {"text", "code_inline", "softbreak", "hardbreak"}
+            )
+            base = slug(text)
+            count = counts.get(base, 0)
+            counts[base] = count + 1
+            result.add(base if count == 0 else f"{base}-{count}")
+        for child in token.children or []:
+            if child.type == "html_inline":
+                for match in HTML_ANCHOR.finditer(child.content):
+                    result.add(next(value for value in match.groups() if value is not None))
+        if token.type == "html_block":
+            for match in HTML_ANCHOR.finditer(token.content):
+                result.add(next(value for value in match.groups() if value is not None))
     return result
 
 
