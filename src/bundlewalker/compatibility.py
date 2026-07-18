@@ -89,7 +89,7 @@ def inspect_workspace(
     config_path = find_workspace_config(start)
     version = read_workspace_format_version(config_path)
     root = config_path.parent
-    if version > target_version:
+    if version > CURRENT_WORKSPACE_FORMAT:
         return WorkspaceCompatibility(
             root, config_path, version, CompatibilityStatus.TOO_NEW, False, False, False
         )

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import bundlewalker.compatibility as compatibility_module
 from bundlewalker.compatibility import (
     CompatibilityStatus,
     MigrationStep,
@@ -59,6 +60,26 @@ def test_noncurrent_well_formed_versions_are_inspection_only(
 
     assert result.workspace_format_version == version
     assert result.status is status
+    assert result.readable is False
+    assert result.writable is False
+    assert result.upgrade_available is False
+
+
+def test_future_format_remains_inspection_only_for_an_injected_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "format-2"
+    _write_version(root, 2)
+
+    def fail_current_parser(_root: Path) -> Workspace:
+        raise AssertionError("future formats must not be interpreted as current workspaces")
+
+    monkeypatch.setattr(compatibility_module, "discover_workspace", fail_current_parser)
+
+    result = inspect_workspace(root, target_version=2)
+
+    assert result.status is CompatibilityStatus.TOO_NEW
     assert result.readable is False
     assert result.writable is False
     assert result.upgrade_available is False
