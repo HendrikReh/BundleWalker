@@ -272,6 +272,7 @@ def restore_workspace_backup(archive: Path, target: Path) -> RestoredWorkspace:
             removed_empty_target = True
         else:
             _require_absent_restore_target(parent_descriptor, target_path.name)
+        _require_verified_archive_open(verified, verified_source)
         _require_restore_parent_stable(
             requested_parent,
             resolved_parent,
@@ -280,7 +281,6 @@ def restore_workspace_backup(archive: Path, target: Path) -> RestoredWorkspace:
         )
         _require_staging_bound(parent_descriptor, staging)
         _verify_extracted_tree(staging.workspace_descriptor, verified.manifest)
-        _require_verified_archive_open(verified, verified_source)
         _rename_noreplace(
             staging.workspace_name,
             target_path.name,
@@ -420,7 +420,7 @@ def _capture_restore_target(
         if expected_to_exist:
             raise RestoreTargetError("restore target changed during inspection") from None
         return None
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise RestoreTargetError("restore target could not be inspected") from exc
     if not expected_to_exist:
         raise RestoreTargetError("restore target changed during inspection")
@@ -447,7 +447,7 @@ def _capture_restore_target(
         return target
     except RestoreTargetError:
         raise
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise RestoreTargetError("restore target could not be inspected") from exc
     finally:
         if descriptor is not None:
@@ -558,6 +558,8 @@ def _require_absent_restore_target(parent_descriptor: int, name: str) -> None:
 
 def _open_verified_archive(verified: VerifiedBackup) -> IO[bytes]:
     descriptor: int | None = None
+    source: IO[bytes] | None = None
+    succeeded = False
     try:
         before = verified.archive_path.lstat()
         descriptor = os.open(
@@ -578,9 +580,9 @@ def _open_verified_archive(verified: VerifiedBackup) -> IO[bytes]:
             path_after_hash,
         )
         if digest != verified.archive_sha256:
-            source.close()
             raise BackupVerificationError("backup archive changed after verification")
         source.seek(0)
+        succeeded = True
         return source
     except BackupVerificationError:
         raise
@@ -590,6 +592,9 @@ def _open_verified_archive(verified: VerifiedBackup) -> IO[bytes]:
         if descriptor is not None:
             with suppress(OSError):
                 os.close(descriptor)
+        if source is not None and not succeeded:
+            with suppress(OSError):
+                source.close()
 
 
 def _require_verified_archive_open(verified: VerifiedBackup, source: IO[bytes]) -> None:
@@ -846,12 +851,33 @@ def _open_restore_directory(
     try:
         for part in parts:
             created = False
+            current_path /= part
+            trusted_identity: tuple[int, int] | None = None
             if create:
+                if owned_entries is None:
+                    raise BackupVerificationError("restore staging ownership is unavailable")
                 try:
                     os.mkdir(part, mode=0o700, dir_fd=current)
                     created = True
                 except FileExistsError:
-                    pass
+                    expected = owned_entries.get(current_path.as_posix())
+                    if expected is None or not expected[0]:
+                        raise BackupVerificationError(
+                            "restore staging path was not created by BundleWalker"
+                        ) from None
+                    trusted_identity = expected[1]
+                else:
+                    created_state = os.stat(
+                        part,
+                        dir_fd=current,
+                        follow_symlinks=False,
+                    )
+                    if not stat.S_ISDIR(created_state.st_mode):
+                        raise BackupVerificationError(
+                            "restore staging path changed during extraction"
+                        )
+                    trusted_identity = (created_state.st_dev, created_state.st_ino)
+                    owned_entries[current_path.as_posix()] = (True, trusted_identity)
             child = os.open(
                 part,
                 os.O_RDONLY
@@ -862,17 +888,14 @@ def _open_restore_directory(
             )
             child_state = os.fstat(child)
             relative_state = os.stat(part, dir_fd=current, follow_symlinks=False)
-            if not stat.S_ISDIR(child_state.st_mode) or _managed_identity(
-                child_state
-            ) != _managed_identity(relative_state):
+            child_identity = (child_state.st_dev, child_state.st_ino)
+            if (
+                not stat.S_ISDIR(child_state.st_mode)
+                or _managed_identity(child_state) != _managed_identity(relative_state)
+                or (trusted_identity is not None and child_identity != trusted_identity)
+            ):
                 os.close(child)
                 raise BackupVerificationError("restore staging path changed during extraction")
-            current_path /= part
-            if owned_entries is not None:
-                owned_entries[current_path.as_posix()] = (
-                    True,
-                    (child_state.st_dev, child_state.st_ino),
-                )
             if created:
                 _sync_directory_descriptor(current)
             os.close(current)

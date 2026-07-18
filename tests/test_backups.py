@@ -1348,6 +1348,264 @@ def test_restore_review_recreates_empty_target_with_original_mode(
     _assert_no_restore_temporary(target)
 
 
+def test_restore_second_review_rejects_preinserted_wiki_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    actor_wiki: Path | None = None
+    actor_identity: tuple[int, int] | None = None
+    actor_mutations: list[str] = []
+    original_open = os.open
+    original_mkdir = os.mkdir
+    original_create = cast(
+        Callable[[int, str], Any],
+        vars(backups_module)["_create_restore_staging"],
+    )
+
+    def track_actor_file_creation(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is not None and actor_identity is not None:
+            parent_state = os.fstat(dir_fd)
+            if (parent_state.st_dev, parent_state.st_ino) == actor_identity and flags & os.O_CREAT:
+                actor_mutations.append(f"open:{os.fspath(path)}")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def track_actor_directory_creation(
+        path: Any,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if dir_fd is not None and actor_identity is not None:
+            parent_state = os.fstat(dir_fd)
+            if (parent_state.st_dev, parent_state.st_ino) == actor_identity:
+                actor_mutations.append(f"mkdir:{os.fspath(path)}")
+        original_mkdir(path, mode, dir_fd=dir_fd)
+
+    def preinsert_wiki(parent_descriptor: int, target_name: str) -> Any:
+        nonlocal actor_identity, actor_wiki
+        staging = original_create(parent_descriptor, target_name)
+        container_name = cast(str, staging.container_name)
+        workspace_name = cast(str, staging.workspace_name)
+        actor = tmp_path / container_name / workspace_name / "wiki"
+        actor_wiki = actor
+        actor.mkdir()
+        (actor / "actor-wiki.txt").write_text("actor", encoding="utf-8")
+        actor_state = actor.stat()
+        actor_identity = (actor_state.st_dev, actor_state.st_ino)
+        return staging
+
+    monkeypatch.setattr(backups_module.os, "open", track_actor_file_creation)
+    monkeypatch.setattr(backups_module.os, "mkdir", track_actor_directory_creation)
+    monkeypatch.setattr(backups_module, "_create_restore_staging", preinsert_wiki)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert actor_wiki is not None
+    assert actor_mutations == []
+    assert sorted(path.name for path in actor_wiki.iterdir()) == ["actor-wiki.txt"]
+    assert (actor_wiki / "actor-wiki.txt").read_text(encoding="utf-8") == "actor"
+    assert not target.exists()
+
+
+def test_restore_second_review_rejects_nested_directory_substitution_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_open = os.open
+    substituted = False
+    actor_identity: tuple[int, int] | None = None
+    actor_mutations: list[str] = []
+
+    def substitute_topics_before_open(
+        path: Any,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal actor_identity, substituted
+        name = cast(str | bytes | int, path)
+        if dir_fd is not None and actor_identity is not None:
+            parent_state = os.fstat(dir_fd)
+            if (parent_state.st_dev, parent_state.st_ino) == actor_identity and flags & os.O_CREAT:
+                actor_mutations.append(f"open:{os.fspath(path)}")
+        if not substituted and name == "topics" and dir_fd is not None:
+            substituted = True
+            os.rename(
+                "topics",
+                "topics-owned-parked",
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            os.mkdir("topics", mode=0o700, dir_fd=dir_fd)
+            actor_descriptor = original_open(
+                "topics",
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                dir_fd=dir_fd,
+            )
+            try:
+                actor_state = os.fstat(actor_descriptor)
+                actor_identity = (actor_state.st_dev, actor_state.st_ino)
+                sentinel_descriptor = original_open(
+                    "actor-topics.txt",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=actor_descriptor,
+                )
+                with os.fdopen(sentinel_descriptor, "wb") as sentinel:
+                    sentinel.write(b"actor")
+            finally:
+                os.close(actor_descriptor)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(backups_module.os, "open", substitute_topics_before_open)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert substituted is True
+    assert actor_mutations == []
+    actor_sentinels = list(tmp_path.rglob("actor-topics.txt"))
+    assert len(actor_sentinels) == 1
+    assert actor_sentinels[0].read_bytes() == b"actor"
+    assert sorted(path.name for path in actor_sentinels[0].parent.iterdir()) == ["actor-topics.txt"]
+    assert not target.exists()
+
+
+def test_restore_second_review_rechecks_tree_after_final_archive_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "source", occurred_at=CREATED_AT)
+    archive = tmp_path / "source.zip"
+    create_workspace_backup(workspace, archive)
+    target = tmp_path / "target"
+    original_verify = backups_module.verify_backup_archive
+    original_discover = backups_module.discover_workspace
+    original_sha256 = cast(
+        Callable[[IO[bytes]], str],
+        vars(backups_module)["_file_sha256"],
+    )
+    staging_root: Path | None = None
+
+    def capture_staging_root(path: Path) -> Workspace:
+        nonlocal staging_root
+        discovered = original_discover(path)
+        staging_root = path
+        return discovered
+
+    def verify_then_mutate_staging(path: Path) -> VerifiedBackup:
+        verified = original_verify(path)
+        archive_state = verified.archive_path.stat()
+        archive_identity = (archive_state.st_dev, archive_state.st_ino)
+        archive_hashes = 0
+
+        def mutate_during_final_archive_hash(source: IO[bytes]) -> str:
+            nonlocal archive_hashes
+            digest = original_sha256(source)
+            metadata = os.fstat(source.fileno())
+            if (metadata.st_dev, metadata.st_ino) != archive_identity:
+                return digest
+            archive_hashes += 1
+            if archive_hashes == 3:
+                assert staging_root is not None
+                (staging_root / "conventions.md").write_bytes(b"mutated-after-final-tree")
+            return digest
+
+        monkeypatch.setattr(backups_module, "_file_sha256", mutate_during_final_archive_hash)
+        return verified
+
+    monkeypatch.setattr(backups_module, "discover_workspace", capture_staging_root)
+    monkeypatch.setattr(backups_module, "verify_backup_archive", verify_then_mutate_staging)
+
+    with pytest.raises(BackupVerificationError):
+        restore_workspace_backup(archive, target)
+
+    assert not target.exists()
+    _assert_no_restore_temporary(target)
+
+
+@pytest.mark.parametrize("failure_point", ["hash", "post_check"])
+def test_restore_second_review_closes_pinned_archive_after_open_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    archive = tmp_path / "source.zip"
+    _write_archive(archive)
+    verified = verify_backup_archive(archive)
+    open_verified_archive = cast(
+        Callable[[VerifiedBackup], IO[bytes]],
+        vars(backups_module)["_open_verified_archive"],
+    )
+    original_fdopen = os.fdopen
+    opened_sources: list[IO[bytes]] = []
+
+    def track_fdopen(*args: Any, **kwargs: Any) -> Any:
+        source = cast(IO[bytes], original_fdopen(*args, **kwargs))
+        opened_sources.append(source)
+        return source
+
+    monkeypatch.setattr(backups_module.os, "fdopen", track_fdopen)
+    if failure_point == "hash":
+
+        def fail_hash(_source: IO[bytes]) -> str:
+            raise OSError(errno.EIO, "injected archive hash failure")
+
+        monkeypatch.setattr(backups_module, "_file_sha256", fail_hash)
+    else:
+        original_require_unchanged = cast(
+            Callable[..., None],
+            vars(backups_module)["_require_unchanged_archive"],
+        )
+        stability_checks = 0
+
+        def fail_post_hash_check(reference: os.stat_result, *observed: os.stat_result) -> None:
+            nonlocal stability_checks
+            stability_checks += 1
+            original_require_unchanged(reference, *observed)
+            if stability_checks % 2 == 0:
+                raise BackupVerificationError("injected post-hash stability failure")
+
+        monkeypatch.setattr(
+            backups_module,
+            "_require_unchanged_archive",
+            fail_post_hash_check,
+        )
+
+    for _attempt in range(3):
+        with pytest.raises(BackupVerificationError):
+            open_verified_archive(verified)
+
+    assert len(opened_sources) == 3
+    assert all(source.closed for source in opened_sources)
+
+
+def test_restore_second_review_wraps_embedded_nul_target_as_target_error(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "unused.zip"
+    target = tmp_path / "target\0invalid"
+
+    with pytest.raises(RestoreTargetError):
+        restore_workspace_backup(archive, target)
+
+
 def _valid_payload() -> dict[str, bytes]:
     return {
         "bundlewalker.toml": DEFAULT_CONFIG_TEXT.encode(),
