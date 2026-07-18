@@ -68,5 +68,31 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
 
     required = workflow["jobs"]["required"]
     assert required["if"] == "always()"
-    assert required["needs"] == ["supported"]
+    assert required["needs"] == ["supported", "build", "artifact-smoke", "sdist-smoke"]
+    _assert_actions_are_sha_pinned(workflow)
+
+
+def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
+    workflow = _yaml(".github/workflows/ci.yml")
+
+    assert workflow["jobs"]["build"]["needs"] == ["supported"]
+    build_commands = _run_commands(workflow, "build")
+    assert "uv build --clear --no-sources" in build_commands
+    assert "uv run twine check dist/*" in build_commands
+
+    artifact_smoke = workflow["jobs"]["artifact-smoke"]
+    assert artifact_smoke["needs"] == ["build"]
+    assert artifact_smoke["strategy"]["matrix"] == {
+        "os": ["ubuntu-24.04", "macos-15"],
+        "python-version": ["3.13", "3.14"],
+    }
+    assert "dist/*.whl" in _run_commands(workflow, "artifact-smoke")
+
+    sdist_smoke = workflow["jobs"]["sdist-smoke"]
+    assert sdist_smoke["needs"] == ["build"]
+    assert "dist/*.tar.gz" in _run_commands(workflow, "sdist-smoke")
+
+    required_needs = workflow["jobs"]["required"]["needs"]
+    for dependency in ("supported", "build", "artifact-smoke", "sdist-smoke"):
+        assert dependency in required_needs
     _assert_actions_are_sha_pinned(workflow)
