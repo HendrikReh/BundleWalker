@@ -9,16 +9,22 @@ from enum import StrEnum
 
 from bundlewalker.errors import (
     AgentRunError,
+    BackupError,
+    BackupVerificationError,
     BundleWalkerError,
     ChangeSetError,
     ConfigurationError,
+    MigrationExecutionError,
+    MigrationUnavailableError,
     OkfError,
+    RestoreTargetError,
     ReviewMismatchError,
     ReviewNotFoundError,
     ReviewPendingError,
     ReviewStaleError,
     TransactionError,
     UsageError,
+    WorkspaceCompatibilityError,
     WorkspaceError,
 )
 
@@ -62,6 +68,12 @@ class ApplicationErrorCode(StrEnum):
     REVIEW_ID_MISMATCH = "review_id_mismatch"
     REVIEW_STALE = "review_stale"
     TRANSACTION_FAILED = "transaction_failed"
+    WORKSPACE_INCOMPATIBLE = "workspace_incompatible"
+    BACKUP_INVALID = "backup_invalid"
+    BACKUP_FAILED = "backup_failed"
+    RESTORE_TARGET_INVALID = "restore_target_invalid"
+    MIGRATION_UNAVAILABLE = "migration_unavailable"
+    MIGRATION_FAILED = "migration_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +84,8 @@ class ApplicationError(Exception):
     safe_message: str
     retryable: bool = False
     review_id: str | None = None
+    backup_archive_path: str | None = None
+    backup_archive_sha256: str | None = None
 
     def __str__(self) -> str:
         return self.safe_message
@@ -104,6 +118,39 @@ def translate_error(error: BundleWalkerError) -> ApplicationError:
         return ApplicationError(
             ApplicationErrorCode.REVIEW_STALE,
             "review is stale",
+        )
+    if isinstance(error, MigrationExecutionError):
+        backup = error.backup
+        return ApplicationError(
+            ApplicationErrorCode.MIGRATION_FAILED,
+            "workspace migration failed; restore the verified pre-upgrade backup",
+            backup_archive_path=str(backup.archive_path) if backup is not None else None,
+            backup_archive_sha256=backup.archive_sha256 if backup is not None else None,
+        )
+    if isinstance(error, MigrationUnavailableError):
+        return ApplicationError(
+            ApplicationErrorCode.MIGRATION_UNAVAILABLE,
+            "no complete workspace migration path is available",
+        )
+    if isinstance(error, RestoreTargetError):
+        return ApplicationError(
+            ApplicationErrorCode.RESTORE_TARGET_INVALID,
+            "restore target must be a new or empty directory",
+        )
+    if isinstance(error, BackupVerificationError):
+        return ApplicationError(
+            ApplicationErrorCode.BACKUP_INVALID,
+            "backup archive verification failed",
+        )
+    if isinstance(error, BackupError):
+        return ApplicationError(
+            ApplicationErrorCode.BACKUP_FAILED,
+            "workspace backup or restore failed",
+        )
+    if isinstance(error, WorkspaceCompatibilityError):
+        return ApplicationError(
+            ApplicationErrorCode.WORKSPACE_INCOMPATIBLE,
+            "workspace format is not supported for this operation",
         )
     if isinstance(error, ConfigurationError):
         return ApplicationError(

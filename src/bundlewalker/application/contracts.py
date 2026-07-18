@@ -8,6 +8,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from bundlewalker.compatibility import CompatibilityStatus
 from bundlewalker.domain import CitedAnswer, LintFinding
 from bundlewalker.transactions import ReviewKind, ReviewStatus
 
@@ -177,3 +178,54 @@ class RefreshResult(BaseModel):
         if (self.status == "pending") != (self.review is not None):
             raise ValueError("pending refresh must contain exactly one review")
         return self
+
+
+class CompatibilityResult(BaseModel):
+    """A read-only workspace-format compatibility inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    installed_version: str
+    workspace_path: str
+    workspace_format: int
+    compatibility: CompatibilityStatus
+    readable: bool
+    writable: bool
+    upgrade_available: bool
+
+
+class BackupResult(BaseModel):
+    """The serializable identity and size of a verified workspace backup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    archive_path: str
+    archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: datetime
+    workspace_format: int
+    file_count: int = Field(ge=0)
+    byte_count: int = Field(ge=0)
+
+
+class RestoreResult(BaseModel):
+    """The serializable identity and size of a verified restored workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_path: str
+    archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workspace_format: int
+    file_count: int = Field(ge=0)
+    byte_count: int = Field(ge=0)
+
+
+class UpgradeResult(BaseModel):
+    """The outcome of an explicit current or migrated workspace upgrade."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["current", "upgraded"]
+    workspace_path: str
+    source_version: int
+    target_version: int
+    backup: BackupResult | None

@@ -12,6 +12,7 @@ import typer
 from bundlewalker.application import (
     ApplicationError,
     ApplicationErrorCode,
+    LifecycleApplication,
     ReviewResult,
     WorkspaceApplication,
 )
@@ -25,13 +26,15 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 review_app = typer.Typer(no_args_is_help=True)
+workspace_app = typer.Typer(no_args_is_help=True)
 app.add_typer(review_app, name="review")
+app.add_typer(workspace_app, name="workspace")
 
 
 @app.callback()
 def main(context: typer.Context) -> None:
     """Build and maintain a local, review-first OKF knowledge workspace."""
-    if context.invoked_subcommand in {None, "init"}:
+    if context.invoked_subcommand in {None, "init", "workspace"}:
         return
     try:
         context.obj = discover_workspace()
@@ -57,6 +60,68 @@ def init_command(
     except BundleWalkerError as exc:
         _exit_for_error(exc)
     typer.echo(f"Initialized BundleWalker workspace at {workspace.root}")
+
+
+@workspace_app.command("status")
+def workspace_status(path: Path | None = typer.Argument(None)) -> None:  # noqa: B008
+    try:
+        result = LifecycleApplication().status(path)
+    except ApplicationError as exc:
+        _exit_for_application_error(exc)
+    typer.echo(f"BundleWalker version: {result.installed_version}")
+    typer.echo(f"Workspace: {result.workspace_path}")
+    typer.echo(f"Workspace format: {result.workspace_format}")
+    typer.echo(f"Compatibility: {result.compatibility}")
+    typer.echo(f"Readable: {'yes' if result.readable else 'no'}")
+    typer.echo(f"Writable: {'yes' if result.writable else 'no'}")
+    typer.echo(f"Upgrade available: {'yes' if result.upgrade_available else 'no'}")
+
+
+@workspace_app.command("backup")
+def workspace_backup(
+    output: Path,
+    workspace_path: Path | None = typer.Option(None, "--workspace"),  # noqa: B008
+) -> None:
+    try:
+        result = LifecycleApplication().backup(output, workspace_path)
+    except ApplicationError as exc:
+        _exit_for_application_error(exc)
+    typer.echo(f"Backup: {result.archive_path}")
+    typer.echo(f"SHA-256: {result.archive_sha256}")
+    typer.echo(f"Workspace format: {result.workspace_format}")
+    typer.echo(f"Files: {result.file_count}")
+    typer.echo(f"Bytes: {result.byte_count}")
+
+
+@workspace_app.command("restore")
+def workspace_restore(archive: Path, target: Path) -> None:
+    try:
+        result = LifecycleApplication().restore(archive, target)
+    except ApplicationError as exc:
+        _exit_for_application_error(exc)
+    typer.echo(f"Restored workspace: {result.target_path}")
+    typer.echo(f"SHA-256: {result.archive_sha256}")
+    typer.echo(f"Workspace format: {result.workspace_format}")
+    typer.echo(f"Files: {result.file_count}")
+    typer.echo(f"Bytes: {result.byte_count}")
+
+
+@workspace_app.command("upgrade")
+def workspace_upgrade(
+    path: Path | None = typer.Argument(None),  # noqa: B008
+    backup_dir: Path | None = typer.Option(None, "--backup-dir"),  # noqa: B008
+) -> None:
+    try:
+        result = LifecycleApplication().upgrade(path, backup_dir=backup_dir)
+    except ApplicationError as exc:
+        _exit_for_application_error(exc)
+    if result.status == "current":
+        typer.echo(f"Workspace format {result.target_version} is already current.")
+        return
+    typer.echo(f"Upgraded workspace: {result.workspace_path}")
+    if result.backup is not None:
+        typer.echo(f"Pre-upgrade backup: {result.backup.archive_path}")
+        typer.echo(f"SHA-256: {result.backup.archive_sha256}")
 
 
 @app.command("ingest")
@@ -245,9 +310,19 @@ def _exit_for_application_error(error: ApplicationError) -> NoReturn:
         typer.echo("  bundlewalker review show", err=True)
         typer.echo(f"  bundlewalker review apply {error.review_id}", err=True)
         typer.echo(f"  bundlewalker review discard {error.review_id}", err=True)
+    if (
+        error.code is ApplicationErrorCode.MIGRATION_FAILED
+        and error.backup_archive_path is not None
+    ):
+        typer.echo(f"Verified pre-upgrade backup: {error.backup_archive_path}", err=True)
+        if error.backup_archive_sha256 is not None:
+            typer.echo(f"SHA-256: {error.backup_archive_sha256}", err=True)
     usage_codes = {
         ApplicationErrorCode.INVALID_INPUT,
         ApplicationErrorCode.CONFIGURATION_ERROR,
+        ApplicationErrorCode.WORKSPACE_INCOMPATIBLE,
+        ApplicationErrorCode.RESTORE_TARGET_INVALID,
+        ApplicationErrorCode.MIGRATION_UNAVAILABLE,
     }
     raise typer.Exit(code=2 if error.code in usage_codes else 1)
 
