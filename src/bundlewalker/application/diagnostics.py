@@ -199,6 +199,18 @@ def _workspace_checks(
     dependencies: DiagnosticsDependencies,
 ) -> tuple[tuple[DiagnosticCheck, ...], Workspace | None]:
     try:
+        if not _nearest_workspace_config_is_safe(start):
+            return _unavailable_workspace_checks(
+                _check(
+                    "workspace.discovery",
+                    DiagnosticCategory.WORKSPACE,
+                    DiagnosticSeverity.FAILURE,
+                    "No usable BundleWalker workspace was found.",
+                    "Run `bundlewalker init PATH` or pass an existing workspace to "
+                    "`bundlewalker doctor PATH`.",
+                ),
+                _SKIPPED_CONFIGURATION,
+            )
         find_workspace_config(start)
     except (BundleWalkerError, OSError):
         return _unavailable_workspace_checks(
@@ -318,7 +330,7 @@ def _workspace_checks(
             "workspace.permissions",
             DiagnosticCategory.WORKSPACE,
             DiagnosticSeverity.PASS,
-            "Required workspace paths are readable and writable.",
+            "Required workspace paths passed non-mutating access checks.",
         )
         if permissions_valid
         else _check(
@@ -339,6 +351,21 @@ def _workspace_checks(
         ),
         workspace,
     )
+
+
+def _nearest_workspace_config_is_safe(start: Path | None) -> bool:
+    candidate = (start or Path.cwd()).expanduser().resolve(strict=False)
+    if candidate.is_file():
+        candidate = candidate.parent
+    for directory in (candidate, *candidate.parents):
+        try:
+            metadata = (directory / CONFIG_FILENAME).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return stat.S_ISREG(metadata.st_mode)
+    return True
 
 
 def _unavailable_workspace_checks(
@@ -457,8 +484,10 @@ def _workspace_permissions_valid(
 def _configuration_checks(
     environment: Mapping[str, str],
 ) -> tuple[DiagnosticCheck, DiagnosticCheck]:
-    model = environment.get("BUNDLEWALKER_MODEL", "").strip()
-    if not model:
+    model_present, openai_provider = _model_configuration_facts(
+        environment.get("BUNDLEWALKER_MODEL", "")
+    )
+    if not model_present:
         return (
             _check(
                 "configuration.model",
@@ -481,8 +510,7 @@ def _configuration_checks(
         DiagnosticSeverity.PASS,
         "An agent model is configured through BUNDLEWALKER_MODEL.",
     )
-    provider, separator, _model_name = model.partition(":")
-    if separator and provider.strip().casefold() == "openai":
+    if openai_provider:
         if environment.get("OPENAI_API_KEY", "").strip():
             credential_check = _check(
                 "configuration.credential",
@@ -507,6 +535,16 @@ def _configuration_checks(
             "Review the configured provider documentation for credential requirements.",
         )
     return model_check, credential_check
+
+
+def _model_configuration_facts(model_value: str) -> tuple[bool, bool]:
+    model_present = any(not character.isspace() for character in model_value)
+    bounded_prefix = model_value[:32]
+    separator_index = bounded_prefix.find(":")
+    provider_prefix = (
+        bounded_prefix[:separator_index].strip().casefold() if separator_index >= 0 else ""
+    )
+    return model_present, provider_prefix == "openai"
 
 
 def _transaction_check(
@@ -563,13 +601,15 @@ def _transaction_check(
             "Interrupted transaction state requires recovery.",
             "Run a normal BundleWalker workspace command to trigger recovery.",
         )
-    return _check(
-        "transactions.state",
-        DiagnosticCategory.TRANSACTIONS,
-        DiagnosticSeverity.FAILURE,
-        "Transaction state is malformed or ambiguous.",
-        "Inspect the workspace with `bundlewalker workspace status PATH`.",
-    )
+    if state is TransactionDiagnosticStatus.MALFORMED:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.FAILURE,
+            "Transaction state is malformed or ambiguous.",
+            "Inspect the workspace with `bundlewalker workspace status PATH`.",
+        )
+    raise TypeError("transaction inspector returned an invalid status")
 
 
 def _mcp_package_check(available: Callable[[str], bool]) -> DiagnosticCheck:
