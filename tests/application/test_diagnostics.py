@@ -513,6 +513,19 @@ def test_diagnostics_disk_inspection_unavailability_is_a_bounded_warning(
     assert marker not in result.model_dump_json()
 
 
+def test_diagnostics_does_not_hide_unexpected_disk_inspection_defects(tmp_path: Path) -> None:
+    def defective_disk_inspection(_path: Path) -> int:
+        raise RuntimeError("unexpected disk inspection defect")
+
+    with pytest.raises(ApplicationError) as raised:
+        DiagnosticsApplication(replace(_dependencies(), disk_free=defective_disk_inspection)).run(
+            tmp_path
+        )
+
+    assert raised.value.code is ApplicationErrorCode.DIAGNOSTIC_FAILED
+    assert isinstance(raised.value.__cause__, RuntimeError)
+
+
 def test_diagnostics_unexpected_defect_uses_bounded_application_error(
     tmp_path: Path,
 ) -> None:
@@ -588,6 +601,50 @@ def test_diagnostics_none_start_discovers_from_current_directory(
     assert _by_code(result)["workspace.discovery"].severity is DiagnosticSeverity.PASS
 
 
+def test_diagnostics_nonexistent_user_home_is_a_bounded_discovery_failure() -> None:
+    result = DiagnosticsApplication(_dependencies()).run(
+        Path("~bundlewalker-user-that-must-not-exist/bundlewalker.toml")
+    )
+    checks = _by_code(result)
+
+    assert len(result.checks) == 14
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    for code in (
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert checks[code].severity is DiagnosticSeverity.WARNING
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+def test_diagnostics_current_directory_lookup_failure_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    def fail_current_directory() -> Path:
+        raise error_type("private-current-directory-marker")
+
+    monkeypatch.setattr(Path, "cwd", fail_current_directory)
+
+    result = DiagnosticsApplication(_dependencies()).run()
+    checks = _by_code(result)
+
+    assert len(result.checks) == 14
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert "private-current-directory-marker" not in result.model_dump_json()
+    for code in (
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert checks[code].severity is DiagnosticSeverity.WARNING
+
+
 def test_diagnostics_symlink_to_ordinary_child_file_uses_target_parent(
     tmp_path: Path,
 ) -> None:
@@ -621,6 +678,33 @@ def test_diagnostics_symlink_to_workspace_directory_uses_target_workspace(
     start = tmp_path / "outside" / "workspace-link"
     start.parent.mkdir()
     start.symlink_to(workspace.root, target_is_directory=True)
+
+    result = DiagnosticsApplication(_dependencies()).run(start)
+    checks = _by_code(result)
+
+    for code in (
+        "workspace.discovery",
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert checks[code].severity is DiagnosticSeverity.PASS
+
+
+@pytest.mark.parametrize("start_kind", ["linked_directory", "explicit_config"])
+def test_diagnostics_linked_parent_starts_select_the_same_real_workspace(
+    tmp_path: Path,
+    start_kind: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    linked_parent = tmp_path / "outside" / "workspace-link"
+    linked_parent.parent.mkdir()
+    linked_parent.symlink_to(workspace.root, target_is_directory=True)
+    start = (
+        linked_parent if start_kind == "linked_directory" else linked_parent / "bundlewalker.toml"
+    )
 
     result = DiagnosticsApplication(_dependencies()).run(start)
     checks = _by_code(result)
@@ -746,6 +830,46 @@ def test_diagnostics_explicit_missing_config_start_never_falls_through(
     )
     assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
     assert transaction_calls == 0
+
+
+@pytest.mark.parametrize("final_kind", ["missing", "symlink", "directory", "fifo"])
+def test_diagnostics_explicit_config_through_linked_parent_preserves_final_node_kind(
+    tmp_path: Path,
+    final_kind: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "ancestor", occurred_at=NOW)
+    child = workspace.root / "nested"
+    child.mkdir()
+    final_config = child / "bundlewalker.toml"
+    if final_kind == "symlink":
+        final_config.symlink_to(workspace.root / "bundlewalker.toml")
+    elif final_kind == "directory":
+        final_config.mkdir()
+    elif final_kind == "fifo":
+        os.mkfifo(final_config)
+    linked_parent = tmp_path / "outside" / "linked-parent"
+    linked_parent.parent.mkdir()
+    linked_parent.symlink_to(child, target_is_directory=True)
+
+    result = DiagnosticsApplication(_dependencies()).run(linked_parent / "bundlewalker.toml")
+    checks = _by_code(result)
+
+    assert len(result.checks) == 14
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    expected_summary = (
+        "No usable BundleWalker workspace was found."
+        if final_kind == "missing"
+        else "An unsafe BundleWalker workspace configuration was found."
+    )
+    assert checks["workspace.discovery"].summary == expected_summary
+    for code in (
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert checks[code].severity is DiagnosticSeverity.WARNING
 
 
 def test_diagnostics_reads_one_opened_config_snapshot_during_final_symlink_swap(
@@ -898,6 +1022,25 @@ def test_diagnostics_contains_toml_integer_limit_as_configuration_failure(
     root = tmp_path / "integer-limit"
     root.mkdir()
     (root / "bundlewalker.toml").write_bytes(b"version = " + b"9" * 5_000 + b"\n")
+
+    result = DiagnosticsApplication(_dependencies()).run(root)
+    checks = _by_code(result)
+
+    assert len(result.checks) == 14
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.PASS
+    assert checks["workspace.configuration"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
+
+
+def test_diagnostics_contains_deeply_nested_toml_as_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "deeply-nested"
+    root.mkdir()
+    nesting = 800
+    content = "version = " + "[" * nesting + "1" + "]" * nesting + "\n"
+    assert len(content.encode()) < 1024**2
+    (root / "bundlewalker.toml").write_text(content, encoding="utf-8")
 
     result = DiagnosticsApplication(_dependencies()).run(root)
     checks = _by_code(result)

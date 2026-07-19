@@ -8,12 +8,18 @@ import shutil
 import subprocess
 import tarfile
 import tomllib
+from dataclasses import replace
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import pytest
 
 import bundlewalker
+from bundlewalker.application import (
+    DiagnosticsApplication,
+    DiagnosticsDependencies,
+    DiagnosticSeverity,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,13 +54,19 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
-def test_package_import_survives_missing_distribution_metadata(
+@pytest.mark.parametrize(
+    "error_type",
+    [importlib.metadata.PackageNotFoundError, OSError, PermissionError],
+)
+def test_package_import_and_diagnostics_survive_unavailable_distribution_metadata(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
 ) -> None:
-    def missing_version(_distribution_name: str) -> str:
-        raise importlib.metadata.PackageNotFoundError("bundlewalker")
+    def unavailable_version(_distribution_name: str) -> str:
+        raise error_type("bundlewalker")
 
-    monkeypatch.setattr(importlib.metadata, "version", missing_version)
+    monkeypatch.setattr(importlib.metadata, "version", unavailable_version)
     package_init = PROJECT_ROOT / "src/bundlewalker/__init__.py"
     spec = importlib.util.spec_from_file_location("isolated_bundlewalker", package_init)
     assert spec is not None and spec.loader is not None
@@ -63,6 +75,29 @@ def test_package_import_survives_missing_distribution_metadata(
     spec.loader.exec_module(module)
 
     assert module.__version__ == ""
+    result = DiagnosticsApplication(
+        replace(DiagnosticsDependencies(), bundlewalker_version=module.__version__)
+    ).run(tmp_path)
+    checks = {check.code: check for check in result.checks}
+    assert len(result.checks) == 14
+    assert result.bundlewalker_version == "unknown"
+    assert checks["runtime.bundlewalker"].severity is DiagnosticSeverity.FAILURE
+
+
+def test_package_import_preserves_unexpected_distribution_metadata_defects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def defective_version(_distribution_name: str) -> str:
+        raise RuntimeError("unexpected metadata defect")
+
+    monkeypatch.setattr(importlib.metadata, "version", defective_version)
+    package_init = PROJECT_ROOT / "src/bundlewalker/__init__.py"
+    spec = importlib.util.spec_from_file_location("isolated_bundlewalker_defect", package_init)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+
+    with pytest.raises(RuntimeError, match="unexpected metadata defect"):
+        spec.loader.exec_module(module)
 
 
 def test_public_package_metadata_is_complete() -> None:
@@ -98,6 +133,40 @@ def test_public_package_metadata_is_complete() -> None:
         "Issues": "https://github.com/HendrikReh/BundleWalker/issues",
         "Changelog": "https://github.com/HendrikReh/BundleWalker/blob/master/CHANGELOG.md",
     }
+
+
+def test_declared_documented_and_diagnostic_python_support_agree(tmp_path: Path) -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
+    public_setup_documents = {
+        "README.md": "BundleWalker requires Python 3.13 or 3.14",
+        "docs/user-guide.md": "BundleWalker requires Python 3.13 or 3.14",
+        "docs/tutorial.md": "You need Python 3.13 or 3.14",
+    }
+
+    assert project["requires-python"] == ">=3.13,<3.15"
+    for relative, support_statement in public_setup_documents.items():
+        content = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+        assert support_statement in content
+        assert "Python 3.13 or newer" not in content
+    support = (PROJECT_ROOT / "SUPPORT.md").read_text(encoding="utf-8")
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    assert "Python 3.13 and 3.14 are supported" in support
+    assert "both Python 3.13 and 3.14" in releases
+
+    expected_support = {
+        (3, 12, 9): DiagnosticSeverity.FAILURE,
+        (3, 13, 0): DiagnosticSeverity.PASS,
+        (3, 14, 9): DiagnosticSeverity.PASS,
+        (3, 15, 0): DiagnosticSeverity.FAILURE,
+    }
+    for python_version, expected_severity in expected_support.items():
+        result = DiagnosticsApplication(
+            replace(DiagnosticsDependencies(), python_version=python_version)
+        ).run(tmp_path)
+        checks = {check.code: check for check in result.checks}
+        assert checks["runtime.python"].severity is expected_severity
 
 
 def test_license_metadata_and_files_are_declared() -> None:

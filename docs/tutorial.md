@@ -22,7 +22,7 @@ optionally, putting its durable files under Git.
 
 ## Before you start
 
-You need Python 3.13 or newer, [`uv`](https://docs.astral.sh/uv/), a PydanticAI model string, and
+You need Python 3.13 or 3.14, [`uv`](https://docs.astral.sh/uv/), a PydanticAI model string, and
 the provider credential required by that model. Export both in the shell you will use for the
 tutorial. Keep the model choice provider-neutral here; the
 [model and provider setup guide](user-guide.md#model-and-provider-setup) has provider-specific

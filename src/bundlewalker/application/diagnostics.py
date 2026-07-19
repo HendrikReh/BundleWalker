@@ -414,7 +414,17 @@ def _workspace_checks(
 def _find_nearest_workspace_config(
     start: Path | None,
 ) -> tuple[_WorkspaceConfigDiscoveryStatus, Path | None]:
-    candidate = (start or Path.cwd()).expanduser()
+    try:
+        candidate = (start if start is not None else Path.cwd()).expanduser()
+    except (OSError, RuntimeError):
+        return _WorkspaceConfigDiscoveryStatus.NOT_FOUND, None
+
+    if candidate.name == CONFIG_FILENAME:
+        try:
+            candidate = candidate.parent.resolve(strict=False) / CONFIG_FILENAME
+        except OSError:
+            return _WorkspaceConfigDiscoveryStatus.NOT_FOUND, None
+
     try:
         candidate_metadata = candidate.lstat()
     except FileNotFoundError:
@@ -458,7 +468,7 @@ def _inspect_selected_workspace_config(
     try:
         text = snapshot.content.decode("utf-8", errors="strict")
         parsed = tomllib.loads(text)
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise BundleWalkerError("workspace configuration is invalid") from exc
     version = workspace_format_version(parsed)
     status = classify_workspace_version(
@@ -826,17 +836,14 @@ def _storage_check(
     workspace: Workspace | None,
     disk_free: Callable[[Path], int],
 ) -> DiagnosticCheck:
-    target = workspace.root if workspace is not None else start or Path.cwd()
+    try:
+        target = workspace.root if workspace is not None else start or Path.cwd()
+    except (OSError, RuntimeError):
+        return _storage_unavailable_check()
     try:
         free = disk_free(target)
     except OSError:
-        return _check(
-            "storage.disk",
-            DiagnosticCategory.STORAGE,
-            DiagnosticSeverity.WARNING,
-            "Available disk space could not be inspected.",
-            "Check available disk space before running write operations.",
-        )
+        return _storage_unavailable_check()
     if free >= ONE_GIB:
         return _check(
             "storage.disk",
@@ -850,6 +857,16 @@ def _storage_check(
         DiagnosticSeverity.WARNING,
         "Less than 1 GiB of disk space is available.",
         "Free disk space before running write operations.",
+    )
+
+
+def _storage_unavailable_check() -> DiagnosticCheck:
+    return _check(
+        "storage.disk",
+        DiagnosticCategory.STORAGE,
+        DiagnosticSeverity.WARNING,
+        "Available disk space could not be inspected.",
+        "Check available disk space before running write operations.",
     )
 
 

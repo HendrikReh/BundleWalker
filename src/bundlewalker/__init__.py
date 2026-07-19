@@ -5,5 +5,5 @@ from importlib.metadata import PackageNotFoundError, version
 
 try:
     __version__ = version("bundlewalker")
-except PackageNotFoundError:
+except (PackageNotFoundError, OSError):
     __version__ = ""

@@ -24,7 +24,7 @@ Latest stable release: **v3** (Python package `0.3.0`). The current alpha is
 
 ## Quick start
 
-BundleWalker requires Python 3.13 or newer and [`uv`](https://docs.astral.sh/uv/). Install the
+BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/). Install the
 locked repository environment, record its path, and configure a model supported by your installed
 PydanticAI version:
 

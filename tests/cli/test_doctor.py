@@ -479,6 +479,36 @@ def test_doctor_warning_only_workspace_exits_zero_and_does_not_mutate(
     assert _tree_snapshot(workspace.root) == before
 
 
+@pytest.mark.parametrize("start_kind", ["linked_directory", "explicit_config"])
+def test_doctor_linked_parent_directory_and_explicit_config_select_the_same_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_kind: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    linked_parent = tmp_path / "outside" / "workspace-link"
+    linked_parent.parent.mkdir()
+    linked_parent.symlink_to(workspace.root, target_is_directory=True)
+    start = (
+        linked_parent if start_kind == "linked_directory" else linked_parent / "bundlewalker.toml"
+    )
+    monkeypatch.delenv("BUNDLEWALKER_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = runner.invoke(app, ["doctor", str(start)])
+
+    assert result.exit_code == 0
+    for code in (
+        "workspace.discovery",
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert f"PASS {code}" in result.stdout
+
+
 def test_doctor_writes_only_explicit_report_and_never_echoes_private_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

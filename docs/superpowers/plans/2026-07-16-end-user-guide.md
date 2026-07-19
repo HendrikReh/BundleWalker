@@ -122,7 +122,7 @@ lint may suggest maintenance, but it never authorizes or starts a write.
 
 ## Install and configure a provider
 
-BundleWalker requires Python 3.13 or newer and [`uv`](https://docs.astral.sh/uv/). From a
+BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/). From a
 BundleWalker checkout, install the locked environment and inspect the CLI:
 
 ```bash

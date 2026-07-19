@@ -5,7 +5,7 @@ description = "Build a review-first personal knowledge wiki with OKF and Pydanti
 readme = "README.md"
 license = "GPL-3.0-or-later AND CC0-1.0"
 license-files = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.15"
 authors = [{ name = "Hendrik Reh" }]
 maintainers = [{ name = "Hendrik Reh" }]
 keywords = [
