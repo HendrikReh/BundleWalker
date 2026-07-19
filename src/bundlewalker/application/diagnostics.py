@@ -1,0 +1,926 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import platform
+import re
+import shutil
+import stat
+import sys
+import tomllib
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum, auto
+from importlib import metadata as importlib_metadata
+from pathlib import Path
+
+from bundlewalker import __version__
+from bundlewalker.application.contracts import (
+    DiagnosticCategory,
+    DiagnosticCheck,
+    DiagnosticCounts,
+    DiagnosticResult,
+    DiagnosticSeverity,
+    SupportReport,
+)
+from bundlewalker.application.errors import ApplicationError, ApplicationErrorCode
+from bundlewalker.compatibility import (
+    CURRENT_WORKSPACE_FORMAT,
+    CompatibilityStatus,
+    MigrationStep,
+    classify_workspace_version,
+    workspace_format_version,
+)
+from bundlewalker.errors import BundleWalkerError
+from bundlewalker.transactions import (
+    TransactionDiagnosticStatus,
+    inspect_transaction_state,
+)
+from bundlewalker.workflows.context import (
+    open_workspace_directory,
+    safe_configured_parts,
+)
+from bundlewalker.workspace import (
+    CONFIG_FILENAME,
+    MAX_WORKSPACE_CONFIG_BYTES,
+    Workspace,
+    WorkspaceConfig,
+    workspace_config_from_mapping,
+)
+
+ONE_GIB = 1024**3
+MAX_MODEL_PREFIX_CHARACTERS = 128
+_EXPECTED_MCP_ENTRYPOINT = "bundlewalker.interfaces.mcp:main"
+_PACKAGE_IDENTITY = re.compile(r"^(?=.*[0-9])[A-Za-z0-9][A-Za-z0-9.!+_-]{0,79}$")
+
+_SKIPPED_CONFIGURATION = "Workspace configuration was not checked because discovery failed."
+_SKIPPED_COMPATIBILITY = (
+    "Workspace compatibility was not checked because configuration is unavailable."
+)
+_SKIPPED_STRUCTURE = (
+    "Workspace structure was not checked because a usable workspace is unavailable."
+)
+_SKIPPED_PERMISSIONS = (
+    "Workspace permissions were not checked because a usable workspace is unavailable."
+)
+_SKIPPED_TRANSACTIONS = (
+    "Transaction state was not checked because a usable workspace is unavailable."
+)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _module_available(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
+
+
+def _distribution_available(name: str) -> bool:
+    try:
+        importlib_metadata.distribution(name)
+    except importlib_metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _console_script_targets(name: str) -> tuple[str, ...]:
+    return tuple(
+        entry_point.value
+        for entry_point in importlib_metadata.entry_points(
+            group="console_scripts",
+            name=name,
+        )
+    )
+
+
+def _disk_free(path: Path) -> int:
+    return shutil.disk_usage(path).free
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticsDependencies:
+    environment: Mapping[str, str] | None = None
+    bundlewalker_version: str = __version__
+    python_version: tuple[int, int, int] = (
+        sys.version_info.major,
+        sys.version_info.minor,
+        sys.version_info.micro,
+    )
+    platform_name: str = platform.system()
+    clock: Callable[[], datetime] = _utc_now
+    module_available: Callable[[str], bool] = _module_available
+    distribution_available: Callable[[str], bool] = _distribution_available
+    console_script_targets: Callable[[str], tuple[str, ...]] = _console_script_targets
+    executable_lookup: Callable[[str], str | None] = shutil.which
+    permission_check: Callable[[Path, int], bool] = os.access
+    disk_free: Callable[[Path], int] = _disk_free
+    transaction_inspector: Callable[[Workspace], TransactionDiagnosticStatus] = (
+        inspect_transaction_state
+    )
+    workspace_target_version: int = CURRENT_WORKSPACE_FORMAT
+    workspace_migrations: Mapping[int, MigrationStep] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkspaceConfigSnapshot:
+    root: Path
+    root_device: int
+    root_inode: int
+    content: bytes
+
+
+class _WorkspaceConfigDiscoveryStatus(Enum):
+    FOUND = auto()
+    NOT_FOUND = auto()
+    UNSAFE = auto()
+
+
+def _check(
+    code: str,
+    category: DiagnosticCategory,
+    severity: DiagnosticSeverity,
+    summary: str,
+    *remediation: str,
+) -> DiagnosticCheck:
+    return DiagnosticCheck(
+        code=code,
+        category=category,
+        severity=severity,
+        summary=summary,
+        remediation=remediation,
+    )
+
+
+def _normalized_platform(name: str) -> str:
+    normalized = name.strip().casefold()
+    if normalized == "darwin":
+        return "macos"
+    if normalized in {"linux", "windows"}:
+        return normalized
+    return "other"
+
+
+def _normalized_bundlewalker_version(version: str) -> str | None:
+    normalized = version.strip()
+    if _PACKAGE_IDENTITY.fullmatch(normalized) is None:
+        return None
+    return normalized
+
+
+def _result(
+    bundlewalker_version: str,
+    python_version: tuple[int, int, int],
+    platform_name: str,
+    checks: tuple[DiagnosticCheck, ...],
+) -> DiagnosticResult:
+    counts = DiagnosticCounts(
+        passed=sum(check.severity is DiagnosticSeverity.PASS for check in checks),
+        warnings=sum(check.severity is DiagnosticSeverity.WARNING for check in checks),
+        failures=sum(check.severity is DiagnosticSeverity.FAILURE for check in checks),
+    )
+    overall = (
+        DiagnosticSeverity.FAILURE
+        if counts.failures
+        else DiagnosticSeverity.WARNING
+        if counts.warnings
+        else DiagnosticSeverity.PASS
+    )
+    return DiagnosticResult(
+        overall=overall,
+        bundlewalker_version=_normalized_bundlewalker_version(bundlewalker_version) or "unknown",
+        python_version=".".join(str(value) for value in python_version),
+        platform=_normalized_platform(platform_name),
+        counts=counts,
+        checks=checks,
+    )
+
+
+def _bundlewalker_check(version: str) -> DiagnosticCheck:
+    if _normalized_bundlewalker_version(version) is not None:
+        return _check(
+            "runtime.bundlewalker",
+            DiagnosticCategory.RUNTIME,
+            DiagnosticSeverity.PASS,
+            "BundleWalker package identity is available.",
+        )
+    return _check(
+        "runtime.bundlewalker",
+        DiagnosticCategory.RUNTIME,
+        DiagnosticSeverity.FAILURE,
+        "BundleWalker package identity is unavailable.",
+        "Reinstall BundleWalker in the active Python environment.",
+    )
+
+
+def _python_check(version: tuple[int, int, int]) -> DiagnosticCheck:
+    if version[:2] in {(3, 13), (3, 14)}:
+        return _check(
+            "runtime.python",
+            DiagnosticCategory.RUNTIME,
+            DiagnosticSeverity.PASS,
+            "The active Python version is supported.",
+        )
+    return _check(
+        "runtime.python",
+        DiagnosticCategory.RUNTIME,
+        DiagnosticSeverity.FAILURE,
+        "The active Python version is not supported.",
+        "Use Python 3.13 or Python 3.14.",
+    )
+
+
+def _platform_check(name: str) -> DiagnosticCheck:
+    if _normalized_platform(name) in {"macos", "linux"}:
+        return _check(
+            "runtime.platform",
+            DiagnosticCategory.RUNTIME,
+            DiagnosticSeverity.PASS,
+            "The active operating system is supported.",
+        )
+    return _check(
+        "runtime.platform",
+        DiagnosticCategory.RUNTIME,
+        DiagnosticSeverity.WARNING,
+        "The active operating system is experimental or unsupported.",
+        "Use macOS or Linux for the supported platform contract.",
+    )
+
+
+def _workspace_checks(
+    start: Path | None,
+    dependencies: DiagnosticsDependencies,
+) -> tuple[tuple[DiagnosticCheck, ...], Workspace | None]:
+    discovery_status, config_path = _find_nearest_workspace_config(start)
+    if discovery_status is not _WorkspaceConfigDiscoveryStatus.FOUND:
+        discovery_check = (
+            _check(
+                "workspace.discovery",
+                DiagnosticCategory.WORKSPACE,
+                DiagnosticSeverity.FAILURE,
+                "An unsafe BundleWalker workspace configuration was found.",
+                "Replace bundlewalker.toml with a regular non-linked configuration file.",
+            )
+            if discovery_status is _WorkspaceConfigDiscoveryStatus.UNSAFE
+            else _check(
+                "workspace.discovery",
+                DiagnosticCategory.WORKSPACE,
+                DiagnosticSeverity.FAILURE,
+                "No usable BundleWalker workspace was found.",
+                "Run `bundlewalker init PATH` or pass an existing workspace to "
+                "`bundlewalker doctor PATH`.",
+            )
+        )
+        return _unavailable_workspace_checks(
+            discovery_check,
+            _SKIPPED_CONFIGURATION,
+        )
+    if config_path is None:
+        raise TypeError("found workspace configuration has no path")
+
+    discovery_check = _check(
+        "workspace.discovery",
+        DiagnosticCategory.WORKSPACE,
+        DiagnosticSeverity.PASS,
+        "A BundleWalker workspace configuration was found.",
+    )
+    try:
+        snapshot = _read_selected_workspace_config(config_path)
+        compatibility_status, workspace_config = _inspect_selected_workspace_config(
+            snapshot,
+            dependencies,
+        )
+    except (BundleWalkerError, OSError):
+        return _unavailable_workspace_checks(
+            discovery_check,
+            "Workspace configuration is invalid or unreadable.",
+            configuration_severity=DiagnosticSeverity.FAILURE,
+        )
+
+    if compatibility_status is not CompatibilityStatus.CURRENT:
+        return (
+            (
+                discovery_check,
+                _check(
+                    "workspace.configuration",
+                    DiagnosticCategory.WORKSPACE,
+                    DiagnosticSeverity.WARNING,
+                    "Current-format configuration parsing was not attempted for this workspace.",
+                ),
+                _compatibility_failure(compatibility_status),
+                _check(
+                    "workspace.structure",
+                    DiagnosticCategory.WORKSPACE,
+                    DiagnosticSeverity.WARNING,
+                    _SKIPPED_STRUCTURE,
+                ),
+                _check(
+                    "workspace.permissions",
+                    DiagnosticCategory.WORKSPACE,
+                    DiagnosticSeverity.WARNING,
+                    _SKIPPED_PERMISSIONS,
+                ),
+            ),
+            None,
+        )
+
+    if workspace_config is None:
+        raise TypeError("current workspace inspection returned no configuration")
+    workspace = Workspace(root=snapshot.root, config=workspace_config)
+
+    configuration_check = _check(
+        "workspace.configuration",
+        DiagnosticCategory.WORKSPACE,
+        DiagnosticSeverity.PASS,
+        "Workspace configuration is valid.",
+    )
+    compatibility_check = _check(
+        "workspace.compatibility",
+        DiagnosticCategory.WORKSPACE,
+        DiagnosticSeverity.PASS,
+        "The workspace format is current.",
+    )
+    try:
+        structure_valid = _workspace_root_matches_snapshot(snapshot) and _workspace_structure_valid(
+            workspace
+        )
+    except (BundleWalkerError, OSError):
+        structure_valid = False
+    if not structure_valid:
+        return (
+            (
+                discovery_check,
+                configuration_check,
+                compatibility_check,
+                _check(
+                    "workspace.structure",
+                    DiagnosticCategory.WORKSPACE,
+                    DiagnosticSeverity.FAILURE,
+                    "Workspace structure is missing, linked, or has an unexpected kind.",
+                    "Restore the required workspace structure without symlinked managed paths.",
+                ),
+                _check(
+                    "workspace.permissions",
+                    DiagnosticCategory.WORKSPACE,
+                    DiagnosticSeverity.WARNING,
+                    _SKIPPED_PERMISSIONS,
+                ),
+            ),
+            None,
+        )
+
+    structure_check = _check(
+        "workspace.structure",
+        DiagnosticCategory.WORKSPACE,
+        DiagnosticSeverity.PASS,
+        "Workspace structure is valid.",
+    )
+    try:
+        permissions_valid = _workspace_permissions_valid(workspace, dependencies.permission_check)
+    except OSError:
+        permissions_valid = False
+    permissions_check = (
+        _check(
+            "workspace.permissions",
+            DiagnosticCategory.WORKSPACE,
+            DiagnosticSeverity.PASS,
+            "Required workspace paths passed non-mutating access checks.",
+        )
+        if permissions_valid
+        else _check(
+            "workspace.permissions",
+            DiagnosticCategory.WORKSPACE,
+            DiagnosticSeverity.FAILURE,
+            "Required workspace paths are not readable, writable, and traversable.",
+            "Correct workspace permissions before running write operations.",
+        )
+    )
+    return (
+        (
+            discovery_check,
+            configuration_check,
+            compatibility_check,
+            structure_check,
+            permissions_check,
+        ),
+        workspace,
+    )
+
+
+def _find_nearest_workspace_config(
+    start: Path | None,
+) -> tuple[_WorkspaceConfigDiscoveryStatus, Path | None]:
+    try:
+        candidate = (start if start is not None else Path.cwd()).expanduser()
+    except (OSError, RuntimeError):
+        return _WorkspaceConfigDiscoveryStatus.NOT_FOUND, None
+
+    if candidate.name == CONFIG_FILENAME:
+        try:
+            candidate = candidate.parent.resolve(strict=False) / CONFIG_FILENAME
+        except OSError:
+            return _WorkspaceConfigDiscoveryStatus.NOT_FOUND, None
+
+    try:
+        candidate_metadata = candidate.lstat()
+    except FileNotFoundError:
+        candidate_metadata = None
+    except OSError:
+        return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
+
+    if candidate.name == CONFIG_FILENAME:
+        if candidate_metadata is not None and stat.S_ISREG(candidate_metadata.st_mode):
+            return _WorkspaceConfigDiscoveryStatus.FOUND, candidate
+        status = (
+            _WorkspaceConfigDiscoveryStatus.NOT_FOUND
+            if candidate_metadata is None
+            else _WorkspaceConfigDiscoveryStatus.UNSAFE
+        )
+        return status, None
+
+    try:
+        candidate = candidate.resolve(strict=False)
+        search_root = candidate.parent if candidate.is_file() else candidate
+    except OSError:
+        return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
+    for directory in (search_root, *search_root.parents):
+        config_path = directory / CONFIG_FILENAME
+        try:
+            config_metadata = config_path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
+        if stat.S_ISREG(config_metadata.st_mode):
+            return _WorkspaceConfigDiscoveryStatus.FOUND, config_path
+        return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
+    return _WorkspaceConfigDiscoveryStatus.NOT_FOUND, None
+
+
+def _inspect_selected_workspace_config(
+    snapshot: _WorkspaceConfigSnapshot,
+    dependencies: DiagnosticsDependencies,
+) -> tuple[CompatibilityStatus, WorkspaceConfig | None]:
+    try:
+        text = snapshot.content.decode("utf-8", errors="strict")
+        parsed = tomllib.loads(text)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise BundleWalkerError("workspace configuration is invalid") from exc
+    version = workspace_format_version(parsed)
+    status = classify_workspace_version(
+        version,
+        target_version=dependencies.workspace_target_version,
+        migrations=dependencies.workspace_migrations,
+    )
+    if status is not CompatibilityStatus.CURRENT:
+        return status, None
+    return status, workspace_config_from_mapping(parsed)
+
+
+def _read_selected_workspace_config(config_path: Path) -> _WorkspaceConfigSnapshot:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    root_descriptor = os.open(config_path.parent, directory_flags)
+    try:
+        root_metadata = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise OSError
+        config_descriptor = os.open(
+            CONFIG_FILENAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=root_descriptor,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(config_descriptor).st_mode):
+                raise OSError
+            content = bytearray()
+            remaining = MAX_WORKSPACE_CONFIG_BYTES + 1
+            while remaining:
+                chunk = os.read(config_descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                content.extend(chunk)
+                remaining -= len(chunk)
+            if len(content) > MAX_WORKSPACE_CONFIG_BYTES:
+                raise BundleWalkerError("workspace configuration exceeds the supported size")
+        finally:
+            os.close(config_descriptor)
+    finally:
+        os.close(root_descriptor)
+    return _WorkspaceConfigSnapshot(
+        root=config_path.parent,
+        root_device=root_metadata.st_dev,
+        root_inode=root_metadata.st_ino,
+        content=bytes(content),
+    )
+
+
+def _workspace_root_matches_snapshot(snapshot: _WorkspaceConfigSnapshot) -> bool:
+    metadata = os.stat(snapshot.root, follow_symlinks=False)
+    return stat.S_ISDIR(metadata.st_mode) and (
+        metadata.st_dev,
+        metadata.st_ino,
+    ) == (snapshot.root_device, snapshot.root_inode)
+
+
+def _unavailable_workspace_checks(
+    discovery_check: DiagnosticCheck,
+    configuration_summary: str,
+    *,
+    configuration_severity: DiagnosticSeverity = DiagnosticSeverity.WARNING,
+) -> tuple[tuple[DiagnosticCheck, ...], None]:
+    return (
+        (
+            discovery_check,
+            _check(
+                "workspace.configuration",
+                DiagnosticCategory.WORKSPACE,
+                configuration_severity,
+                configuration_summary,
+                *(
+                    ("Restore a valid bundlewalker.toml configuration.",)
+                    if configuration_severity is DiagnosticSeverity.FAILURE
+                    else ()
+                ),
+            ),
+            _check(
+                "workspace.compatibility",
+                DiagnosticCategory.WORKSPACE,
+                DiagnosticSeverity.WARNING,
+                _SKIPPED_COMPATIBILITY,
+            ),
+            _check(
+                "workspace.structure",
+                DiagnosticCategory.WORKSPACE,
+                DiagnosticSeverity.WARNING,
+                _SKIPPED_STRUCTURE,
+            ),
+            _check(
+                "workspace.permissions",
+                DiagnosticCategory.WORKSPACE,
+                DiagnosticSeverity.WARNING,
+                _SKIPPED_PERMISSIONS,
+            ),
+        ),
+        None,
+    )
+
+
+def _compatibility_failure(status: CompatibilityStatus) -> DiagnosticCheck:
+    if status is CompatibilityStatus.UPGRADEABLE:
+        return _check(
+            "workspace.compatibility",
+            DiagnosticCategory.WORKSPACE,
+            DiagnosticSeverity.FAILURE,
+            "The workspace format requires an explicit upgrade.",
+            "Run `bundlewalker workspace upgrade PATH` after reviewing the upgrade plan.",
+        )
+    if status is CompatibilityStatus.TOO_NEW:
+        summary = "The workspace format is newer than this BundleWalker version supports."
+    else:
+        summary = "The workspace format is unsupported."
+    return _check(
+        "workspace.compatibility",
+        DiagnosticCategory.WORKSPACE,
+        DiagnosticSeverity.FAILURE,
+        summary,
+        "Run `bundlewalker workspace status PATH` with a compatible BundleWalker version.",
+    )
+
+
+def _workspace_structure_valid(workspace: Workspace) -> bool:
+    root_metadata = workspace.root.lstat()
+    if workspace.root.is_symlink() or not stat.S_ISDIR(root_metadata.st_mode):
+        return False
+
+    config_path = workspace.root / CONFIG_FILENAME
+    if not _regular_unlinked_file(config_path):
+        return False
+
+    wiki_parts = safe_configured_parts(workspace.config.wiki_dir, "configured wiki path")
+    raw_parts = safe_configured_parts(workspace.config.raw_dir, "configured raw path")
+    conventions_parts = safe_configured_parts(
+        workspace.config.conventions_file, "configured conventions path"
+    )
+    with open_workspace_directory(workspace, wiki_parts, "configured wiki path"):
+        pass
+    with open_workspace_directory(workspace, raw_parts, "configured raw path"):
+        pass
+    with open_workspace_directory(
+        workspace,
+        conventions_parts[:-1],
+        "configured conventions path",
+    ):
+        pass
+    return _regular_unlinked_file(workspace.conventions_file)
+
+
+def _regular_unlinked_file(path: Path) -> bool:
+    metadata = path.lstat()
+    return not path.is_symlink() and stat.S_ISREG(metadata.st_mode)
+
+
+def _workspace_permissions_valid(
+    workspace: Workspace,
+    permission_check: Callable[[Path, int], bool],
+) -> bool:
+    required_checks = (
+        (workspace.root, (os.R_OK, os.W_OK, os.X_OK)),
+        (workspace.root / CONFIG_FILENAME, (os.R_OK, os.W_OK)),
+        (workspace.wiki_dir, (os.R_OK, os.W_OK, os.X_OK)),
+        (workspace.raw_dir, (os.R_OK, os.W_OK, os.X_OK)),
+        (workspace.conventions_file, (os.R_OK, os.W_OK)),
+    )
+    return all(permission_check(path, mode) for path, modes in required_checks for mode in modes)
+
+
+def _configuration_checks(
+    environment: Mapping[str, str],
+) -> tuple[DiagnosticCheck, DiagnosticCheck]:
+    model_present, openai_provider = _model_configuration_facts(
+        environment.get("BUNDLEWALKER_MODEL", "")
+    )
+    if not model_present:
+        return (
+            _check(
+                "configuration.model",
+                DiagnosticCategory.CONFIGURATION,
+                DiagnosticSeverity.WARNING,
+                "No agent model is configured.",
+                "Set BUNDLEWALKER_MODEL to a supported provider model.",
+            ),
+            _check(
+                "configuration.credential",
+                DiagnosticCategory.CONFIGURATION,
+                DiagnosticSeverity.WARNING,
+                "Provider credentials were not checked because no model is configured.",
+            ),
+        )
+
+    model_check = _check(
+        "configuration.model",
+        DiagnosticCategory.CONFIGURATION,
+        DiagnosticSeverity.PASS,
+        "An agent model is configured through BUNDLEWALKER_MODEL.",
+    )
+    if openai_provider:
+        if environment.get("OPENAI_API_KEY", "").strip():
+            credential_check = _check(
+                "configuration.credential",
+                DiagnosticCategory.CONFIGURATION,
+                DiagnosticSeverity.PASS,
+                "The OpenAI credential is configured.",
+            )
+        else:
+            credential_check = _check(
+                "configuration.credential",
+                DiagnosticCategory.CONFIGURATION,
+                DiagnosticSeverity.WARNING,
+                "The OpenAI credential is not configured.",
+                "Set OPENAI_API_KEY before running model-backed operations.",
+            )
+    else:
+        credential_check = _check(
+            "configuration.credential",
+            DiagnosticCategory.CONFIGURATION,
+            DiagnosticSeverity.WARNING,
+            "Credential verification is unavailable for the configured provider.",
+            "Review the configured provider documentation for credential requirements.",
+        )
+    return model_check, credential_check
+
+
+def _model_configuration_facts(model_value: str) -> tuple[bool, bool]:
+    bounded_value = model_value[:MAX_MODEL_PREFIX_CHARACTERS]
+    meaningful_start = next(
+        (index for index, character in enumerate(bounded_value) if not character.isspace()),
+        None,
+    )
+    if meaningful_start is None:
+        return False, False
+    bounded_prefix = bounded_value[meaningful_start:].strip()
+    separator_index = bounded_prefix.find(":")
+    provider_prefix = (
+        bounded_prefix[:separator_index].strip().casefold() if separator_index >= 0 else ""
+    )
+    return True, provider_prefix == "openai"
+
+
+def _transaction_check(
+    workspace: Workspace | None,
+    inspector: Callable[[Workspace], TransactionDiagnosticStatus],
+) -> DiagnosticCheck:
+    if workspace is None:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.WARNING,
+            _SKIPPED_TRANSACTIONS,
+        )
+    try:
+        state = inspector(workspace)
+    except (BundleWalkerError, OSError):
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.FAILURE,
+            "Transaction state could not be inspected safely.",
+            "Run a normal BundleWalker workspace command to recover interrupted state.",
+        )
+    if state is TransactionDiagnosticStatus.CLEAN:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.PASS,
+            "No pending or interrupted transaction state was found.",
+        )
+    if state is TransactionDiagnosticStatus.PENDING:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.WARNING,
+            "A valid pending review requires a decision.",
+            "Run `bundlewalker review show`.",
+            "Run `bundlewalker review apply <REVIEW_ID>` to accept it.",
+            "Run `bundlewalker review discard <REVIEW_ID>` to reject it.",
+        )
+    if state is TransactionDiagnosticStatus.BUSY:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.WARNING,
+            "The workspace is busy with another operation.",
+            "Rerun `bundlewalker doctor PATH` after the active operation finishes.",
+        )
+    if state is TransactionDiagnosticStatus.INTERRUPTED:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.FAILURE,
+            "Interrupted transaction state requires recovery.",
+            "Run a normal BundleWalker workspace command to trigger recovery.",
+        )
+    if state is TransactionDiagnosticStatus.MALFORMED:
+        return _check(
+            "transactions.state",
+            DiagnosticCategory.TRANSACTIONS,
+            DiagnosticSeverity.FAILURE,
+            "Transaction state is malformed or ambiguous.",
+            "Inspect the workspace with `bundlewalker workspace status PATH`.",
+        )
+    raise TypeError("transaction inspector returned an invalid status")
+
+
+def _mcp_package_check(
+    distribution_available: Callable[[str], bool],
+    module_available: Callable[[str], bool],
+) -> DiagnosticCheck:
+    try:
+        installed = distribution_available("mcp") and module_available("mcp")
+    except (ImportError, AttributeError, ValueError, OSError):
+        installed = False
+    if installed:
+        return _check(
+            "mcp.package",
+            DiagnosticCategory.MCP,
+            DiagnosticSeverity.PASS,
+            "The MCP package is available.",
+        )
+    return _check(
+        "mcp.package",
+        DiagnosticCategory.MCP,
+        DiagnosticSeverity.FAILURE,
+        "The MCP package is unavailable or inconsistent.",
+        "Reinstall BundleWalker with its MCP dependencies.",
+    )
+
+
+def _mcp_entrypoint_check(
+    targets: Callable[[str], tuple[str, ...]],
+    lookup: Callable[[str], str | None],
+) -> DiagnosticCheck:
+    try:
+        registered_targets = targets("bundlewalker-mcp")
+        installed = (
+            registered_targets == (_EXPECTED_MCP_ENTRYPOINT,)
+            and lookup("bundlewalker-mcp") is not None
+        )
+    except (ImportError, AttributeError, ValueError, OSError):
+        installed = False
+    if installed:
+        return _check(
+            "mcp.entrypoint",
+            DiagnosticCategory.MCP,
+            DiagnosticSeverity.PASS,
+            "The bundlewalker-mcp entry point is available.",
+        )
+    return _check(
+        "mcp.entrypoint",
+        DiagnosticCategory.MCP,
+        DiagnosticSeverity.FAILURE,
+        "The bundlewalker-mcp entry point is unavailable.",
+        "Reinstall BundleWalker in the active Python environment.",
+    )
+
+
+def _storage_check(
+    start: Path | None,
+    workspace: Workspace | None,
+    disk_free: Callable[[Path], int],
+) -> DiagnosticCheck:
+    try:
+        target = workspace.root if workspace is not None else start or Path.cwd()
+    except (OSError, RuntimeError):
+        return _storage_unavailable_check()
+    try:
+        free = disk_free(target)
+    except OSError:
+        return _storage_unavailable_check()
+    if free >= ONE_GIB:
+        return _check(
+            "storage.disk",
+            DiagnosticCategory.STORAGE,
+            DiagnosticSeverity.PASS,
+            "At least 1 GiB of disk space is available.",
+        )
+    return _check(
+        "storage.disk",
+        DiagnosticCategory.STORAGE,
+        DiagnosticSeverity.WARNING,
+        "Less than 1 GiB of disk space is available.",
+        "Free disk space before running write operations.",
+    )
+
+
+def _storage_unavailable_check() -> DiagnosticCheck:
+    return _check(
+        "storage.disk",
+        DiagnosticCategory.STORAGE,
+        DiagnosticSeverity.WARNING,
+        "Available disk space could not be inspected.",
+        "Check available disk space before running write operations.",
+    )
+
+
+class DiagnosticsApplication:
+    def __init__(self, dependencies: DiagnosticsDependencies | None = None) -> None:
+        self.dependencies = dependencies or DiagnosticsDependencies()
+
+    def run(self, start: Path | None = None) -> DiagnosticResult:
+        try:
+            return self._run(start)
+        except ApplicationError:
+            raise
+        except Exception as exc:
+            raise ApplicationError(
+                ApplicationErrorCode.DIAGNOSTIC_FAILED,
+                "diagnostic operation failed",
+            ) from exc
+
+    def _run(self, start: Path | None = None) -> DiagnosticResult:
+        environment = (
+            os.environ if self.dependencies.environment is None else self.dependencies.environment
+        )
+        workspace_checks, workspace = _workspace_checks(start, self.dependencies)
+        model_check, credential_check = _configuration_checks(environment)
+        checks = (
+            _bundlewalker_check(self.dependencies.bundlewalker_version),
+            _python_check(self.dependencies.python_version),
+            _platform_check(self.dependencies.platform_name),
+            *workspace_checks,
+            model_check,
+            credential_check,
+            _transaction_check(workspace, self.dependencies.transaction_inspector),
+            _mcp_package_check(
+                self.dependencies.distribution_available,
+                self.dependencies.module_available,
+            ),
+            _mcp_entrypoint_check(
+                self.dependencies.console_script_targets,
+                self.dependencies.executable_lookup,
+            ),
+            _storage_check(start, workspace, self.dependencies.disk_free),
+        )
+        return _result(
+            self.dependencies.bundlewalker_version,
+            self.dependencies.python_version,
+            self.dependencies.platform_name,
+            checks,
+        )
+
+    def support_report(self, result: DiagnosticResult) -> SupportReport:
+        try:
+            return SupportReport(generated_at=self.dependencies.clock(), result=result)
+        except Exception as exc:
+            raise ApplicationError(
+                ApplicationErrorCode.DIAGNOSTIC_FAILED,
+                "diagnostic operation failed",
+            ) from exc

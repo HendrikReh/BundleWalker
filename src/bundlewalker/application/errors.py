@@ -74,6 +74,7 @@ class ApplicationErrorCode(StrEnum):
     RESTORE_TARGET_INVALID = "restore_target_invalid"
     MIGRATION_UNAVAILABLE = "migration_unavailable"
     MIGRATION_FAILED = "migration_failed"
+    DIAGNOSTIC_FAILED = "diagnostic_failed"
 
 
 @dataclass(frozen=True, slots=True)

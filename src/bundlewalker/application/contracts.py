@@ -3,10 +3,19 @@
 
 """Adapter-neutral, serialized application-boundary contracts."""
 
+import unicodedata
 from datetime import datetime
-from typing import Literal, Self
+from enum import StrEnum
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from bundlewalker.compatibility import CompatibilityStatus
 from bundlewalker.domain import CitedAnswer, LintFinding
@@ -17,6 +26,118 @@ MAX_SEARCH_CHARACTERS = 2_000
 MAX_SOURCE_NAME_CHARACTERS = 255
 MAX_INLINE_SOURCE_CHARACTERS = 1_000_000
 MAX_CONCEPT_PAGE_SIZE = 100
+MAX_DIAGNOSTIC_REMEDIATION_CHARACTERS = 300
+
+
+class DiagnosticSeverity(StrEnum):
+    PASS = "pass"
+    WARNING = "warning"
+    FAILURE = "failure"
+
+
+class DiagnosticCategory(StrEnum):
+    RUNTIME = "runtime"
+    WORKSPACE = "workspace"
+    CONFIGURATION = "configuration"
+    TRANSACTIONS = "transactions"
+    MCP = "mcp"
+    STORAGE = "storage"
+
+
+DIAGNOSTIC_CHECK_CATALOG: tuple[tuple[str, DiagnosticCategory], ...] = (
+    ("runtime.bundlewalker", DiagnosticCategory.RUNTIME),
+    ("runtime.python", DiagnosticCategory.RUNTIME),
+    ("runtime.platform", DiagnosticCategory.RUNTIME),
+    ("workspace.discovery", DiagnosticCategory.WORKSPACE),
+    ("workspace.configuration", DiagnosticCategory.WORKSPACE),
+    ("workspace.compatibility", DiagnosticCategory.WORKSPACE),
+    ("workspace.structure", DiagnosticCategory.WORKSPACE),
+    ("workspace.permissions", DiagnosticCategory.WORKSPACE),
+    ("configuration.model", DiagnosticCategory.CONFIGURATION),
+    ("configuration.credential", DiagnosticCategory.CONFIGURATION),
+    ("transactions.state", DiagnosticCategory.TRANSACTIONS),
+    ("mcp.package", DiagnosticCategory.MCP),
+    ("mcp.entrypoint", DiagnosticCategory.MCP),
+    ("storage.disk", DiagnosticCategory.STORAGE),
+)
+
+
+def _single_line(value: str) -> str:
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise ValueError("diagnostic text must be one printable line")
+    return value
+
+
+class DiagnosticCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    code: str = Field(pattern=r"^[a-z]+(?:\.[a-z]+)+$", max_length=80)
+    category: DiagnosticCategory
+    severity: DiagnosticSeverity
+    summary: str = Field(min_length=1, max_length=300)
+    remediation: tuple[
+        Annotated[str, Field(max_length=MAX_DIAGNOSTIC_REMEDIATION_CHARACTERS)], ...
+    ] = Field(default=(), max_length=5)
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str) -> str:
+        return _single_line(value)
+
+    @field_validator("remediation")
+    @classmethod
+    def validate_remediation(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(_single_line(value) for value in values)
+
+
+class DiagnosticCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    passed: int = Field(ge=0)
+    warnings: int = Field(ge=0)
+    failures: int = Field(ge=0)
+
+
+class DiagnosticResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    overall: DiagnosticSeverity
+    bundlewalker_version: str = Field(min_length=1, max_length=80)
+    python_version: str = Field(min_length=1, max_length=80)
+    platform: str = Field(min_length=1, max_length=40)
+    counts: DiagnosticCounts
+    checks: tuple[DiagnosticCheck, ...]
+
+    @model_validator(mode="after")
+    def validate_catalog_and_summary(self) -> Self:
+        actual_catalog = tuple((check.code, check.category) for check in self.checks)
+        if actual_catalog != DIAGNOSTIC_CHECK_CATALOG:
+            raise ValueError("diagnostic checks must match the stable catalog")
+        expected = DiagnosticCounts(
+            passed=sum(check.severity is DiagnosticSeverity.PASS for check in self.checks),
+            warnings=sum(check.severity is DiagnosticSeverity.WARNING for check in self.checks),
+            failures=sum(check.severity is DiagnosticSeverity.FAILURE for check in self.checks),
+        )
+        if self.counts != expected:
+            raise ValueError("diagnostic counts do not match checks")
+        expected_overall = (
+            DiagnosticSeverity.FAILURE
+            if expected.failures
+            else DiagnosticSeverity.WARNING
+            if expected.warnings
+            else DiagnosticSeverity.PASS
+        )
+        if self.overall is not expected_overall:
+            raise ValueError("diagnostic overall severity does not match checks")
+        return self
+
+
+class SupportReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = 1
+    generated_at: AwareDatetime
+    result: DiagnosticResult
 
 
 class InlineSource(BaseModel):

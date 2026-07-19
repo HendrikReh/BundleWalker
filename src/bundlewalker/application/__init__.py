@@ -4,6 +4,7 @@
 """Stable adapter-neutral application contracts and public errors."""
 
 from bundlewalker.application.contracts import (
+    DIAGNOSTIC_CHECK_CATALOG,
     MAX_CONCEPT_PAGE_SIZE,
     MAX_INLINE_SOURCE_CHARACTERS,
     MAX_QUESTION_CHARACTERS,
@@ -16,6 +17,11 @@ from bundlewalker.application.contracts import (
     ConceptPage,
     ConceptSearchResult,
     ConceptSummaryResult,
+    DiagnosticCategory,
+    DiagnosticCheck,
+    DiagnosticCounts,
+    DiagnosticResult,
+    DiagnosticSeverity,
     IngestionResult,
     InlineSource,
     LintResult,
@@ -25,9 +31,14 @@ from bundlewalker.application.contracts import (
     RefreshResult,
     RestoreResult,
     ReviewResult,
+    SupportReport,
     SynthesisResult,
     UpgradeResult,
     WorkspaceStatus,
+)
+from bundlewalker.application.diagnostics import (
+    DiagnosticsApplication,
+    DiagnosticsDependencies,
 )
 from bundlewalker.application.errors import (
     ApplicationError,
@@ -38,6 +49,7 @@ from bundlewalker.application.facade import ApplicationDependencies, WorkspaceAp
 from bundlewalker.application.lifecycle import LifecycleApplication, LifecycleDependencies
 
 __all__ = [
+    "DIAGNOSTIC_CHECK_CATALOG",
     "MAX_CONCEPT_PAGE_SIZE",
     "MAX_INLINE_SOURCE_CHARACTERS",
     "MAX_QUESTION_CHARACTERS",
@@ -53,6 +65,13 @@ __all__ = [
     "ConceptPage",
     "ConceptSearchResult",
     "ConceptSummaryResult",
+    "DiagnosticCategory",
+    "DiagnosticCheck",
+    "DiagnosticCounts",
+    "DiagnosticResult",
+    "DiagnosticSeverity",
+    "DiagnosticsApplication",
+    "DiagnosticsDependencies",
     "IngestionResult",
     "InlineSource",
     "LifecycleApplication",
@@ -64,6 +83,7 @@ __all__ = [
     "RefreshResult",
     "RestoreResult",
     "ReviewResult",
+    "SupportReport",
     "SynthesisResult",
     "UpgradeResult",
     "WorkspaceApplication",

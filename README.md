@@ -24,7 +24,7 @@ Latest stable release: **v3** (Python package `0.3.0`). The current alpha is
 
 ## Quick start
 
-BundleWalker requires Python 3.13 or newer and [`uv`](https://docs.astral.sh/uv/). Install the
+BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/). Install the
 locked repository environment, record its path, and configure a model supported by your installed
 PydanticAI version:
 
@@ -69,6 +69,7 @@ Run the offline check, ingest the note, ask a read-only question, save a reviewe
 optional semantic advisories:
 
 ```bash
+uv run --project "$PROJECT_ROOT" bundlewalker doctor
 uv run --project "$PROJECT_ROOT" bundlewalker lint
 uv run --project "$PROJECT_ROOT" bundlewalker ingest ../example-notes.md
 uv run --project "$PROJECT_ROOT" bundlewalker ask \
@@ -77,6 +78,12 @@ uv run --project "$PROJECT_ROOT" bundlewalker ask --save \
   'Why does this workspace use a review gate?'
 uv run --project "$PROJECT_ROOT" bundlewalker lint --semantic
 ```
+
+`doctor` is an offline, read-only health check. It reports installation, workspace, configuration,
+transaction, MCP, and storage status without repairing state or contacting a model provider.
+If support-report creation fails after the target is created, inspect and remove the owner-only
+partial target when appropriate before retrying; BundleWalker retains it to avoid deleting a
+replacement installed at the same path.
 
 `ingest` and `ask --save` show a complete prospective diff. Answer `y` to apply it; answer `n`,
 press Ctrl-C, or end input to discard it and exit successfully with live knowledge unchanged.

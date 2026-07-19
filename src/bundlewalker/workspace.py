@@ -8,6 +8,7 @@ import re
 import shutil
 import tomllib
 import unicodedata
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -258,8 +259,18 @@ def _raw_source_from_content(
 def parse_workspace_config(text: str, *, source: str = CONFIG_FILENAME) -> WorkspaceConfig:
     try:
         values = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
+    except ValueError as exc:
         raise ConfigurationError(f"could not read workspace configuration: {source}") from exc
+
+    return workspace_config_from_mapping(values, source=source)
+
+
+def workspace_config_from_mapping(
+    values: Mapping[str, object],
+    *,
+    source: str = CONFIG_FILENAME,
+) -> WorkspaceConfig:
+    """Validate an already parsed current-format configuration mapping."""
 
     expected = {
         "version",

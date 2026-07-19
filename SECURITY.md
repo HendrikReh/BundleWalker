@@ -27,6 +27,15 @@ the maintainer to establish private contact without disclosing vulnerability det
 Reports are handled on a best-effort basis. The maintainer will validate impact, coordinate a fix
 and disclosure when possible, and credit reporters who request attribution.
 
+Do not attach a doctor support report to a public issue when the report concerns a suspected
+security vulnerability. Use private vulnerability reporting and review every diagnostic artifact
+before sharing it.
+
+BundleWalker retains an owner-only partial support-report target after a post-creation failure.
+Portable pathname APIs cannot atomically prove that cleanup still addresses the created inode, so
+automatic cleanup could delete an unrelated replacement. Inspect and remove the newly created
+report target when appropriate before retrying.
+
 ## Security boundaries
 
 BundleWalker is a local application, but configured model-provider calls may send documented

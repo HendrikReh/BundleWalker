@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -20,7 +21,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from bundlewalker.changes import ChangeValidationContext, build_prospective_wiki
-from bundlewalker.coordination import open_workspace_directory, workspace_lock
+from bundlewalker.coordination import LOCK_NAME, open_workspace_directory, workspace_lock
 from bundlewalker.domain import (
     MAX_CHANGESET_DRAFTS,
     MAX_CHANGESET_SUMMARY_CHARACTERS,
@@ -56,6 +57,11 @@ _REVIEW_ID = re.compile(r"^[0-9a-f]{32}$")
 _Phase = Literal["prepared", "accepted", "raw-persisted", "swapping", "new-live"]
 _SCHEMA_V1_PHASES = frozenset({"prepared", "raw-persisted", "swapping", "new-live"})
 _SCHEMA_V2_PHASES = frozenset({"prepared", "accepted", "raw-persisted", "swapping", "new-live"})
+_MAX_DIAGNOSTIC_MANIFEST_BYTES = 1_048_576
+# identity.json contains only three SHA-256 values; 4 KiB leaves ample format headroom.
+_MAX_DIAGNOSTIC_IDENTITY_BYTES = 4_096
+_MAX_DIAGNOSTIC_TRANSACTION_ENTRIES = 64
+_MAX_DIAGNOSTIC_QUARANTINE_NAME_ENTRIES = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +106,14 @@ class ReviewKind(StrEnum):
 class ReviewStatus(StrEnum):
     PENDING = "pending"
     STALE = "stale"
+
+
+class TransactionDiagnosticStatus(StrEnum):
+    CLEAN = "clean"
+    PENDING = "pending"
+    INTERRUPTED = "interrupted"
+    MALFORMED = "malformed"
+    BUSY = "busy"
 
 
 class _RawDestinationCompatibility(StrEnum):
@@ -175,6 +189,277 @@ class _RawDestinationCompatibilityError(TransactionError):
 
 class _RawPersistenceAmbiguityError(TransactionError):
     pass
+
+
+def inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticStatus:
+    """Classify private transaction state without recovering or mutating it."""
+    try:
+        return _inspect_transaction_state(workspace)
+    except (OSError, TransactionError, _IncompleteManifestError):
+        return TransactionDiagnosticStatus.MALFORMED
+
+
+def _inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticStatus:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    root_descriptor = os.open(workspace.root, directory_flags)
+    try:
+        if not stat.S_ISDIR(os.fstat(root_descriptor).st_mode):
+            return TransactionDiagnosticStatus.MALFORMED
+        private_descriptor = _open_optional_diagnostic_node(
+            ".bundlewalker",
+            directory_flags,
+            dir_fd=root_descriptor,
+        )
+        if private_descriptor is None:
+            return TransactionDiagnosticStatus.CLEAN
+        try:
+            if not stat.S_ISDIR(os.fstat(private_descriptor).st_mode):
+                return TransactionDiagnosticStatus.MALFORMED
+            return _inspect_private_transaction_state(
+                workspace,
+                root_descriptor,
+                private_descriptor,
+            )
+        finally:
+            os.close(private_descriptor)
+    finally:
+        os.close(root_descriptor)
+
+
+def _inspect_private_transaction_state(
+    workspace: Workspace,
+    root_descriptor: int,
+    private_descriptor: int,
+) -> TransactionDiagnosticStatus:
+    lock_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    lock_descriptor = _open_optional_diagnostic_node(
+        LOCK_NAME,
+        lock_flags,
+        dir_fd=private_descriptor,
+    )
+    if lock_descriptor is None:
+        return _inspect_transaction_entries(
+            workspace,
+            root_descriptor,
+            private_descriptor,
+        )
+
+    locked = False
+    try:
+        if not stat.S_ISREG(os.fstat(lock_descriptor).st_mode):
+            return TransactionDiagnosticStatus.MALFORMED
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return TransactionDiagnosticStatus.BUSY
+        locked = True
+        return _inspect_transaction_entries(
+            workspace,
+            root_descriptor,
+            private_descriptor,
+        )
+    finally:
+        try:
+            if locked:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_descriptor)
+
+
+def _open_optional_diagnostic_node(
+    name: str,
+    flags: int,
+    *,
+    dir_fd: int,
+) -> int | None:
+    try:
+        return os.open(name, flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+
+
+def _inspect_transaction_entries(
+    workspace: Workspace,
+    root_descriptor: int,
+    private_descriptor: int,
+) -> TransactionDiagnosticStatus:
+    """Inspect transaction entries while any existing shared lock is held."""
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    transactions_descriptor = _open_optional_diagnostic_node(
+        "transactions",
+        directory_flags,
+        dir_fd=private_descriptor,
+    )
+    if transactions_descriptor is None:
+        return TransactionDiagnosticStatus.CLEAN
+    try:
+        if not stat.S_ISDIR(os.fstat(transactions_descriptor).st_mode):
+            return TransactionDiagnosticStatus.MALFORMED
+        entries = _bounded_diagnostic_names(
+            transactions_descriptor,
+            _MAX_DIAGNOSTIC_TRANSACTION_ENTRIES,
+        )
+        if not entries:
+            return TransactionDiagnosticStatus.CLEAN
+
+        prepared = 0
+        interrupted = 0
+        for transaction_name in entries:
+            transaction_descriptor = os.open(
+                transaction_name,
+                directory_flags,
+                dir_fd=transactions_descriptor,
+            )
+            try:
+                if not stat.S_ISDIR(os.fstat(transaction_descriptor).st_mode):
+                    return TransactionDiagnosticStatus.MALFORMED
+                manifest = _load_diagnostic_manifest(
+                    workspace,
+                    transaction_name,
+                    transaction_descriptor,
+                )
+                _load_diagnostic_identity(transaction_descriptor, manifest)
+                live_kind = _diagnostic_workspace_node_kind(
+                    root_descriptor,
+                    PurePosixPath(workspace.config.wiki_dir).parts,
+                )
+                if not _diagnostic_topology_is_valid(
+                    transaction_descriptor,
+                    manifest,
+                    live_kind,
+                ):
+                    return TransactionDiagnosticStatus.MALFORMED
+                if manifest.schema_version == _SCHEMA_VERSION and manifest.phase == "prepared":
+                    prepared += 1
+                else:
+                    interrupted += 1
+            finally:
+                os.close(transaction_descriptor)
+
+        if prepared == 1 and interrupted == 0:
+            return TransactionDiagnosticStatus.PENDING
+        if prepared == 0 and interrupted >= 1:
+            return TransactionDiagnosticStatus.INTERRUPTED
+        return TransactionDiagnosticStatus.MALFORMED
+    finally:
+        os.close(transactions_descriptor)
+
+
+def _diagnostic_topology_is_valid(
+    transaction_descriptor: int,
+    manifest: _Manifest,
+    live_kind: str,
+) -> bool:
+    if _REVIEW_ID.fullmatch(manifest.transaction_id) is None:
+        return False
+    if _diagnostic_node_kind(transaction_descriptor, _IDENTITY_NAME) != "regular":
+        return False
+    expected_review_kind = "regular" if manifest.schema_version == _SCHEMA_VERSION else "absent"
+    if _diagnostic_node_kind(transaction_descriptor, _REVIEW_NAME) != expected_review_kind:
+        return False
+    raw_kind = _diagnostic_node_kind(transaction_descriptor, _RAW_PAYLOAD_NAME)
+    if raw_kind != ("absent" if manifest.raw_sha256 is None else "regular"):
+        return False
+
+    prospective_kind = _diagnostic_node_kind(transaction_descriptor, _PROSPECTIVE_NAME)
+    backup_kind = _diagnostic_backup_kind(transaction_descriptor)
+    if manifest.phase in {"prepared", "accepted", "raw-persisted"}:
+        return (
+            live_kind == "directory" and prospective_kind == "directory" and backup_kind == "absent"
+        )
+    if live_kind not in {"directory", "absent"}:
+        return False
+    if manifest.phase == "swapping":
+        return (prospective_kind, backup_kind) in {
+            ("directory", "absent"),
+            ("directory", "directory"),
+            ("absent", "directory"),
+        }
+    return prospective_kind == "absent" and backup_kind == "directory"
+
+
+def _diagnostic_workspace_node_kind(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+) -> str:
+    if not parts or any(not part or part in {".", ".."} or "/" in part for part in parts):
+        return "unsafe"
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    current_descriptor = root_descriptor
+    opened_descriptors: list[int] = []
+    try:
+        for part in parts[:-1]:
+            try:
+                current_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=current_descriptor,
+                )
+            except FileNotFoundError:
+                return "absent"
+            except OSError:
+                return "unsafe"
+            opened_descriptors.append(current_descriptor)
+            if not stat.S_ISDIR(os.fstat(current_descriptor).st_mode):
+                return "unsafe"
+        return _diagnostic_node_kind(current_descriptor, parts[-1])
+    finally:
+        for descriptor in reversed(opened_descriptors):
+            os.close(descriptor)
+
+
+def _diagnostic_backup_kind(transaction_descriptor: int) -> str:
+    backup_kind = _diagnostic_node_kind(transaction_descriptor, _BACKUP_NAME)
+    quarantines = [
+        name
+        for name in _bounded_diagnostic_names(
+            transaction_descriptor,
+            _MAX_DIAGNOSTIC_QUARANTINE_NAME_ENTRIES,
+        )
+        if name.startswith(_QUARANTINE_PREFIX)
+    ]
+    if len(quarantines) > 1 or (quarantines and backup_kind != "absent"):
+        return "unsafe"
+    if quarantines:
+        return _diagnostic_node_kind(transaction_descriptor, quarantines[0])
+    return backup_kind
+
+
+def _bounded_diagnostic_names(descriptor: int, limit: int) -> tuple[str, ...]:
+    names: list[str] = []
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            if len(names) == limit:
+                raise _IncompleteManifestError
+            names.append(entry.name)
+    return tuple(sorted(names))
+
+
+def _diagnostic_node_kind(parent_descriptor: int, name: str) -> str:
+    try:
+        metadata = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    if stat.S_ISREG(metadata.st_mode):
+        return "regular"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    return "unsafe"
 
 
 def prepare_transaction(
@@ -1697,8 +1982,146 @@ def _manifest_paths(
 def _load_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
     path = transaction_dir / _MANIFEST_NAME
     try:
-        parsed: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise _IncompleteManifestError from exc
+    manifest = _parse_manifest_bytes(content)
+    _manifest_paths(workspace, transaction_dir, manifest)
+    return manifest
+
+
+def _load_diagnostic_manifest(
+    workspace: Workspace,
+    transaction_name: str,
+    transaction_descriptor: int,
+) -> _Manifest:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            _MANIFEST_NAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=transaction_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise _IncompleteManifestError
+        if metadata.st_size > _MAX_DIAGNOSTIC_MANIFEST_BYTES:
+            raise _IncompleteManifestError
+
+        content = bytearray()
+        remaining = _MAX_DIAGNOSTIC_MANIFEST_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+            remaining -= len(chunk)
+        if len(content) > _MAX_DIAGNOSTIC_MANIFEST_BYTES:
+            raise _IncompleteManifestError
+    except OSError as exc:
+        raise _IncompleteManifestError from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    try:
+        manifest = _parse_manifest_bytes(bytes(content))
+    except (RecursionError, ValueError) as exc:
+        raise _IncompleteManifestError from exc
+    if manifest.base_wiki_digest is None or manifest.prospective_digest is None:
+        raise _IncompleteManifestError
+    _validate_diagnostic_manifest_relationships(workspace, transaction_name, manifest)
+    return manifest
+
+
+def _validate_diagnostic_manifest_relationships(
+    workspace: Workspace,
+    transaction_name: str,
+    manifest: _Manifest,
+) -> None:
+    if manifest.transaction_id != transaction_name:
+        raise TransactionError("transaction directory does not match manifest ID")
+    expected_dir = PurePosixPath(".bundlewalker", "transactions", transaction_name)
+    if PurePosixPath(manifest.prospective_path) != expected_dir / _PROSPECTIVE_NAME:
+        raise TransactionError("prospective path is not a safe workspace-relative path")
+    if PurePosixPath(manifest.backup_path) != expected_dir / _BACKUP_NAME:
+        raise TransactionError("backup path is not a safe workspace-relative path")
+    if manifest.raw_path is not None:
+        _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
+
+
+def _load_diagnostic_identity(
+    transaction_descriptor: int,
+    manifest: _Manifest,
+) -> _Identity:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            _IDENTITY_NAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=transaction_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_DIAGNOSTIC_IDENTITY_BYTES:
+            raise _IncompleteManifestError
+        content = bytearray()
+        remaining = _MAX_DIAGNOSTIC_IDENTITY_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(4_096, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+            remaining -= len(chunk)
+        if len(content) > _MAX_DIAGNOSTIC_IDENTITY_BYTES:
+            raise _IncompleteManifestError
+    except OSError as exc:
+        raise _IncompleteManifestError from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    try:
+        parsed: object = json.loads(bytes(content).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise _IncompleteManifestError from exc
+    if not isinstance(parsed, dict):
+        raise _IncompleteManifestError
+    untyped_values = cast(dict[object, object], parsed)
+    if not all(isinstance(key, str) for key in untyped_values):
+        raise _IncompleteManifestError
+    values = cast(dict[str, object], untyped_values)
+    required_keys = {"base_wiki_digest", "prospective_digest"}
+    if manifest.schema_version == _SCHEMA_VERSION:
+        required_keys.add("review_digest")
+    if set(values) != required_keys:
+        raise _IncompleteManifestError
+    base = values.get("base_wiki_digest")
+    prospective = values.get("prospective_digest")
+    review = values.get("review_digest")
+    if (
+        not isinstance(base, str)
+        or _SHA256.fullmatch(base) is None
+        or not isinstance(prospective, str)
+        or _SHA256.fullmatch(prospective) is None
+        or (
+            manifest.schema_version == _SCHEMA_VERSION
+            and (not isinstance(review, str) or _SHA256.fullmatch(review) is None)
+        )
+    ):
+        raise _IncompleteManifestError
+    if base != manifest.base_wiki_digest or prospective != manifest.prospective_digest:
+        raise TransactionError("manifest identities do not match transaction identity")
+    validated_review = review if isinstance(review, str) else None
+    return _Identity(
+        base_wiki_digest=base,
+        prospective_digest=prospective,
+        review_digest=validated_review,
+    )
+
+
+def _parse_manifest_bytes(content: bytes) -> _Manifest:
+    try:
+        parsed: object = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _IncompleteManifestError from exc
     if not isinstance(parsed, dict):
         raise _IncompleteManifestError
@@ -1772,7 +2195,6 @@ def _load_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
         prospective_digest=prospective_digest,
         base_wiki_digest=base_wiki_digest,
     )
-    _manifest_paths(workspace, transaction_dir, manifest)
     return manifest
 
 
@@ -1858,14 +2280,17 @@ def _load_identity(transaction_dir: Path) -> _Identity:
         or _SHA256.fullmatch(base) is None
         or not isinstance(prospective, str)
         or _SHA256.fullmatch(prospective) is None
-        or (review_digest is not None and not isinstance(review_digest, str))
-        or (isinstance(review_digest, str) and _SHA256.fullmatch(review_digest) is None)
+        or (
+            "review_digest" in values
+            and (not isinstance(review_digest, str) or _SHA256.fullmatch(review_digest) is None)
+        )
     ):
         raise _IncompleteManifestError
+    validated_review_digest = review_digest if isinstance(review_digest, str) else None
     return _Identity(
         base_wiki_digest=base,
         prospective_digest=prospective,
-        review_digest=review_digest,
+        review_digest=validated_review_digest,
     )
 
 
