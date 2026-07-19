@@ -9,9 +9,16 @@ import pytest
 from pydantic import ValidationError
 
 from bundlewalker.application import (
+    DIAGNOSTIC_CHECK_CATALOG,
     BackupResult,
     CompatibilityResult,
+    DiagnosticCategory,
+    DiagnosticCheck,
+    DiagnosticCounts,
+    DiagnosticResult,
+    DiagnosticSeverity,
     RestoreResult,
+    SupportReport,
     UpgradeResult,
 )
 from bundlewalker.application.contracts import (
@@ -55,6 +62,132 @@ from bundlewalker.errors import (
     WorkspaceError,
 )
 from bundlewalker.transactions import ReviewKind, ReviewStatus
+
+
+def _diagnostic_checks(
+    overrides: dict[str, DiagnosticSeverity] | None = None,
+) -> tuple[DiagnosticCheck, ...]:
+    selected = overrides or {}
+    return tuple(
+        DiagnosticCheck(
+            code=code,
+            category=category,
+            severity=selected.get(code, DiagnosticSeverity.PASS),
+            summary=f"Safe summary for {code}.",
+            remediation=(),
+        )
+        for code, category in DIAGNOSTIC_CHECK_CATALOG
+    )
+
+
+def test_diagnostic_result_requires_exact_catalog_counts_and_overall_severity() -> None:
+    checks = _diagnostic_checks(
+        {
+            "configuration.model": DiagnosticSeverity.WARNING,
+            "workspace.permissions": DiagnosticSeverity.FAILURE,
+        }
+    )
+
+    result = DiagnosticResult(
+        overall=DiagnosticSeverity.FAILURE,
+        bundlewalker_version="0.4.0a2",
+        python_version="3.13.5",
+        platform="linux",
+        counts=DiagnosticCounts(passed=12, warnings=1, failures=1),
+        checks=checks,
+    )
+
+    assert tuple(check.code for check in result.checks) == tuple(
+        code for code, _category in DIAGNOSTIC_CHECK_CATALOG
+    )
+    assert result.counts == DiagnosticCounts(passed=12, warnings=1, failures=1)
+    assert result.overall is DiagnosticSeverity.FAILURE
+
+
+@pytest.mark.parametrize(
+    ("counts", "overall"),
+    [
+        (DiagnosticCounts(passed=14, warnings=0, failures=0), DiagnosticSeverity.WARNING),
+        (DiagnosticCounts(passed=13, warnings=1, failures=0), DiagnosticSeverity.PASS),
+        (DiagnosticCounts(passed=13, warnings=0, failures=1), DiagnosticSeverity.WARNING),
+    ],
+)
+def test_diagnostic_result_rejects_inconsistent_summary(
+    counts: DiagnosticCounts,
+    overall: DiagnosticSeverity,
+) -> None:
+    overrides = (
+        {"configuration.model": DiagnosticSeverity.WARNING}
+        if counts.warnings
+        else {"workspace.permissions": DiagnosticSeverity.FAILURE}
+        if counts.failures
+        else {}
+    )
+
+    with pytest.raises(ValidationError):
+        DiagnosticResult(
+            overall=overall,
+            bundlewalker_version="0.4.0a2",
+            python_version="3.13.5",
+            platform="linux",
+            counts=counts,
+            checks=_diagnostic_checks(overrides),
+        )
+
+
+def test_diagnostic_result_rejects_missing_reordered_and_wrong_category_checks() -> None:
+    checks = list(_diagnostic_checks())
+    missing = tuple(checks[:-1])
+    reordered = tuple([checks[1], checks[0], *checks[2:]])
+    wrong_category = tuple(
+        [
+            checks[0].model_copy(update={"category": DiagnosticCategory.STORAGE}),
+            *checks[1:],
+        ]
+    )
+
+    for candidate in (missing, reordered, wrong_category):
+        with pytest.raises(ValidationError):
+            DiagnosticResult(
+                overall=DiagnosticSeverity.PASS,
+                bundlewalker_version="0.4.0a2",
+                python_version="3.13.5",
+                platform="linux",
+                counts=DiagnosticCounts(passed=len(candidate), warnings=0, failures=0),
+                checks=candidate,
+            )
+
+
+def test_support_report_round_trips_and_forbids_extra_fields() -> None:
+    result = DiagnosticResult(
+        overall=DiagnosticSeverity.PASS,
+        bundlewalker_version="0.4.0a2",
+        python_version="3.13.5",
+        platform="linux",
+        counts=DiagnosticCounts(passed=14, warnings=0, failures=0),
+        checks=_diagnostic_checks(),
+    )
+    report = SupportReport(
+        generated_at=datetime(2026, 7, 19, 8, 0, tzinfo=UTC),
+        result=result,
+    )
+
+    assert report.schema_version == 1
+    assert SupportReport.model_validate_json(report.model_dump_json()) == report
+    with pytest.raises(ValidationError):
+        SupportReport.model_validate({**report.model_dump(), "workspace_path": "/private"})
+
+
+@pytest.mark.parametrize("value", ["line\nbreak", "tab\tvalue", "control\x00value"])
+def test_diagnostic_text_rejects_control_characters(value: str) -> None:
+    with pytest.raises(ValidationError):
+        DiagnosticCheck(
+            code="runtime.python",
+            category=DiagnosticCategory.RUNTIME,
+            severity=DiagnosticSeverity.PASS,
+            summary=value,
+            remediation=(),
+        )
 
 
 def _review_payload() -> dict[str, object]:
