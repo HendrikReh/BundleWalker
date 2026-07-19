@@ -9,7 +9,8 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Iterator
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -140,10 +141,15 @@ def test_transaction_diagnostics_pending_review_reads_no_review_or_staged_conten
     before = _tree_snapshot(workspace.root)
     original_open = os.open
     original_read = os.read
-    manifest_path = transaction_dir / "manifest.json"
-    lock_path = workspace.root / ".bundlewalker/transaction.lock"
     manifest_descriptor: int | None = None
-    opened_paths: list[Path] = []
+    forbidden_names = {
+        "backup-wiki",
+        "identity.json",
+        "prospective-wiki",
+        "raw-source",
+        "review.json",
+        workspace.wiki_dir.name,
+    }
 
     def guarded_read_bytes(path: Path) -> bytes:
         pytest.fail(f"diagnostics read content through Path.read_bytes: {path}")
@@ -164,10 +170,10 @@ def test_transaction_diagnostics_pending_review_reads_no_review_or_staged_conten
         dir_fd: int | None = None,
     ) -> int:
         nonlocal manifest_descriptor
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
         opened = Path(os.fsdecode(path))
-        opened_paths.append(opened)
-        if opened == manifest_path:
+        assert opened.name not in forbidden_names
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if opened.name == "manifest.json":
             manifest_descriptor = descriptor
         return descriptor
 
@@ -183,7 +189,7 @@ def test_transaction_diagnostics_pending_review_reads_no_review_or_staged_conten
         result = inspect_transaction_state(workspace)
 
     assert result is TransactionDiagnosticStatus.PENDING
-    assert opened_paths == [lock_path, manifest_path]
+    assert manifest_descriptor is not None
     assert _tree_snapshot(workspace.root) == before
 
 
@@ -234,6 +240,146 @@ def test_transaction_diagnostics_rejects_legacy_manifest_with_review_artifact(
 
     assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
     assert _tree_snapshot(workspace.root) == before
+
+
+@pytest.mark.parametrize(
+    ("node_name", "replacement_kind"),
+    [
+        ("identity.json", "missing"),
+        ("identity.json", "wrong-kind"),
+        ("identity.json", "symlink"),
+        ("prospective-wiki", "missing"),
+        ("prospective-wiki", "wrong-kind"),
+        ("prospective-wiki", "symlink"),
+        ("backup-wiki", "wrong-kind"),
+        ("backup-wiki", "symlink"),
+        ("raw-source", "wrong-kind"),
+        ("raw-source", "symlink"),
+    ],
+)
+def test_transaction_diagnostics_rejects_invalid_legacy_prepared_fixed_nodes(
+    tmp_path: Path,
+    node_name: str,
+    replacement_kind: str,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    transaction_dir = _transaction_dir(workspace)
+    manifest = _manifest_values(transaction_dir)
+    manifest["schema_version"] = 1
+    _write_manifest_values(transaction_dir, manifest)
+    identity_path = transaction_dir / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity.pop("review_digest")
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (transaction_dir / "review.json").unlink()
+
+    path = transaction_dir / node_name
+    if path.exists() or path.is_symlink():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    if replacement_kind == "wrong-kind":
+        if node_name in {"identity.json", "raw-source"}:
+            path.mkdir()
+        else:
+            path.write_bytes(b"wrong fixed-node kind\n")
+    elif replacement_kind == "symlink":
+        target = tmp_path / f"outside-legacy-{node_name}"
+        if node_name == "prospective-wiki":
+            target.mkdir()
+        else:
+            target.write_bytes(b"outside fixed-node content\n")
+        path.symlink_to(target, target_is_directory=node_name == "prospective-wiki")
+    before = _tree_snapshot(tmp_path)
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_transaction_diagnostics_accepts_legacy_prepared_regular_raw_payload(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    transaction_dir = _transaction_dir(workspace)
+    _declare_raw_payload(workspace)
+    manifest = _manifest_values(transaction_dir)
+    manifest["schema_version"] = 1
+    _write_manifest_values(transaction_dir, manifest)
+    identity_path = transaction_dir / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity.pop("review_digest")
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (transaction_dir / "review.json").unlink()
+    before = _tree_snapshot(workspace.root)
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.INTERRUPTED
+    assert _tree_snapshot(workspace.root) == before
+
+
+def test_transaction_diagnostics_rejects_missing_declared_legacy_raw_payload(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    transaction_dir = _transaction_dir(workspace)
+    _declare_raw_payload(workspace)
+    manifest = _manifest_values(transaction_dir)
+    manifest["schema_version"] = 1
+    _write_manifest_values(transaction_dir, manifest)
+    identity_path = transaction_dir / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity.pop("review_digest")
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (transaction_dir / "review.json").unlink()
+    (transaction_dir / "raw-source").unlink()
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+
+
+@pytest.mark.parametrize("replacement_kind", ["valid", "missing", "wrong-kind", "symlink"])
+def test_transaction_diagnostics_validates_legacy_new_live_backup_topology(
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    _materialize_phase_topology(workspace, "new-live")
+    transaction_dir = _transaction_dir(workspace)
+    manifest = _manifest_values(transaction_dir)
+    manifest["schema_version"] = 1
+    _write_manifest_values(transaction_dir, manifest)
+    identity_path = transaction_dir / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity.pop("review_digest")
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (transaction_dir / "review.json").unlink()
+    backup = transaction_dir / "backup-wiki"
+    if replacement_kind != "valid":
+        shutil.rmtree(backup)
+    if replacement_kind == "wrong-kind":
+        backup.write_bytes(b"wrong fixed-node kind\n")
+    elif replacement_kind == "symlink":
+        outside = tmp_path / "outside-legacy-backup"
+        outside.mkdir()
+        backup.symlink_to(outside, target_is_directory=True)
+
+    expected = (
+        TransactionDiagnosticStatus.INTERRUPTED
+        if replacement_kind == "valid"
+        else TransactionDiagnosticStatus.MALFORMED
+    )
+    assert inspect_transaction_state(workspace) is expected
 
 
 @pytest.mark.parametrize(
@@ -333,7 +479,20 @@ def test_transaction_diagnostics_new_live_reads_no_backup_or_live_content(
     assert backup_file.read_bytes()
     assert live_file.read_bytes()
     assert (transaction_dir / "raw-source").read_bytes()
+    assert (transaction_dir / "identity.json").read_bytes()
+    assert (transaction_dir / "review.json").read_bytes()
     before = _tree_snapshot(workspace.root)
+    original_open = os.open
+    original_read = os.read
+    manifest_descriptor: int | None = None
+    forbidden_names = {
+        "backup-wiki",
+        "identity.json",
+        "prospective-wiki",
+        "raw-source",
+        "review.json",
+        workspace.wiki_dir.name,
+    }
 
     def forbidden_read_bytes(path: Path) -> bytes:
         pytest.fail(f"diagnostics read non-manifest content: {path}")
@@ -346,9 +505,30 @@ def test_transaction_diagnostics_new_live_reads_no_backup_or_live_content(
     ) -> str:
         pytest.fail(f"diagnostics read non-manifest content: {path}")
 
+    def guarded_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal manifest_descriptor
+        opened = Path(os.fsdecode(path))
+        assert opened.name not in forbidden_names
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if opened.name == "manifest.json":
+            manifest_descriptor = descriptor
+        return descriptor
+
+    def manifest_only_read(descriptor: int, size: int) -> bytes:
+        assert descriptor == manifest_descriptor
+        return original_read(descriptor, size)
+
     with monkeypatch.context() as guarded:
         guarded.setattr(Path, "read_bytes", forbidden_read_bytes)
         guarded.setattr(Path, "read_text", forbidden_read_text)
+        guarded.setattr(os, "open", guarded_open)
+        guarded.setattr(os, "read", manifest_only_read)
         result = inspect_transaction_state(workspace)
 
     assert result is TransactionDiagnosticStatus.INTERRUPTED
@@ -375,16 +555,21 @@ def test_transaction_diagnostics_contains_private_root_permission_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _workspace_with_review(tmp_path)
-    private_root = workspace.root / ".bundlewalker"
-    original_exists = Path.exists
+    original_open = os.open
 
-    def denied_exists(path: Path) -> bool:
-        if path == private_root:
+    def denied_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(path) == ".bundlewalker":
             raise PermissionError("diagnostic fixture denied private root")
-        return original_exists(path)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
 
     with monkeypatch.context() as guarded:
-        guarded.setattr(Path, "exists", denied_exists)
+        guarded.setattr(os, "open", denied_open)
         result = inspect_transaction_state(workspace)
 
     assert result is TransactionDiagnosticStatus.MALFORMED
@@ -400,31 +585,11 @@ def test_transaction_diagnostics_contains_snapshot_permission_errors(
     checkpoint: str,
 ) -> None:
     workspace = _workspace_with_review(tmp_path)
-    private_root = workspace.root / ".bundlewalker"
-    lock_path = private_root / "transaction.lock"
-    transactions_root = private_root / "transactions"
     transaction_dir = _transaction_dir(workspace)
-    manifest_path = transaction_dir / "manifest.json"
     before = _tree_snapshot(workspace.root)
-    original_exists = Path.exists
-    original_is_symlink = Path.is_symlink
-    original_iterdir = Path.iterdir
+    original_listdir = os.listdir
     original_open = os.open
-
-    def denied_exists(path: Path) -> bool:
-        if checkpoint == "transactions-root" and path == transactions_root:
-            raise PermissionError("diagnostic fixture denied transaction storage")
-        return original_exists(path)
-
-    def denied_is_symlink(path: Path) -> bool:
-        if checkpoint == "transaction-dir" and path == transaction_dir:
-            raise PermissionError("diagnostic fixture denied transaction entry")
-        return original_is_symlink(path)
-
-    def denied_iterdir(path: Path) -> Iterator[Path]:
-        if checkpoint == "entries" and path == transactions_root:
-            raise PermissionError("diagnostic fixture denied transaction entries")
-        return original_iterdir(path)
+    transactions_descriptor: int | None = None
 
     def denied_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -433,18 +598,29 @@ def test_transaction_diagnostics_contains_snapshot_permission_errors(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        decoded = Path(os.fsdecode(path))
-        if (checkpoint == "lock" and decoded == lock_path) or (
-            checkpoint == "manifest" and decoded == manifest_path
-        ):
+        nonlocal transactions_descriptor
+        decoded = os.fsdecode(path)
+        denied_names = {
+            "lock": "transaction.lock",
+            "transactions-root": "transactions",
+            "transaction-dir": transaction_dir.name,
+            "manifest": "manifest.json",
+        }
+        if checkpoint in denied_names and decoded == denied_names[checkpoint]:
             raise PermissionError(f"diagnostic fixture denied {checkpoint}")
-        return original_open(path, flags, mode, dir_fd=dir_fd)
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if decoded == "transactions":
+            transactions_descriptor = descriptor
+        return descriptor
+
+    def denied_listdir(path: int | str | bytes | os.PathLike[str]) -> list[str]:
+        if checkpoint == "entries" and path == transactions_descriptor:
+            raise PermissionError("diagnostic fixture denied transaction entries")
+        return [os.fsdecode(name) for name in original_listdir(path)]
 
     with monkeypatch.context() as guarded:
-        guarded.setattr(Path, "exists", denied_exists)
-        guarded.setattr(Path, "is_symlink", denied_is_symlink)
-        guarded.setattr(Path, "iterdir", denied_iterdir)
         guarded.setattr(os, "open", denied_open)
+        guarded.setattr(os, "listdir", denied_listdir)
         result = inspect_transaction_state(workspace)
 
     assert result is TransactionDiagnosticStatus.MALFORMED
@@ -537,6 +713,52 @@ def test_transaction_diagnostics_rejects_oversized_manifest_without_parsing(
     assert _tree_snapshot(workspace.root) == before
 
 
+def test_transaction_diagnostics_rejects_fifo_manifest_without_blocking(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    manifest_path = _transaction_dir(workspace) / "manifest.json"
+    manifest_path.unlink()
+    os.mkfifo(manifest_path)
+    command = (
+        "from pathlib import Path\n"
+        "from bundlewalker.transactions import inspect_transaction_state\n"
+        "from bundlewalker.workspace import discover_workspace\n"
+        "workspace = discover_workspace(Path(__import__('sys').argv[1]))\n"
+        "print(inspect_transaction_state(workspace).value)\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", command, os.fspath(workspace.root)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    assert completed.stdout.strip() == TransactionDiagnosticStatus.MALFORMED
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"[" * 10_000 + b"]" * 10_000,
+        b'{"schema_version":' + b"9" * 5_000 + b"}",
+    ],
+    ids=["deep-nesting", "oversized-integer-token"],
+)
+def test_transaction_diagnostics_contains_bounded_json_parser_exhaustion(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    manifest_path = _transaction_dir(workspace) / "manifest.json"
+    assert len(content) < 1_048_576
+    manifest_path.write_bytes(content)
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+
+
 def test_transaction_diagnostics_accepts_manifest_at_exact_size_limit(
     tmp_path: Path,
 ) -> None:
@@ -576,7 +798,7 @@ def test_transaction_diagnostics_reads_only_the_opened_manifest_descriptor(
     ) -> int:
         nonlocal manifest_descriptor, manifest_opens
         descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if os.fsdecode(path) == os.fspath(manifest_path):
+        if os.fsdecode(path) == "manifest.json" and dir_fd is not None:
             manifest_descriptor = descriptor
             manifest_opens += 1
             assert flags & getattr(os, "O_NOFOLLOW", 0)
@@ -703,3 +925,40 @@ def test_transaction_diagnostics_holds_shared_lock_while_reading_manifest(
 
     assert result is TransactionDiagnosticStatus.PENDING
     assert not writer_acquired
+
+
+def test_transaction_diagnostics_stays_on_opened_tree_during_private_parent_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    transaction_dir = _transaction_dir(workspace)
+    private_root = workspace.root / ".bundlewalker"
+    retained_private_root = workspace.root / ".bundlewalker-retained"
+    outside_private_root = tmp_path / "outside-private"
+    shutil.copytree(private_root, outside_private_root)
+    outside_manifest = next((outside_private_root / "transactions").glob("*/manifest.json"))
+    outside_manifest.write_bytes(b"not valid JSON\n")
+    original_open = os.open
+    swapped = False
+
+    def swap_before_transaction_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        if os.fsdecode(path) == transaction_dir.name and dir_fd is not None and not swapped:
+            private_root.rename(retained_private_root)
+            private_root.symlink_to(outside_private_root, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(os, "open", swap_before_transaction_open)
+        result = inspect_transaction_state(workspace)
+
+    assert swapped
+    assert result is TransactionDiagnosticStatus.PENDING
