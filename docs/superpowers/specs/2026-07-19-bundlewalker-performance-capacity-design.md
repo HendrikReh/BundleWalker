@@ -91,7 +91,7 @@ Profile generation controls:
 - body size;
 - link, citation, and tag density;
 - stable searchable terms with known expected rankings;
-- raw-source payload size; and
+- ingestion-source character count; and
 - optional transaction state required by a recovery scenario.
 
 Generated timestamps and identifiers are fixed from the seed. Files use UTF-8 and LF line endings.
@@ -141,18 +141,23 @@ reviewed evidence without rerunning benchmarks.
 
 The first suite defines these immutable profiles:
 
-| Profile | Knowledge documents | Approximate wiki content | Raw-source payload |
+| Profile | Knowledge documents | Approximate wiki content | Ingestion source |
 |---|---:|---:|---:|
-| Smoke | 50 | 0.5 MiB | 1 MiB |
-| Small | 250 | 2.5 MiB | 5 MiB |
-| Medium | 1,000 | 10 MiB | 25 MiB |
-| Large | 5,000 | 50 MiB | 100 MiB |
-| Probe | 10,000 | 100 MiB | 250 MiB |
+| Smoke | 50 | 0.5 MiB | 10,000 characters |
+| Small | 250 | 2.5 MiB | 25,000 characters |
+| Medium | 1,000 | 10 MiB | 50,000 characters |
+| Large | 5,000 | 50 MiB | 100,000 characters |
+| Probe | 10,000 | 100 MiB | 100,000 characters |
 
 "Approximate wiki content" is the total byte size of regular files under the configured wiki
 directory after generation. The generator targets the stated size and records the exact result;
 the exact bytes, document count, profile parameters, and tree digest appear in every evidence
 record.
+
+The ingestion source is deterministic ASCII text, so its Unicode character count equals its UTF-8
+byte count. It never exceeds the existing default `max_source_characters = 100000` product
+boundary. Large and Probe intentionally share that maximum: Probe increases workspace scale
+without inventing a larger supported source contract.
 
 All profiles use the same proportions and density rules. Increasing a profile therefore changes
 scale rather than changing the semantic shape of the workload. Profile definitions are versioned
@@ -278,10 +283,10 @@ reference environment and records exact profile sizes so users can compare their
 workload. It does not promise the same elapsed time on slower hardware or unusual filesystems.
 
 Milestone B3 requires at least Medium—1,000 knowledge documents, approximately 10 MiB of wiki
-content, and a 25 MiB raw-source payload—to satisfy the complete matrix. Large is the desired first
-envelope. If Medium fails, B3 remains incomplete and no smaller profile is presented as sufficient
-for public beta. Specific bottlenecks are diagnosed before targeted optimization and a fresh
-evidence run.
+content, and a 50,000-character ingestion source—to satisfy the complete matrix. Large is the
+desired first envelope. If Medium fails, B3 remains incomplete and no smaller profile is presented
+as sufficient for public beta. Specific bottlenecks are diagnosed before targeted optimization and
+a fresh evidence run.
 
 Probe results are always labeled exploratory. A future release may promote a larger envelope only
 through a reviewed evidence update.
