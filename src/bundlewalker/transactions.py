@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -56,6 +57,7 @@ _REVIEW_ID = re.compile(r"^[0-9a-f]{32}$")
 _Phase = Literal["prepared", "accepted", "raw-persisted", "swapping", "new-live"]
 _SCHEMA_V1_PHASES = frozenset({"prepared", "raw-persisted", "swapping", "new-live"})
 _SCHEMA_V2_PHASES = frozenset({"prepared", "accepted", "raw-persisted", "swapping", "new-live"})
+_MAX_DIAGNOSTIC_MANIFEST_BYTES = 1_048_576
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +102,14 @@ class ReviewKind(StrEnum):
 class ReviewStatus(StrEnum):
     PENDING = "pending"
     STALE = "stale"
+
+
+class TransactionDiagnosticStatus(StrEnum):
+    CLEAN = "clean"
+    PENDING = "pending"
+    INTERRUPTED = "interrupted"
+    MALFORMED = "malformed"
+    BUSY = "busy"
 
 
 class _RawDestinationCompatibility(StrEnum):
@@ -175,6 +185,117 @@ class _RawDestinationCompatibilityError(TransactionError):
 
 class _RawPersistenceAmbiguityError(TransactionError):
     pass
+
+
+def inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticStatus:
+    """Classify private transaction state without recovering or mutating it."""
+    private_root = workspace.root / ".bundlewalker"
+    if not private_root.exists() and not private_root.is_symlink():
+        return TransactionDiagnosticStatus.CLEAN
+    if private_root.is_symlink() or not private_root.is_dir():
+        return TransactionDiagnosticStatus.MALFORMED
+
+    lock_path = private_root / "transaction.lock"
+    if lock_path.exists() or lock_path.is_symlink():
+        if lock_path.is_symlink() or not lock_path.is_file():
+            return TransactionDiagnosticStatus.MALFORMED
+        try:
+            with _transaction_diagnostic_lock(lock_path) as busy:
+                if busy:
+                    return TransactionDiagnosticStatus.BUSY
+                return _inspect_transaction_entries(workspace, private_root)
+        except (OSError, TransactionError):
+            return TransactionDiagnosticStatus.MALFORMED
+
+    return _inspect_transaction_entries(workspace, private_root)
+
+
+def _inspect_transaction_entries(
+    workspace: Workspace,
+    private_root: Path,
+) -> TransactionDiagnosticStatus:
+    """Inspect transaction entries while any existing shared lock is held."""
+
+    transactions_root = private_root / "transactions"
+    if not transactions_root.exists() and not transactions_root.is_symlink():
+        return TransactionDiagnosticStatus.CLEAN
+    if transactions_root.is_symlink() or not transactions_root.is_dir():
+        return TransactionDiagnosticStatus.MALFORMED
+
+    try:
+        entries = sorted(transactions_root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return TransactionDiagnosticStatus.MALFORMED
+    if not entries:
+        return TransactionDiagnosticStatus.CLEAN
+
+    prepared = 0
+    interrupted = 0
+    for transaction_dir in entries:
+        if transaction_dir.is_symlink() or not transaction_dir.is_dir():
+            return TransactionDiagnosticStatus.MALFORMED
+        manifest_path = transaction_dir / _MANIFEST_NAME
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return TransactionDiagnosticStatus.MALFORMED
+        try:
+            if manifest_path.stat().st_size > _MAX_DIAGNOSTIC_MANIFEST_BYTES:
+                return TransactionDiagnosticStatus.MALFORMED
+            manifest = _load_manifest(workspace, transaction_dir)
+        except (OSError, TransactionError, _IncompleteManifestError):
+            return TransactionDiagnosticStatus.MALFORMED
+        if manifest.phase == "prepared":
+            if not _pending_diagnostic_topology_is_regular(transaction_dir):
+                return TransactionDiagnosticStatus.MALFORMED
+            prepared += 1
+        else:
+            interrupted += 1
+
+    if prepared == 1 and interrupted == 0:
+        return TransactionDiagnosticStatus.PENDING
+    if prepared == 0 and interrupted >= 1:
+        return TransactionDiagnosticStatus.INTERRUPTED
+    return TransactionDiagnosticStatus.MALFORMED
+
+
+def _pending_diagnostic_topology_is_regular(transaction_dir: Path) -> bool:
+    for name in (_IDENTITY_NAME, _REVIEW_NAME):
+        path = transaction_dir / name
+        if path.is_symlink() or not path.is_file():
+            return False
+    prospective = transaction_dir / _PROSPECTIVE_NAME
+    backup = transaction_dir / _BACKUP_NAME
+    return (
+        not prospective.is_symlink()
+        and prospective.is_dir()
+        and not backup.exists()
+        and not backup.is_symlink()
+    )
+
+
+@contextmanager
+def _transaction_diagnostic_lock(path: Path) -> Generator[bool]:
+    descriptor: int | None = None
+    locked = False
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise TransactionError("transaction lock is not a regular file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield True
+            return
+        locked = True
+        yield False
+    except OSError as exc:
+        raise TransactionError("could not inspect the existing transaction lock") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                if locked:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 def prepare_transaction(
