@@ -67,7 +67,7 @@ The workflow's build and publish jobs run only from `master`.
 Dispatch it with the exact version already present on `master`:
 
 ```bash
-gh workflow run publish-testpypi.yml --ref master -f version=0.4.0a1
+gh workflow run publish-testpypi.yml --ref master -f version=0.4.0a2
 ```
 
 The build, publish, and TestPyPI installation jobs must all pass. TestPyPI versions are immutable;

@@ -2,7 +2,7 @@
 
 All notable BundleWalker releases are recorded here.
 
-## [Unreleased]
+## [v0.4.0a2] - 2026-07-19
 
 ### Added
 
@@ -11,11 +11,21 @@ All notable BundleWalker releases are recorded here.
   dependency auditing, CodeQL, and Dependabot.
 - Added public security and support policies, complete package metadata, and an OIDC-only
   TestPyPI publishing rehearsal.
+- Added workspace status with explicit compatibility, readability, writability, and upgrade
+  availability reporting, without creating state for unsupported future formats.
+- Added verified workspace backup and restore commands with archive integrity checks and safe
+  lifecycle boundaries.
+- Added historical compatibility fixtures for clean, pending-review, future-format, invalid, and
+  interrupted-workspace states.
+- Added abrupt-termination recovery evidence for prepared, accepted, raw-persisted, swapping, and
+  new-live transaction phases, including idempotent second recovery.
 
 ### Changed
 
-- Adopted package-aligned versioning beginning with development version `0.4.0a1`.
+- Adopted package-aligned versioning through the public-beta release-foundation rehearsal.
 - Made installed distribution metadata the runtime package-version source.
+- Made workspace upgrades explicitly backup-first, with rollback safety and clear handling for
+  current, unsupported, and failed upgrade states.
 
 ## [v3] - 2026-07-18
 
@@ -67,5 +77,6 @@ All notable BundleWalker releases are recorded here.
   workspaces.
 
 [v3]: https://github.com/HendrikReh/BundleWalker/compare/v2...v3
+[v0.4.0a2]: https://github.com/HendrikReh/BundleWalker/compare/v3...v0.4.0a2
 [v2]: https://github.com/HendrikReh/BundleWalker/compare/v1...v2
 [v1]: https://github.com/HendrikReh/BundleWalker/tree/v1

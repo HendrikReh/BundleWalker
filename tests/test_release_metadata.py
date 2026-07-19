@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import hashlib
+import shutil
+import subprocess
+import tarfile
 import tomllib
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -133,8 +136,52 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
-def test_development_version_is_foundation_alpha() -> None:
+def test_development_version_is_second_alpha() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0a1"
-    assert bundlewalker.__version__ == "0.4.0a1"
+    assert project["project"]["version"] == "0.4.0a2"
+    assert bundlewalker.__version__ == "0.4.0a2"
+
+
+def test_source_distribution_excludes_untracked_superpowers_worker_state(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    artifacts = tmp_path / "dist"
+    shutil.copytree(
+        PROJECT_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".superpowers",
+            ".venv",
+            "__pycache__",
+            "dist",
+        ),
+    )
+    worker_state = source / ".superpowers/sdd/sentinel.txt"
+    worker_state.parent.mkdir(parents=True)
+    worker_state.write_text("must not be packaged\n", encoding="utf-8")
+    gitignore = source / ".gitignore"
+    gitignore.write_text(
+        gitignore.read_text(encoding="utf-8").replace(".superpowers/\n", ""),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "--quiet"], cwd=source, check=True)
+
+    subprocess.run(
+        ["uv", "build", "--sdist", "--out-dir", str(artifacts), "--no-sources"],
+        cwd=source,
+        check=True,
+    )
+
+    sdist = next(artifacts.glob("bundlewalker-*.tar.gz"))
+    with tarfile.open(sdist) as archive:
+        packaged_paths = archive.getnames()
+
+    assert not any("/.superpowers/" in path for path in packaged_paths)
+    assert (
+        "bundlewalker-0.4.0a2/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+    ) in packaged_paths

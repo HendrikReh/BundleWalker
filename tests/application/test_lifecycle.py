@@ -34,7 +34,7 @@ def test_lifecycle_status_inspects_future_format_without_mutation(tmp_path: Path
     result = LifecycleApplication().status(root)
 
     assert result == CompatibilityResult(
-        installed_version="0.4.0a1",
+        installed_version="0.4.0a2",
         workspace_path=str(root.resolve()),
         workspace_format=2,
         compatibility=CompatibilityStatus.TOO_NEW,

@@ -4,8 +4,8 @@ BundleWalker is a local, review-first CLI that turns Markdown and text sources i
 cited Open Knowledge Format (OKF) wiki. Accepted source bytes stay immutable, every proposed
 knowledge change is reviewable, and the resulting Markdown remains readable without BundleWalker.
 
-Latest tagged release: **v3** (Python package `0.3.0`). The current development version is
-`0.4.0a1` for the public-beta release-foundation rehearsal. See the
+Latest stable release: **v3** (Python package `0.3.0`). The current alpha is
+`0.4.0a2`, adding workspace lifecycle safety to the public-beta release foundation. See the
 [changelog](CHANGELOG.md) for release history.
 
 [Tutorial](docs/tutorial.md) · [User Guide](docs/user-guide.md) ·
