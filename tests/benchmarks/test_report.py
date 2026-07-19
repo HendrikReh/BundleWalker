@@ -3,8 +3,95 @@
 
 import pytest
 
+from benchmarks.contracts import (
+    CapacityStop,
+    CheckpointBytes,
+    CheckpointName,
+    EvidenceRecord,
+    FixtureIdentity,
+    ScenarioDisposition,
+    ScenarioEvidence,
+    ScenarioName,
+)
+from benchmarks.profiles import PROFILES, target_ns
 from benchmarks.report import is_material_regression, render_report
+from benchmarks.scenarios import SCENARIOS
 from tests.benchmarks.factories import evidence_record
+
+
+def _complete_record(*, os_name: str = "Linux", python_version: str = "3.13.0") -> EvidenceRecord:
+    base = evidence_record(os_name=os_name, python_version=python_version)
+    scenarios = (
+        _scenario_evidence(ScenarioName.INITIALIZE, None),
+        *(_scenario_evidence(scenario, "smoke") for scenario in SCENARIOS),
+    )
+    values = base.model_dump(mode="python")
+    values["scenarios"] = scenarios
+    return EvidenceRecord.model_validate(values)
+
+
+def _scenario_evidence(scenario: ScenarioName, profile: str | None) -> ScenarioEvidence:
+    sample_count = (
+        5
+        if scenario
+        in {
+            ScenarioName.PREPARE_INGESTION,
+            ScenarioName.COMMIT,
+            ScenarioName.RECOVER_PREPARED,
+            ScenarioName.RECOVER_SWAPPING,
+        }
+        else 7
+    )
+    samples = tuple(range(100, 100 + sample_count))
+    checkpoint_catalog: dict[ScenarioName, dict[CheckpointName, CheckpointBytes]] = {
+        ScenarioName.INITIALIZE: {"initialized_workspace": 1},
+        ScenarioName.PREPARE_INGESTION: {"prepared": 1},
+        ScenarioName.COMMIT: {"prepared": 1, "committed": 2, "cleaned": 0},
+        ScenarioName.RECOVER_PREPARED: {"prepared": 1},
+        ScenarioName.RECOVER_SWAPPING: {
+            "prepared": 1,
+            "interrupted": 2,
+            "committed": 3,
+            "cleaned": 0,
+        },
+    }
+    checkpoints = checkpoint_catalog.get(scenario, {})
+    return ScenarioEvidence(
+        scenario=scenario,
+        profile=profile,
+        target_ns=target_ns(scenario),
+        samples_ns=samples,
+        median_ns=sorted(samples)[len(samples) // 2],
+        p95_ns=max(samples),
+        output_sha256="e" * 64,
+        checkpoint_bytes=checkpoints,
+        disposition=ScenarioDisposition.PASS,
+    )
+
+
+def _capacity_stopped_record() -> EvidenceRecord:
+    base = _complete_record()
+    values = base.model_dump(mode="python")
+    values["profiles"] = (PROFILES["smoke"], PROFILES["large"])
+    values["fixtures"] = (
+        base.fixtures[0],
+        FixtureIdentity(
+            profile="large",
+            document_count=5_000,
+            exact_wiki_bytes=50 * 1024 * 1024,
+            exact_workspace_bytes=50 * 1024 * 1024 + 1,
+            source_characters=100_000,
+            profile_sha256="f" * 64,
+            tree_sha256="a" * 64,
+        ),
+    )
+    values["capacity_stop"] = CapacityStop(
+        profile="large",
+        scenario=ScenarioName.STATUS,
+        deadline_ns=30_000_000_000,
+    )
+    values["disposition"] = ScenarioDisposition.CAPACITY_EXCEEDED
+    return EvidenceRecord.model_validate(values)
 
 
 @pytest.mark.parametrize(
@@ -24,7 +111,7 @@ def test_material_regression_requires_relative_and_absolute_delta(
 
 def test_provisional_report_cannot_publish_a_supported_envelope() -> None:
     matrix = tuple(
-        evidence_record(os_name=os_name, python_version=f"{minor}.0")
+        _complete_record(os_name=os_name, python_version=f"{minor}.0")
         for os_name in ("Darwin", "Linux")
         for minor in ("3.13", "3.14")
     )
@@ -45,10 +132,21 @@ def test_material_regression_rejects_invalid_timings(current: int, baseline: int
 
 
 def test_required_matrix_rejects_duplicate_environment_keys() -> None:
-    duplicate = tuple(evidence_record() for _index in range(4))
+    duplicate = tuple(_complete_record() for _index in range(4))
 
     with pytest.raises(ValueError, match="exactly Darwin/Linux"):
         render_report(duplicate, provisional=True, require_matrix=True)
+
+
+def test_required_matrix_rejects_incomplete_scenario_coverage() -> None:
+    incomplete = tuple(
+        evidence_record(os_name=os_name, python_version=f"{minor}.0")
+        for os_name in ("Darwin", "Linux")
+        for minor in ("3.13", "3.14")
+    )
+
+    with pytest.raises(ValueError, match="complete full-policy"):
+        render_report(incomplete, provisional=True, require_matrix=True)
 
 
 def test_report_sorts_full_python_versions_and_lists_every_sample() -> None:
@@ -59,3 +157,13 @@ def test_report_sorts_full_python_versions_and_lists_every_sample() -> None:
 
     assert report.index("linux-3.13.9") < report.index("linux-3.13.10")
     assert "100, 200, 300, 400, 500, 600, 700" in report
+
+
+def test_capacity_stop_is_explicit_and_incomplete_large_is_not_measured() -> None:
+    report = render_report((_capacity_stopped_record(),), provisional=True)
+
+    assert "Overall disposition: capacity_exceeded" in report
+    assert "Capacity stop: Large / status at 30000000000 ns" in report
+    assert "Measured candidate only profiles: none in this record" in report
+    assert "Large | stopped at `status`; incomplete" in report
+    assert "Measured candidate only profiles: Large" not in report

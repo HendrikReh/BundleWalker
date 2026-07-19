@@ -6,7 +6,12 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from benchmarks.contracts import EvidenceRecord, ScenarioEvidence
+from benchmarks.contracts import (
+    EvidenceRecord,
+    ScenarioDisposition,
+    ScenarioEvidence,
+    ScenarioName,
+)
 
 _PROFILE_ORDER = {
     name: index for index, name in enumerate(("smoke", "small", "medium", "large", "probe"))
@@ -21,6 +26,22 @@ _REQUIRED_MATRIX = frozenset(
 )
 _VERSION_PREFIX = re.compile(r"^(\d+)\.(\d+)(?:\.|$)")
 _NUMERIC_VERSION_PREFIX = re.compile(r"^\d+(?:\.\d+)*")
+_PROFILE_SCENARIOS = frozenset(ScenarioName) - {ScenarioName.INITIALIZE}
+_MUTATION_SCENARIOS = frozenset(
+    {
+        ScenarioName.PREPARE_INGESTION,
+        ScenarioName.COMMIT,
+        ScenarioName.RECOVER_PREPARED,
+        ScenarioName.RECOVER_SWAPPING,
+    }
+)
+_REQUIRED_CHECKPOINTS = {
+    ScenarioName.INITIALIZE: frozenset({"initialized_workspace"}),
+    ScenarioName.PREPARE_INGESTION: frozenset({"prepared"}),
+    ScenarioName.COMMIT: frozenset({"prepared", "committed", "cleaned"}),
+    ScenarioName.RECOVER_PREPARED: frozenset({"prepared"}),
+    ScenarioName.RECOVER_SWAPPING: frozenset({"prepared", "interrupted", "committed", "cleaned"}),
+}
 
 
 def is_material_regression(current_ns: int, baseline_ns: int) -> bool:
@@ -42,7 +63,7 @@ def render_report(
 
     ordered = tuple(sorted(records, key=_record_sort_key))
     _validate_records(ordered, require_matrix=require_matrix)
-    profile_names = tuple(profile.name for profile in ordered[0].profiles)
+    overall_disposition = _overall_disposition(ordered)
 
     lines = [
         "# BundleWalker Performance and Capacity",
@@ -53,16 +74,34 @@ def render_report(
         "",
         "Supported capacity: not yet published",
         "",
-        (
-            "These measurements describe candidate profiles only. They do not establish a "
-            "supported capacity envelope."
-        ),
+        f"Overall disposition: {overall_disposition.value}",
         "",
-        "## Profiles",
-        "",
-        "| Profile | Documents | Profile wiki bytes | Ingestion source characters |",
-        "|---|---:|---:|---:|",
     ]
+    capacity_stops = tuple(
+        record.capacity_stop for record in ordered if record.capacity_stop is not None
+    )
+    if capacity_stops:
+        for stop in capacity_stops:
+            lines.append(
+                f"Capacity stop: {_label(stop.profile)} / {stop.scenario.value} "
+                f"at {stop.deadline_ns} ns"
+            )
+    else:
+        lines.append("Capacity stop: none")
+    lines.extend(
+        [
+            "",
+            (
+                "These measurements describe candidate profiles only. They do not establish a "
+                "supported capacity envelope."
+            ),
+            "",
+            "## Profiles",
+            "",
+            "| Profile | Documents | Profile wiki bytes | Ingestion source characters |",
+            "|---|---:|---:|---:|",
+        ]
+    )
     for profile in ordered[0].profiles:
         lines.append(
             f"| {_label(profile.name)} | {profile.document_count} | "
@@ -153,7 +192,16 @@ def render_report(
         for scenario in sorted(record.scenarios, key=_scenario_sort_key):
             lines.append(_scenario_row(record, scenario))
 
-    measured_candidates = [name for name in ("small", "medium", "large") if name in profile_names]
+    candidate_names = tuple(
+        profile.name
+        for profile in ordered[0].profiles
+        if profile.name in {"small", "medium", "large"}
+    )
+    measured_candidates = [
+        name
+        for name in candidate_names
+        if all(_profile_has_complete_success(record, name) for record in ordered)
+    ]
     candidates = ", ".join(_label(name) for name in measured_candidates) or "none in this record"
     lines.extend(
         [
@@ -161,6 +209,26 @@ def render_report(
             "## Candidate interpretation",
             "",
             f"Measured candidate only profiles: {candidates}.",
+            "",
+            "| Profile | Candidate measurement status |",
+            "|---|---|",
+        ]
+    )
+    for name in candidate_names:
+        stops = tuple(
+            record.capacity_stop
+            for record in ordered
+            if record.capacity_stop is not None and record.capacity_stop.profile == name
+        )
+        if stops:
+            status = f"stopped at `{stops[0].scenario.value}`; incomplete"
+        elif name in measured_candidates:
+            status = "complete successful candidate measurement"
+        else:
+            status = "incomplete"
+        lines.append(f"| {_label(name)} | {status} |")
+    lines.extend(
+        [
             "",
             (
                 "Timing from remote models and providers is excluded. Results describe the "
@@ -217,6 +285,58 @@ def _validate_records(records: Sequence[EvidenceRecord], *, require_matrix: bool
     )
     if require_matrix and (len(keys) != 4 or frozenset(keys) != _REQUIRED_MATRIX):
         raise ValueError("evidence matrix must contain exactly Darwin/Linux on Python 3.13/3.14")
+    if require_matrix:
+        for record in records:
+            _validate_full_policy_record(record)
+
+
+def _validate_full_policy_record(record: EvidenceRecord) -> None:
+    if (
+        record.correctness_only
+        or record.warmup_count != 1
+        or record.read_only_repetitions != 7
+        or record.mutation_repetitions != 5
+        or record.capacity_stop is not None
+    ):
+        raise ValueError("matrix evidence requires complete full-policy records")
+
+    actual_keys = tuple((scenario.profile, scenario.scenario) for scenario in record.scenarios)
+    expected_keys = (
+        (None, ScenarioName.INITIALIZE),
+        *(
+            (profile.name, scenario)
+            for profile in record.profiles
+            for scenario in _PROFILE_SCENARIOS
+        ),
+    )
+    if len(actual_keys) != len(set(actual_keys)) or set(actual_keys) != set(expected_keys):
+        raise ValueError("matrix evidence requires complete full-policy scenario coverage")
+
+    for scenario in record.scenarios:
+        expected_samples = 5 if scenario.scenario in _MUTATION_SCENARIOS else 7
+        if len(scenario.samples_ns) != expected_samples:
+            raise ValueError("matrix evidence requires complete full-policy sample counts")
+        required = _REQUIRED_CHECKPOINTS.get(scenario.scenario, frozenset())
+        if frozenset(scenario.checkpoint_bytes) != required:
+            raise ValueError("matrix evidence requires complete full-policy checkpoints")
+
+
+def _profile_has_complete_success(record: EvidenceRecord, profile: str) -> bool:
+    scenarios = tuple(item for item in record.scenarios if item.profile == profile)
+    return (
+        len(scenarios) == len(_PROFILE_SCENARIOS)
+        and frozenset(item.scenario for item in scenarios) == _PROFILE_SCENARIOS
+        and all(item.disposition is ScenarioDisposition.PASS for item in scenarios)
+    )
+
+
+def _overall_disposition(records: Sequence[EvidenceRecord]) -> ScenarioDisposition:
+    dispositions = {record.disposition for record in records}
+    if ScenarioDisposition.CAPACITY_EXCEEDED in dispositions:
+        return ScenarioDisposition.CAPACITY_EXCEEDED
+    if ScenarioDisposition.TARGET_MISSED in dispositions:
+        return ScenarioDisposition.TARGET_MISSED
+    return ScenarioDisposition.PASS
 
 
 def _python_minor(record: EvidenceRecord) -> str:

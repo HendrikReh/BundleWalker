@@ -3,14 +3,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import itertools
 import os
 import re
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,7 +31,7 @@ from benchmarks.contracts import (
     WorkspaceProfile,
 )
 from benchmarks.evidence import collect_environment, summarize_samples, write_evidence
-from benchmarks.fixtures import GeneratedFixture, generate_fixture, tree_sha256
+from benchmarks.fixtures import GeneratedFixture, generate_fixture
 from benchmarks.profiles import PROFILES, target_ns
 from benchmarks.scenarios import SCENARIOS
 from benchmarks.scenarios.mutation import MUTATION_SCENARIOS
@@ -36,6 +40,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _MINIMUM_TIMEOUT_SECONDS = 30
 _MAX_OBSERVATION_BYTES = 64 * 1024
+_MAX_WORKER_OUTPUT_BYTES = 16 * 1024
+_PROCESS_WAIT_SECONDS = 2
+_CAPTURE_POLL_SECONDS = 0.05
 _PROFILE_ORDER = tuple(PROFILES)
 
 
@@ -45,6 +52,33 @@ class BenchmarkRunError(RuntimeError):
 
 class _WorkerTimedOut(Exception):
     pass
+
+
+class _WorkerOutputExceeded(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _TreeEntry:
+    kind: Literal["directory", "file"]
+    mode: int
+    size: int
+    mtime_ns: int
+    user_id: int
+    group_id: int
+    link_count: int
+    content_sha256: str | None
+    xattrs: tuple[tuple[str, str], ...]
+
+
+type _TreeSnapshot = dict[str, _TreeEntry]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,20 +112,17 @@ class _RunWorkspace:
     initializations: Path
     copies: Path
     counter: itertools.count[int]
+    fixture_snapshots: dict[str, _TreeSnapshot]
 
     @classmethod
     def create(cls, root: Path) -> _RunWorkspace:
-        if root.is_symlink():
-            raise BenchmarkRunError("benchmark work root must not be a symlink")
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if not root.is_dir() or root.is_symlink():
-            raise BenchmarkRunError("benchmark work root must be a directory")
+        root = _create_unaliased_directory_path(root)
         observations = root / "observations"
         initializations = root / "initializations"
         copies = root / "copies"
         for directory in (observations, initializations, copies):
             directory.mkdir(mode=0o700, exist_ok=False)
-        return cls(root, observations, initializations, copies, itertools.count())
+        return cls(root, observations, initializations, copies, itertools.count(), {})
 
     def next_token(self, scenario: ScenarioName, profile: str | None) -> str:
         index = next(self.counter)
@@ -105,6 +136,9 @@ def run_benchmarks(config: RunConfig) -> EvidenceRecord:
         _validate_run_paths(config)
         workspace = _RunWorkspace.create(config.work_root)
         fixtures = _generate_fixtures(workspace.root, config.profiles)
+        workspace.fixture_snapshots.update(
+            (fixture.profile.name, _snapshot_tree(fixture.workspace.root)) for fixture in fixtures
+        )
         scenarios: list[ScenarioEvidence] = []
         initialization = _measure_scenario(
             workspace=workspace,
@@ -180,12 +214,58 @@ def run_benchmarks(config: RunConfig) -> EvidenceRecord:
 def _validate_run_paths(config: RunConfig) -> None:
     if os.path.lexists(config.output):
         raise BenchmarkRunError("benchmark output already exists")
-    if not config.output.parent.is_dir() or config.output.parent.is_symlink():
-        raise BenchmarkRunError("benchmark output parent must be an existing directory")
-    output = Path(os.path.abspath(config.output))
-    work_root = Path(os.path.abspath(config.work_root))
-    if output == work_root or output.is_relative_to(work_root):
+    output_parent = _require_unaliased_directory(config.output.parent)
+    output = output_parent / config.output.name
+    work_root = _resolve_intended_directory(config.work_root)
+    if output == work_root or output.is_relative_to(work_root) or work_root.is_relative_to(output):
         raise BenchmarkRunError("benchmark output must be outside the work root")
+
+
+def _require_unaliased_directory(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    if path.is_symlink() or not path.is_dir():
+        raise BenchmarkRunError("benchmark path must be an existing non-symlink directory")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise BenchmarkRunError("benchmark path could not be resolved") from error
+    if resolved != absolute:
+        raise BenchmarkRunError("benchmark path must not cross a symlink boundary")
+    return resolved
+
+
+def _resolve_intended_directory(path: Path) -> Path:
+    absolute = Path(os.path.abspath(path))
+    cursor = absolute
+    missing_names: list[str] = []
+    while not os.path.lexists(cursor):
+        if cursor == cursor.parent:
+            raise BenchmarkRunError("benchmark path has no existing directory ancestor")
+        missing_names.append(cursor.name)
+        cursor = cursor.parent
+    resolved = _require_unaliased_directory(cursor)
+    for name in reversed(missing_names):
+        resolved /= name
+    return resolved
+
+
+def _create_unaliased_directory_path(path: Path) -> Path:
+    intended = _resolve_intended_directory(path)
+    if os.path.lexists(intended):
+        return _require_unaliased_directory(intended)
+    cursor = intended
+    missing: list[Path] = []
+    while not os.path.lexists(cursor):
+        missing.append(cursor)
+        cursor = cursor.parent
+    _require_unaliased_directory(cursor)
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError as error:
+            raise BenchmarkRunError("benchmark work path changed during creation") from error
+        _require_unaliased_directory(directory)
+    return _require_unaliased_directory(intended)
 
 
 def _generate_fixtures(
@@ -238,7 +318,18 @@ def _run_worker_sample(
 ) -> SampleObservation:
     profile_name = None if fixture is None else fixture.profile.name
     token = workspace.next_token(scenario, profile_name)
+    expected_snapshot: _TreeSnapshot | None = None
+    if fixture is not None:
+        expected_snapshot = workspace.fixture_snapshots[fixture.profile.name]
+        if _snapshot_tree(fixture.workspace.root) != expected_snapshot:
+            raise BenchmarkRunError("generated fixture topology changed before worker launch")
     measured_workspace = _sample_workspace(workspace, token, scenario, fixture)
+    if (
+        fixture is not None
+        and scenario in MUTATION_SCENARIOS
+        and _snapshot_tree(measured_workspace) != expected_snapshot
+    ):
+        raise BenchmarkRunError("mutation fixture copy topology changed before worker launch")
     observation_directory = workspace.observations / token
     observation_directory.mkdir(mode=0o700)
     observation_path = observation_directory / "observation.json"
@@ -255,21 +346,13 @@ def _run_worker_sample(
         command.extend(("--profile", profile_name))
     command.extend(("--output", str(observation_path)))
 
-    try:
-        result = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            stdin=subprocess.DEVNULL,
-            timeout=_deadline_seconds(scenario),
-            cwd=_PROJECT_ROOT,
-            env={},
-        )
-    except subprocess.TimeoutExpired as error:
-        raise _WorkerTimedOut from error
-    except OSError as error:
-        raise BenchmarkRunError("benchmark worker could not be launched") from error
+    result = _run_bounded_worker(
+        command,
+        timeout_seconds=_deadline_seconds(scenario),
+        observation_directory=observation_directory,
+        observation_path=observation_path,
+        measured_workspace=measured_workspace,
+    )
 
     if result.returncode != 0:
         raise BenchmarkRunError("benchmark worker reported a bounded failure")
@@ -279,10 +362,177 @@ def _run_worker_sample(
     if (
         fixture is not None
         and scenario not in MUTATION_SCENARIOS
-        and tree_sha256(measured_workspace) != fixture.tree_sha256
+        and _snapshot_tree(measured_workspace) != expected_snapshot
     ):
-        raise BenchmarkRunError("read-only worker changed the generated fixture")
+        raise BenchmarkRunError("read-only worker changed the full filesystem topology")
     return observation
+
+
+def _run_bounded_worker(
+    command: list[str],
+    *,
+    timeout_seconds: int,
+    observation_directory: Path,
+    observation_path: Path,
+    measured_workspace: Path,
+) -> _WorkerResult:
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=_PROJECT_ROOT,
+            env={},
+            shell=False,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as error:
+        raise BenchmarkRunError("benchmark worker could not be launched") from error
+
+    try:
+        try:
+            stdout, stderr = _capture_worker_output(process, timeout_seconds)
+        except _WorkerOutputExceeded as error:
+            if not _terminate_worker_tree(process):
+                raise BenchmarkRunError("benchmark worker output cleanup did not finish") from error
+            _validate_failed_worker_residue(
+                observation_directory,
+                observation_path,
+                measured_workspace,
+            )
+            raise BenchmarkRunError("benchmark worker exceeded the bounded stdio limit") from error
+        except _WorkerTimedOut:
+            if not _terminate_worker_tree(process):
+                raise BenchmarkRunError(
+                    "timed-out benchmark worker tree did not terminate"
+                ) from None
+            _validate_failed_worker_residue(
+                observation_directory,
+                observation_path,
+                measured_workspace,
+            )
+            raise
+
+        if _worker_tree_exists(process):
+            if not _terminate_worker_tree(process):
+                raise BenchmarkRunError("benchmark worker descendant tree did not terminate")
+            _validate_failed_worker_residue(
+                observation_directory,
+                observation_path,
+                measured_workspace,
+            )
+            raise BenchmarkRunError("benchmark worker left a descendant process")
+        return _WorkerResult(process.returncode, stdout, stderr)
+    except BaseException:
+        if _worker_tree_exists(process):
+            _terminate_worker_tree(process)
+        raise
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
+def _capture_worker_output(
+    process: subprocess.Popen[bytes], timeout_seconds: int
+) -> tuple[bytes, bytes]:
+    if process.stdout is None or process.stderr is None:
+        raise BenchmarkRunError("benchmark worker pipes were not created")
+    selector = selectors.DefaultSelector()
+    streams = {
+        process.stdout.fileno(): bytearray(),
+        process.stderr.fileno(): bytearray(),
+    }
+    selector.register(process.stdout, selectors.EVENT_READ)
+    selector.register(process.stderr, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while process.poll() is None or selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _WorkerTimedOut
+            if not selector.get_map():
+                time.sleep(min(_CAPTURE_POLL_SECONDS, remaining))
+                continue
+            for key, _events in selector.select(min(_CAPTURE_POLL_SECONDS, remaining)):
+                captured = streams[key.fd]
+                chunk = os.read(key.fd, min(4096, _MAX_WORKER_OUTPUT_BYTES + 1 - len(captured)))
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                captured.extend(chunk)
+                if len(captured) > _MAX_WORKER_OUTPUT_BYTES:
+                    raise _WorkerOutputExceeded
+        if process.returncode is None:
+            raise BenchmarkRunError("benchmark worker did not publish an exit status")
+        return bytes(streams[process.stdout.fileno()]), bytes(streams[process.stderr.fileno()])
+    finally:
+        selector.close()
+
+
+def _terminate_worker_tree(process: subprocess.Popen[bytes]) -> bool:
+    _signal_worker_tree(process, signal.SIGTERM)
+    if _wait_for_worker_tree_exit(process, _PROCESS_WAIT_SECONDS):
+        return True
+    _signal_worker_tree(process, signal.SIGKILL)
+    return _wait_for_worker_tree_exit(process, _PROCESS_WAIT_SECONDS)
+
+
+def _signal_worker_tree(process: subprocess.Popen[bytes], requested_signal: signal.Signals) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, requested_signal)
+        elif requested_signal is signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+
+
+def _wait_for_worker_tree_exit(process: subprocess.Popen[bytes], timeout_seconds: int) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        process.poll()
+        if not _worker_tree_exists(process):
+            return True
+        time.sleep(_CAPTURE_POLL_SECONDS)
+    process.poll()
+    return not _worker_tree_exists(process)
+
+
+def _worker_tree_exists(process: subprocess.Popen[bytes]) -> bool:
+    if os.name != "posix":
+        return process.poll() is None
+    return _worker_group_exists(process.pid)
+
+
+def _worker_group_exists(process_id: int) -> bool:
+    if os.name != "posix":
+        return False
+    try:
+        os.killpg(process_id, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _validate_failed_worker_residue(
+    observation_directory: Path,
+    observation_path: Path,
+    measured_workspace: Path,
+) -> None:
+    observation_snapshot = _snapshot_tree(observation_directory)
+    if sum(entry.size for entry in observation_snapshot.values()) > 4 * _MAX_OBSERVATION_BYTES:
+        raise BenchmarkRunError("failed worker left unbounded observation residue")
+    if os.path.lexists(observation_path):
+        state = observation_path.lstat()
+        if not stat.S_ISREG(state.st_mode) or state.st_size > _MAX_OBSERVATION_BYTES:
+            raise BenchmarkRunError("failed worker left an invalid observation output")
+    if os.path.lexists(measured_workspace):
+        _snapshot_tree(measured_workspace)
 
 
 def _sample_workspace(
@@ -300,8 +550,114 @@ def _sample_workspace(
     if scenario not in MUTATION_SCENARIOS:
         return fixture.workspace.root
     destination = workspace.copies / token
-    shutil.copytree(fixture.workspace.root, destination, symlinks=False)
+    shutil.copytree(fixture.workspace.root, destination, symlinks=True)
     return destination
+
+
+def _snapshot_tree(root: Path) -> _TreeSnapshot:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_descriptor = os.open(root, flags)
+    except OSError as error:
+        raise BenchmarkRunError("generated fixture topology root is unsafe") from error
+    try:
+        root_state = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_state.st_mode):
+            raise BenchmarkRunError("generated fixture topology root must be a directory")
+        snapshot = {".": _directory_entry(root_descriptor, root_state)}
+        _snapshot_directory(root_descriptor, "", snapshot)
+        return snapshot
+    finally:
+        os.close(root_descriptor)
+
+
+def _snapshot_directory(
+    directory_descriptor: int,
+    relative_parent: str,
+    snapshot: _TreeSnapshot,
+) -> None:
+    with os.scandir(directory_descriptor) as iterator:
+        names = sorted(entry.name for entry in iterator)
+    for name in names:
+        relative = name if not relative_parent else f"{relative_parent}/{name}"
+        state = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+        if stat.S_ISLNK(state.st_mode):
+            raise BenchmarkRunError("generated fixture topology contains a symlink")
+        if stat.S_ISDIR(state.st_mode):
+            child_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            child_descriptor = os.open(name, child_flags, dir_fd=directory_descriptor)
+            try:
+                descriptor_state = os.fstat(child_descriptor)
+                _require_same_inode(state, descriptor_state)
+                snapshot[relative] = _directory_entry(child_descriptor, descriptor_state)
+                _snapshot_directory(child_descriptor, relative, snapshot)
+            finally:
+                os.close(child_descriptor)
+            continue
+        if stat.S_ISREG(state.st_mode):
+            file_descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_descriptor,
+            )
+            try:
+                descriptor_state = os.fstat(file_descriptor)
+                _require_same_inode(state, descriptor_state)
+                snapshot[relative] = _file_entry(file_descriptor, descriptor_state)
+            finally:
+                os.close(file_descriptor)
+            continue
+        raise BenchmarkRunError("generated fixture topology contains a special filesystem entry")
+
+
+def _directory_entry(descriptor: int, state: os.stat_result) -> _TreeEntry:
+    return _TreeEntry(
+        kind="directory",
+        mode=stat.S_IMODE(state.st_mode),
+        size=0,
+        mtime_ns=state.st_mtime_ns,
+        user_id=state.st_uid,
+        group_id=state.st_gid,
+        link_count=state.st_nlink,
+        content_sha256=None,
+        xattrs=_descriptor_xattrs(descriptor),
+    )
+
+
+def _file_entry(descriptor: int, state: os.stat_result) -> _TreeEntry:
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+    return _TreeEntry(
+        kind="file",
+        mode=stat.S_IMODE(state.st_mode),
+        size=state.st_size,
+        mtime_ns=state.st_mtime_ns,
+        user_id=state.st_uid,
+        group_id=state.st_gid,
+        link_count=state.st_nlink,
+        content_sha256=digest.hexdigest(),
+        xattrs=_descriptor_xattrs(descriptor),
+    )
+
+
+def _descriptor_xattrs(descriptor: int) -> tuple[tuple[str, str], ...]:
+    list_xattrs = getattr(os, "listxattr", None)
+    get_xattr = getattr(os, "getxattr", None)
+    if list_xattrs is None or get_xattr is None:
+        return ()
+    try:
+        names = sorted(list_xattrs(descriptor))
+        return tuple(
+            (name, hashlib.sha256(get_xattr(descriptor, name)).hexdigest()) for name in names
+        )
+    except OSError as error:
+        raise BenchmarkRunError("generated fixture metadata could not be validated") from error
+
+
+def _require_same_inode(path_state: os.stat_result, descriptor_state: os.stat_result) -> None:
+    if (path_state.st_dev, path_state.st_ino) != (descriptor_state.st_dev, descriptor_state.st_ino):
+        raise BenchmarkRunError("generated fixture topology changed during validation")
 
 
 def _load_exclusive_observation(directory: Path, expected: Path) -> SampleObservation:

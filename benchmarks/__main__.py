@@ -69,8 +69,11 @@ def _run_command(parser: argparse.ArgumentParser, arguments: argparse.Namespace)
         output = _absolute(arguments.output)
         work_root = _absolute(arguments.work_root or Path("benchmark-work") / run_id)
         _validate_output_path(parser, output)
-        _validate_work_root(parser, work_root, output)
-        _reject_workspace_output(parser, output)
+        resolved_output = _resolved_nonexistent_path(parser, output, "output")
+        resolved_work_root = _resolved_work_root(parser, work_root)
+        _validate_work_root(parser, resolved_work_root, resolved_output)
+        _reject_workspace_output(parser, resolved_output)
+        _reject_workspace_output(parser, resolved_work_root)
         _ensure_output_parent(parser, output)
     except (KeyError, ValueError):
         parser.error("invalid run arguments")
@@ -96,16 +99,14 @@ def _report_command(parser: argparse.ArgumentParser, arguments: argparse.Namespa
     evidence_directory = _absolute(arguments.evidence)
     output = _absolute(arguments.output)
     _validate_output_path(parser, output)
-    _reject_workspace_output(parser, output)
+    resolved_output = _resolved_nonexistent_path(parser, output, "output")
+    _reject_workspace_output(parser, resolved_output)
     _ensure_output_parent(parser, output)
-    if (
-        evidence_directory.is_symlink()
-        or not evidence_directory.is_dir()
-        or _has_symlink_file(evidence_directory)
-    ):
-        parser.error("invalid evidence directory")
 
     try:
+        evidence_directory = _require_unaliased_directory(evidence_directory)
+        if _has_symlink_file(evidence_directory):
+            raise ValueError("evidence directory contains a nonregular JSON entry")
         evidence_paths = tuple(sorted(evidence_directory.glob("*.json")))
         if not evidence_paths:
             raise ValueError("no evidence records found")
@@ -152,32 +153,81 @@ def _validate_output_path(parser: argparse.ArgumentParser, output: Path) -> None
 
 
 def _validate_work_root(parser: argparse.ArgumentParser, work_root: Path, output: Path) -> None:
-    if os.path.lexists(work_root) and (work_root.is_symlink() or not work_root.is_dir()):
-        parser.error("invalid work root")
-    if output == work_root or output.is_relative_to(work_root):
+    if output == work_root or output.is_relative_to(work_root) or work_root.is_relative_to(output):
         parser.error("output overlaps work root")
 
 
 def _reject_workspace_output(parser: argparse.ArgumentParser, output: Path) -> None:
-    for ancestor in (output.parent, *output.parents):
-        if (ancestor / "bundlewalker.toml").is_file():
+    for ancestor in output.parents:
+        configuration = ancestor / "bundlewalker.toml"
+        if configuration.is_file() and not configuration.is_symlink():
             parser.error("output is inside a workspace")
+
+
+def _resolved_nonexistent_path(parser: argparse.ArgumentParser, path: Path, label: str) -> Path:
+    parent = path.parent
+    try:
+        if os.path.lexists(parent):
+            resolved_parent = _require_unaliased_directory(parent)
+        else:
+            resolved_grandparent = _require_unaliased_directory(parent.parent)
+            resolved_parent = resolved_grandparent / parent.name
+    except ValueError:
+        parser.error(f"invalid {label} path")
+    return resolved_parent / path.name
+
+
+def _resolved_work_root(parser: argparse.ArgumentParser, work_root: Path) -> Path:
+    cursor = work_root
+    missing_names: list[str] = []
+    while not os.path.lexists(cursor):
+        if cursor == cursor.parent:
+            parser.error("invalid work root")
+        missing_names.append(cursor.name)
+        cursor = cursor.parent
+    try:
+        resolved = _require_unaliased_directory(cursor)
+    except ValueError:
+        parser.error("invalid work root")
+    for name in reversed(missing_names):
+        resolved /= name
+    return resolved
+
+
+def _require_unaliased_directory(path: Path) -> Path:
+    absolute = _absolute(path)
+    if path.is_symlink() or not path.is_dir():
+        raise ValueError("path must be an existing non-symlink directory")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ValueError("path could not be resolved") from error
+    if resolved != absolute:
+        raise ValueError("path must not cross a symlink boundary")
+    return resolved
 
 
 def _ensure_output_parent(parser: argparse.ArgumentParser, output: Path) -> None:
     parent = output.parent
     if os.path.lexists(parent):
-        if parent.is_symlink() or not parent.is_dir():
+        try:
+            _require_unaliased_directory(parent)
+        except ValueError:
             parser.error("invalid output parent")
         return
     grandparent = parent.parent
-    if grandparent.is_symlink() or not grandparent.is_dir():
+    try:
+        _require_unaliased_directory(grandparent)
+    except ValueError:
         parser.error("output parent cannot be created")
     try:
         parent.mkdir(mode=0o700)
         parent.chmod(0o700)
+        _require_unaliased_directory(parent)
     except OSError:
         parser.error("output parent cannot be created")
+    except ValueError:
+        parser.error("output parent changed during creation")
 
 
 def _has_symlink_file(directory: Path) -> bool:
