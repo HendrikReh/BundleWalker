@@ -8,9 +8,12 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
+import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,7 +23,11 @@ from bundlewalker import transactions
 from bundlewalker.domain import Citation, CitedAnswer, OkfMetadata
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
-from bundlewalker.transactions import TransactionDiagnosticStatus, inspect_transaction_state
+from bundlewalker.transactions import (
+    TransactionDiagnosticStatus,
+    inspect_transaction_state,
+    recover_transactions,
+)
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
 from bundlewalker.workspace import Workspace, initialize_workspace
 
@@ -111,6 +118,31 @@ def _materialize_phase_topology(workspace: Workspace, phase: str) -> None:
     if phase == "new-live":
         workspace.wiki_dir.rename(transaction_dir / "backup-wiki")
         (transaction_dir / "prospective-wiki").rename(workspace.wiki_dir)
+
+
+def _convert_to_legacy(workspace: Workspace) -> None:
+    transaction_dir = _transaction_dir(workspace)
+    manifest = _manifest_values(transaction_dir)
+    manifest["schema_version"] = 1
+    _write_manifest_values(transaction_dir, manifest)
+    identity_path = transaction_dir / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity.pop("review_digest")
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (transaction_dir / "review.json").unlink()
+
+
+def _use_nested_live_wiki(workspace: Workspace) -> Workspace:
+    parent = workspace.root / "configured"
+    parent.mkdir()
+    workspace.wiki_dir.rename(parent / "live-wiki")
+    return replace(
+        workspace,
+        config=replace(workspace.config, wiki_dir="configured/live-wiki"),
+    )
 
 
 def test_transaction_diagnostics_clean_workspace_creates_no_private_state(
@@ -204,6 +236,107 @@ def test_transaction_diagnostics_classifies_interrupted_phases_without_mutation(
 
     assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.INTERRUPTED
     assert _tree_snapshot(workspace.root) == before
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "phase"),
+    [
+        (1, "prepared"),
+        (1, "raw-persisted"),
+        (2, "prepared"),
+        (2, "accepted"),
+        (2, "raw-persisted"),
+    ],
+)
+def test_transaction_diagnostics_rejects_missing_live_wiki_before_swapping(
+    tmp_path: Path,
+    schema_version: int,
+    phase: str,
+) -> None:
+    workspace = _use_nested_live_wiki(_workspace_with_review(tmp_path))
+    _set_phase(workspace, phase)
+    if schema_version == 1:
+        _convert_to_legacy(workspace)
+    shutil.rmtree(workspace.wiki_dir)
+    (workspace.root / "wiki").mkdir()
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+@pytest.mark.parametrize("phase", ["swapping", "new-live"])
+def test_transaction_diagnostics_allows_recoverable_missing_live_wiki_after_swap_starts(
+    tmp_path: Path,
+    schema_version: int,
+    phase: str,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    transaction_dir = _transaction_dir(workspace)
+    old_wiki = _tree_snapshot(workspace.wiki_dir)
+    _set_phase(workspace, phase)
+    workspace.wiki_dir.rename(transaction_dir / "backup-wiki")
+    if phase == "new-live":
+        (transaction_dir / "prospective-wiki").rename(workspace.wiki_dir)
+        shutil.rmtree(workspace.wiki_dir)
+    if schema_version == 1:
+        _convert_to_legacy(workspace)
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.INTERRUPTED
+
+    recover_transactions(workspace)
+    assert _tree_snapshot(workspace.wiki_dir) == old_wiki
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "phase", "live_kind"),
+    [
+        (2, "prepared", "symlink"),
+        (1, "raw-persisted", "regular"),
+        (2, "accepted", "fifo"),
+        (1, "swapping", "socket"),
+        (2, "new-live", "symlink"),
+    ],
+)
+def test_transaction_diagnostics_rejects_unsafe_live_wiki_kinds(
+    tmp_path: Path,
+    schema_version: int,
+    phase: str,
+    live_kind: str,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    transaction_dir = _transaction_dir(workspace)
+    _set_phase(workspace, phase)
+    if phase in {"swapping", "new-live"}:
+        workspace.wiki_dir.rename(transaction_dir / "backup-wiki")
+    if phase == "new-live":
+        (transaction_dir / "prospective-wiki").rename(workspace.wiki_dir)
+    if workspace.wiki_dir.is_dir():
+        shutil.rmtree(workspace.wiki_dir)
+    if schema_version == 1:
+        _convert_to_legacy(workspace)
+
+    live_socket: socket.socket | None = None
+    short_socket_root: Path | None = None
+    if live_kind == "symlink":
+        outside = tmp_path / f"outside-live-{phase}"
+        outside.mkdir()
+        workspace.wiki_dir.symlink_to(outside, target_is_directory=True)
+    elif live_kind == "regular":
+        workspace.wiki_dir.write_bytes(b"not a live wiki directory\n")
+    elif live_kind == "fifo":
+        os.mkfifo(workspace.wiki_dir)
+    else:
+        short_socket_root = Path(tempfile.mkdtemp(prefix="bw-sock-", dir="/tmp"))
+        (short_socket_root / "root").symlink_to(workspace.root, target_is_directory=True)
+        live_socket = socket.socket(socket.AF_UNIX)
+        live_socket.bind(os.fspath(short_socket_root / "root" / workspace.wiki_dir.name))
+    try:
+        assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+    finally:
+        if live_socket is not None:
+            live_socket.close()
+        if short_socket_root is not None:
+            shutil.rmtree(short_socket_root)
 
 
 def test_transaction_diagnostics_classifies_legacy_prepared_as_interrupted(
@@ -757,6 +890,29 @@ def test_transaction_diagnostics_contains_bounded_json_parser_exhaustion(
     manifest_path.write_bytes(content)
 
     assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+
+
+def test_legacy_recovery_propagates_oversized_integer_before_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    _convert_to_legacy(workspace)
+    manifest_path = _transaction_dir(workspace) / "manifest.json"
+    content = manifest_path.read_bytes().replace(
+        b'"schema_version": 1',
+        b'"schema_version": ' + b"9" * 5_000,
+        1,
+    )
+    assert len(content) < 1_048_576
+    manifest_path.write_bytes(content)
+    before = _tree_snapshot(workspace.root)
+
+    with pytest.raises(ValueError, match="integer string conversion"):
+        recover_transactions(workspace)
+
+    assert _tree_snapshot(workspace.root) == before
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+    assert _tree_snapshot(workspace.root) == before
 
 
 def test_transaction_diagnostics_accepts_manifest_at_exact_size_limit(

@@ -216,7 +216,11 @@ def _inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticSta
         try:
             if not stat.S_ISDIR(os.fstat(private_descriptor).st_mode):
                 return TransactionDiagnosticStatus.MALFORMED
-            return _inspect_private_transaction_state(workspace, private_descriptor)
+            return _inspect_private_transaction_state(
+                workspace,
+                root_descriptor,
+                private_descriptor,
+            )
         finally:
             os.close(private_descriptor)
     finally:
@@ -225,6 +229,7 @@ def _inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticSta
 
 def _inspect_private_transaction_state(
     workspace: Workspace,
+    root_descriptor: int,
     private_descriptor: int,
 ) -> TransactionDiagnosticStatus:
     lock_flags = (
@@ -238,7 +243,11 @@ def _inspect_private_transaction_state(
         dir_fd=private_descriptor,
     )
     if lock_descriptor is None:
-        return _inspect_transaction_entries(workspace, private_descriptor)
+        return _inspect_transaction_entries(
+            workspace,
+            root_descriptor,
+            private_descriptor,
+        )
 
     locked = False
     try:
@@ -249,7 +258,11 @@ def _inspect_private_transaction_state(
         except BlockingIOError:
             return TransactionDiagnosticStatus.BUSY
         locked = True
-        return _inspect_transaction_entries(workspace, private_descriptor)
+        return _inspect_transaction_entries(
+            workspace,
+            root_descriptor,
+            private_descriptor,
+        )
     finally:
         try:
             if locked:
@@ -272,6 +285,7 @@ def _open_optional_diagnostic_node(
 
 def _inspect_transaction_entries(
     workspace: Workspace,
+    root_descriptor: int,
     private_descriptor: int,
 ) -> TransactionDiagnosticStatus:
     """Inspect transaction entries while any existing shared lock is held."""
@@ -311,23 +325,19 @@ def _inspect_transaction_entries(
                     transaction_name,
                     transaction_descriptor,
                 )
-                if manifest.schema_version == _SCHEMA_VERSION:
-                    topology_is_valid = _schema_v2_diagnostic_topology_is_valid(
-                        transaction_descriptor,
-                        manifest,
-                    )
-                    if topology_is_valid and manifest.phase == "prepared":
-                        prepared += 1
-                    elif topology_is_valid:
-                        interrupted += 1
-                    else:
-                        return TransactionDiagnosticStatus.MALFORMED
+                live_kind = _diagnostic_workspace_node_kind(
+                    root_descriptor,
+                    PurePosixPath(workspace.config.wiki_dir).parts,
+                )
+                if not _diagnostic_topology_is_valid(
+                    transaction_descriptor,
+                    manifest,
+                    live_kind,
+                ):
+                    return TransactionDiagnosticStatus.MALFORMED
+                if manifest.schema_version == _SCHEMA_VERSION and manifest.phase == "prepared":
+                    prepared += 1
                 else:
-                    if not _schema_v1_diagnostic_topology_is_valid(
-                        transaction_descriptor,
-                        manifest,
-                    ):
-                        return TransactionDiagnosticStatus.MALFORMED
                     interrupted += 1
             finally:
                 os.close(transaction_descriptor)
@@ -341,18 +351,18 @@ def _inspect_transaction_entries(
         os.close(transactions_descriptor)
 
 
-def _schema_v2_diagnostic_topology_is_valid(
+def _diagnostic_topology_is_valid(
     transaction_descriptor: int,
     manifest: _Manifest,
+    live_kind: str,
 ) -> bool:
     if _REVIEW_ID.fullmatch(manifest.transaction_id) is None:
         return False
-    if any(
-        _diagnostic_node_kind(transaction_descriptor, name) != "regular"
-        for name in (_IDENTITY_NAME, _REVIEW_NAME)
-    ):
+    if _diagnostic_node_kind(transaction_descriptor, _IDENTITY_NAME) != "regular":
         return False
-
+    expected_review_kind = "regular" if manifest.schema_version == _SCHEMA_VERSION else "absent"
+    if _diagnostic_node_kind(transaction_descriptor, _REVIEW_NAME) != expected_review_kind:
+        return False
     raw_kind = _diagnostic_node_kind(transaction_descriptor, _RAW_PAYLOAD_NAME)
     if raw_kind != ("absent" if manifest.raw_sha256 is None else "regular"):
         return False
@@ -360,7 +370,13 @@ def _schema_v2_diagnostic_topology_is_valid(
     prospective_kind = _diagnostic_node_kind(transaction_descriptor, _PROSPECTIVE_NAME)
     backup_kind = _diagnostic_backup_kind(transaction_descriptor)
     if manifest.phase in {"prepared", "accepted", "raw-persisted"}:
-        return prospective_kind == "directory" and backup_kind == "absent"
+        return (
+            live_kind == "directory"
+            and prospective_kind == "directory"
+            and backup_kind == "absent"
+        )
+    if live_kind not in {"directory", "absent"}:
+        return False
     if manifest.phase == "swapping":
         return (prospective_kind, backup_kind) in {
             ("directory", "absent"),
@@ -370,31 +386,39 @@ def _schema_v2_diagnostic_topology_is_valid(
     return prospective_kind == "absent" and backup_kind == "directory"
 
 
-def _schema_v1_diagnostic_topology_is_valid(
-    transaction_descriptor: int,
-    manifest: _Manifest,
-) -> bool:
-    if _REVIEW_ID.fullmatch(manifest.transaction_id) is None:
-        return False
-    if _diagnostic_node_kind(transaction_descriptor, _IDENTITY_NAME) != "regular":
-        return False
-    if _diagnostic_node_kind(transaction_descriptor, _REVIEW_NAME) != "absent":
-        return False
-    raw_kind = _diagnostic_node_kind(transaction_descriptor, _RAW_PAYLOAD_NAME)
-    if raw_kind != ("absent" if manifest.raw_sha256 is None else "regular"):
-        return False
-
-    prospective_kind = _diagnostic_node_kind(transaction_descriptor, _PROSPECTIVE_NAME)
-    backup_kind = _diagnostic_backup_kind(transaction_descriptor)
-    if manifest.phase in {"prepared", "raw-persisted"}:
-        return prospective_kind == "directory" and backup_kind == "absent"
-    if manifest.phase == "swapping":
-        return (prospective_kind, backup_kind) in {
-            ("directory", "absent"),
-            ("directory", "directory"),
-            ("absent", "directory"),
-        }
-    return prospective_kind == "absent" and backup_kind == "directory"
+def _diagnostic_workspace_node_kind(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+) -> str:
+    if not parts or any(not part or part in {".", ".."} or "/" in part for part in parts):
+        return "unsafe"
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    current_descriptor = root_descriptor
+    opened_descriptors: list[int] = []
+    try:
+        for part in parts[:-1]:
+            try:
+                current_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=current_descriptor,
+                )
+            except FileNotFoundError:
+                return "absent"
+            except OSError:
+                return "unsafe"
+            opened_descriptors.append(current_descriptor)
+            if not stat.S_ISDIR(os.fstat(current_descriptor).st_mode):
+                return "unsafe"
+        return _diagnostic_node_kind(current_descriptor, parts[-1])
+    finally:
+        for descriptor in reversed(opened_descriptors):
+            os.close(descriptor)
 
 
 def _diagnostic_backup_kind(transaction_descriptor: int) -> str:
@@ -1985,7 +2009,10 @@ def _load_diagnostic_manifest(
         if descriptor is not None:
             os.close(descriptor)
     transaction_dir = workspace.root / ".bundlewalker" / "transactions" / transaction_name
-    manifest = _parse_manifest_bytes(workspace, transaction_dir, bytes(content))
+    try:
+        manifest = _parse_manifest_bytes(workspace, transaction_dir, bytes(content))
+    except (RecursionError, ValueError) as exc:
+        raise _IncompleteManifestError from exc
     _validate_diagnostic_manifest_relationships(workspace, transaction_name, manifest)
     return manifest
 
@@ -2013,7 +2040,7 @@ def _parse_manifest_bytes(
 ) -> _Manifest:
     try:
         parsed: object = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _IncompleteManifestError from exc
     if not isinstance(parsed, dict):
         raise _IncompleteManifestError
