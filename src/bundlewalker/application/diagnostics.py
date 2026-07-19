@@ -743,4 +743,10 @@ class DiagnosticsApplication:
         )
 
     def support_report(self, result: DiagnosticResult) -> SupportReport:
-        return SupportReport(generated_at=self.dependencies.clock(), result=result)
+        try:
+            return SupportReport(generated_at=self.dependencies.clock(), result=result)
+        except Exception as exc:
+            raise ApplicationError(
+                ApplicationErrorCode.DIAGNOSTIC_FAILED,
+                "diagnostic operation failed",
+            ) from exc

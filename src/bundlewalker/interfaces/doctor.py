@@ -6,7 +6,6 @@ from __future__ import annotations
 import errno
 import os
 import stat
-from contextlib import suppress
 from pathlib import Path
 
 from bundlewalker.application import (
@@ -65,30 +64,32 @@ def write_support_report(report: SupportReport, destination: Path) -> None:
             raise SupportReportTargetError from None
         raise SupportReportWriteError from None
 
+    active_error: BaseException | None = None
     try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise SupportReportTargetError
-        os.fchmod(descriptor, 0o600)
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written == 0:
-                raise OSError
-            view = view[written:]
-        os.fsync(descriptor)
-    except SupportReportTargetError:
-        _close_after_failure(descriptor)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise SupportReportTargetError
+            os.fchmod(descriptor, 0o600)
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written == 0:
+                    raise OSError
+                view = view[written:]
+            os.fsync(descriptor)
+        except SupportReportTargetError:
+            raise
+        except OSError:
+            raise SupportReportWriteError from None
+    except BaseException as error:
+        active_error = error
         raise
-    except OSError:
-        _close_after_failure(descriptor)
-        raise SupportReportWriteError from None
-    try:
-        os.close(descriptor)
-    except OSError:
-        raise SupportReportWriteError from None
-
-
-def _close_after_failure(descriptor: int) -> None:
-    with suppress(OSError):
-        os.close(descriptor)
+    finally:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            if active_error is None:
+                if isinstance(close_error, OSError):
+                    raise SupportReportWriteError from None
+                raise

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import ValidationError
 
 import bundlewalker.application.diagnostics as diagnostics_module
 from bundlewalker.application import (
@@ -723,6 +724,84 @@ def test_diagnostics_support_report_uses_injected_timestamp_and_schema(
     assert report.generated_at == NOW
     assert report.result is result
     assert set(report.model_dump()) == {"schema_version", "generated_at", "result"}
+
+
+def test_diagnostics_support_report_bounds_unexpected_clock_failure(
+    tmp_path: Path,
+) -> None:
+    private_failure = RuntimeError("private clock failure")
+
+    def fail_clock() -> datetime:
+        raise private_failure
+
+    application = DiagnosticsApplication(replace(_dependencies(), clock=fail_clock))
+    result = application.run(tmp_path)
+
+    with pytest.raises(ApplicationError) as raised:
+        application.support_report(result)
+
+    assert raised.value.code is ApplicationErrorCode.DIAGNOSTIC_FAILED
+    assert raised.value.safe_message == "diagnostic operation failed"
+    assert raised.value.__cause__ is private_failure
+
+
+def test_diagnostics_support_report_normalizes_clock_application_error(
+    tmp_path: Path,
+) -> None:
+    private_failure = ApplicationError(
+        ApplicationErrorCode.INVALID_INPUT,
+        "private clock application error",
+    )
+
+    def fail_clock() -> datetime:
+        raise private_failure
+
+    application = DiagnosticsApplication(replace(_dependencies(), clock=fail_clock))
+    result = application.run(tmp_path)
+
+    with pytest.raises(ApplicationError) as raised:
+        application.support_report(result)
+
+    assert raised.value is not private_failure
+    assert raised.value.code is ApplicationErrorCode.DIAGNOSTIC_FAILED
+    assert raised.value.safe_message == "diagnostic operation failed"
+    assert raised.value.__cause__ is private_failure
+
+
+def test_diagnostics_support_report_bounds_private_validation_failure(
+    tmp_path: Path,
+) -> None:
+    def invalid_clock() -> datetime:
+        return cast(datetime, "private-validation-marker")
+
+    application = DiagnosticsApplication(replace(_dependencies(), clock=invalid_clock))
+    result = application.run(tmp_path)
+
+    with pytest.raises(ApplicationError) as raised:
+        application.support_report(result)
+
+    assert raised.value.code is ApplicationErrorCode.DIAGNOSTIC_FAILED
+    assert raised.value.safe_message == "diagnostic operation failed"
+    assert isinstance(raised.value.__cause__, ValidationError)
+    assert "private-validation-marker" in str(raised.value.__cause__)
+    assert "private-validation-marker" not in str(raised.value)
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), SystemExit(7)])
+def test_diagnostics_support_report_preserves_base_exceptions(
+    tmp_path: Path,
+    interruption: BaseException,
+) -> None:
+    def interrupt_clock() -> datetime:
+        raise interruption
+
+    application = DiagnosticsApplication(replace(_dependencies(), clock=interrupt_clock))
+    result = application.run(tmp_path)
+
+    with pytest.raises(type(interruption)) as raised:
+        application.support_report(result)
+
+    assert raised.value is interruption
 
 
 def test_diagnostics_redacts_expected_inspector_failures(tmp_path: Path) -> None:

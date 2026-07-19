@@ -10,6 +10,7 @@ import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 from click import unstyle
@@ -335,6 +336,36 @@ def test_report_writer_treats_ambiguous_close_failure_as_write_failure_without_r
     assert destination.exists()
 
 
+def test_report_writer_closes_once_and_preserves_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "interrupted.json"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+    interruption = KeyboardInterrupt("private interruption")
+    original_close = os.close
+    close_calls = 0
+
+    def interrupt_write(_descriptor: int, _content: bytes | memoryview) -> int:
+        raise interruption
+
+    def close_then_fail(descriptor: int) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        original_close(descriptor)
+        raise OSError("private close failure")
+
+    monkeypatch.setattr(os, "write", interrupt_write)
+    monkeypatch.setattr(os, "close", close_then_fail)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        write_support_report(report, destination)
+
+    assert raised.value is interruption
+    assert close_calls == 1
+    assert destination.exists()
+
+
 def test_doctor_runs_outside_workspace_and_returns_failure_without_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -382,12 +413,10 @@ def test_doctor_bounds_support_report_construction_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     report = tmp_path / "support.json"
+    private_marker = "private-clock-marker"
 
     def fail_clock() -> datetime:
-        raise ApplicationError(
-            ApplicationErrorCode.DIAGNOSTIC_FAILED,
-            "diagnostic operation failed",
-        )
+        raise RuntimeError(private_marker)
 
     application = DiagnosticsApplication(DiagnosticsDependencies(clock=fail_clock))
     monkeypatch.setattr(cli_module, "DiagnosticsApplication", lambda: application)
@@ -396,6 +425,32 @@ def test_doctor_bounds_support_report_construction_failure(
 
     assert result.exit_code == 1
     assert "Error: diagnostic operation failed" in result.output
+    assert private_marker not in result.output
+    assert "Support report written." not in result.output
+    assert str(report) not in result.output
+    assert "Traceback" not in result.output
+    assert not report.exists()
+
+
+def test_doctor_bounds_private_support_report_validation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "support.json"
+    private_marker = "private-validation-marker"
+
+    def invalid_clock() -> datetime:
+        return cast(datetime, private_marker)
+
+    application = DiagnosticsApplication(DiagnosticsDependencies(clock=invalid_clock))
+    monkeypatch.setattr(cli_module, "DiagnosticsApplication", lambda: application)
+
+    result = runner.invoke(app, ["doctor", "--report", str(report)])
+
+    assert result.exit_code == 1
+    assert "Error: diagnostic operation failed" in result.output
+    assert private_marker not in result.output
+    assert "Input should be a valid datetime" not in result.output
     assert "Support report written." not in result.output
     assert str(report) not in result.output
     assert "Traceback" not in result.output
