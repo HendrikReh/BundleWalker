@@ -212,14 +212,14 @@ def _write_new_bytes(path: Path, content: bytes) -> None:
             with suppress(OSError):
                 os.close(descriptor_to_close)
         if identity is not None:
-            _unlink_owned(temporary, identity)
+            _preserve_temporary(temporary, identity)
             with suppress(OSError):
                 _fsync_parent(path)
         raise
 
     assert identity is not None
-    removed = _unlink_owned(temporary, identity)
-    if not removed:
+    preserved_owned = _preserve_temporary(temporary, identity)
+    if not preserved_owned:
         raise OSError("temporary evidence output changed during publication")
     _fsync_parent(path)
 
@@ -255,29 +255,19 @@ def _require_owned_path(
         raise OSError(message)
 
 
-def _unlink_owned(path: Path, identity: tuple[int, int]) -> bool:
+def _preserve_temporary(path: Path, identity: tuple[int, int]) -> bool:
     quarantine = Path(tempfile.mkdtemp(prefix=f".{path.name}.cleanup-", dir=path.parent))
     candidate = quarantine / "candidate"
     try:
-        try:
-            os.rename(path, candidate)
-        except FileNotFoundError:
-            return False
-
-        if not _unlink_quarantined_owned(quarantine, identity):
-            try:
-                os.link(candidate, path)
-            except OSError:
-                return False
-            os.unlink(candidate)
-            return False
-        return True
-    finally:
+        os.rename(path, candidate)
+    except FileNotFoundError:
         with suppress(OSError):
             quarantine.rmdir()
+        return False
+    return _quarantined_path_is_owned(quarantine, identity)
 
 
-def _unlink_quarantined_owned(quarantine: Path, identity: tuple[int, int]) -> bool:
+def _quarantined_path_is_owned(quarantine: Path, identity: tuple[int, int]) -> bool:
     directory_descriptor = os.open(
         quarantine,
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -291,14 +281,11 @@ def _unlink_quarantined_owned(quarantine: Path, identity: tuple[int, int]) -> bo
         )
         descriptor_state = os.fstat(candidate_descriptor)
         path_state = os.stat("candidate", dir_fd=directory_descriptor, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(descriptor_state.st_mode)
-            or (descriptor_state.st_dev, descriptor_state.st_ino) != identity
-            or (path_state.st_dev, path_state.st_ino) != identity
-        ):
-            return False
-        os.unlink("candidate", dir_fd=directory_descriptor)
-        return True
+        return (
+            stat.S_ISREG(descriptor_state.st_mode)
+            and (descriptor_state.st_dev, descriptor_state.st_ino) == identity
+            and (path_state.st_dev, path_state.st_ino) == identity
+        )
     finally:
         try:
             if candidate_descriptor >= 0:

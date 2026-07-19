@@ -27,8 +27,8 @@ from benchmarks.evidence import (
 )
 from tests.benchmarks.factories import evidence_record
 
-_unlink_owned = cast(
-    Callable[[Path, tuple[int, int]], bool], vars(evidence_module)["_unlink_owned"]
+_preserve_temporary = cast(
+    Callable[[Path, tuple[int, int]], bool], vars(evidence_module)["_preserve_temporary"]
 )
 
 
@@ -352,7 +352,7 @@ def test_atomic_writer_preserves_replacement_installed_during_owned_cleanup(
     }
 
 
-def test_owned_cleanup_does_not_use_a_checked_pathname_unlink(
+def test_owned_cleanup_conservatively_preserves_the_quarantined_inode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     temporary = tmp_path / ".evidence.partial"
@@ -372,11 +372,13 @@ def test_owned_cleanup_does_not_use_a_checked_pathname_unlink(
 
     monkeypatch.setattr(Path, "unlink", racing_unlink)
 
-    removed = _unlink_owned(temporary, identity)
+    preserved_owned = _preserve_temporary(temporary, identity)
 
-    assert removed
+    assert preserved_owned
     assert not swapped
-    assert not [item for item in tmp_path.rglob("*") if item.is_file()]
+    assert [item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()] == [
+        "ours"
+    ]
 
 
 def test_owned_cleanup_preserves_replacement_after_anchored_open(
@@ -408,13 +410,55 @@ def test_owned_cleanup_preserves_replacement_after_anchored_open(
 
     monkeypatch.setattr(os, "open", open_then_replace)
 
-    removed = _unlink_owned(temporary, identity)
+    preserved_owned = _preserve_temporary(temporary, identity)
 
-    assert not removed
+    assert not preserved_owned
     assert replaced
     assert "actor-owned" in {
         item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()
     }
+
+
+def test_owned_cleanup_never_deletes_at_the_final_unlinkat_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary = tmp_path / ".evidence.partial"
+    temporary.write_text("ours", encoding="utf-8")
+    metadata = temporary.stat()
+    identity = metadata.st_dev, metadata.st_ino
+    original_unlink = os.unlink
+    swapped = False
+
+    def racing_unlink(
+        path: str | bytes | Path,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        if path == "candidate" and dir_fd is not None and not swapped:
+            swapped = True
+            original_unlink(path, dir_fd=dir_fd)
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=dir_fd,
+            )
+            try:
+                os.write(descriptor, b"actor-owned")
+            finally:
+                os.close(descriptor)
+        original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", racing_unlink)
+
+    preserved_owned = _preserve_temporary(temporary, identity)
+
+    assert preserved_owned
+    assert not swapped
+    assert [item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()] == [
+        "ours"
+    ]
 
 
 def test_atomic_writer_cleans_up_after_initial_fstat_failure(
@@ -461,7 +505,7 @@ def test_atomic_writer_does_not_retry_an_ambiguous_close(
         return None
 
     monkeypatch.setattr(os, "close", close_then_fail)
-    monkeypatch.setattr(evidence_module, "_unlink_owned", report_cleaned)
+    monkeypatch.setattr(evidence_module, "_preserve_temporary", report_cleaned)
     monkeypatch.setattr(evidence_module, "_fsync_parent", skip_parent_sync)
 
     with pytest.raises(OSError, match="injected close failure"):
