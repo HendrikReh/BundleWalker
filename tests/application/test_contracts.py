@@ -190,6 +190,69 @@ def test_diagnostic_text_rejects_control_characters(value: str) -> None:
         )
 
 
+@pytest.mark.parametrize("value", [True, "1", 1.0])
+def test_diagnostic_counts_rejects_coercible_wire_values(value: object) -> None:
+    with pytest.raises(ValidationError):
+        DiagnosticCounts.model_validate(
+            {"passed": value, "warnings": 0, "failures": 0}
+        )
+
+
+def test_diagnostic_remediation_rejects_entry_longer_than_300_characters() -> None:
+    with pytest.raises(ValidationError):
+        DiagnosticCheck(
+            code="runtime.python",
+            category=DiagnosticCategory.RUNTIME,
+            severity=DiagnosticSeverity.PASS,
+            summary="Safe summary.",
+            remediation=("r" * 301,),
+        )
+
+
+@pytest.mark.parametrize("value", ["line\nbreak", "tab\tvalue", "control\x00value"])
+def test_diagnostic_remediation_rejects_control_characters(value: str) -> None:
+    with pytest.raises(ValidationError):
+        DiagnosticCheck(
+            code="runtime.python",
+            category=DiagnosticCategory.RUNTIME,
+            severity=DiagnosticSeverity.PASS,
+            summary="Safe summary.",
+            remediation=(value,),
+        )
+
+
+def test_diagnostic_public_contracts_are_frozen() -> None:
+    check = DiagnosticCheck(
+        code="runtime.python",
+        category=DiagnosticCategory.RUNTIME,
+        severity=DiagnosticSeverity.PASS,
+        summary="Safe summary.",
+        remediation=(),
+    )
+    counts = DiagnosticCounts(passed=14, warnings=0, failures=0)
+    result = DiagnosticResult(
+        overall=DiagnosticSeverity.PASS,
+        bundlewalker_version="0.4.0a2",
+        python_version="3.13.5",
+        platform="linux",
+        counts=counts,
+        checks=_diagnostic_checks(),
+    )
+    report = SupportReport(
+        generated_at=datetime(2026, 7, 19, 8, 0, tzinfo=UTC),
+        result=result,
+    )
+
+    for model, field, value in (
+        (check, "summary", "Changed summary."),
+        (counts, "passed", 0),
+        (result, "platform", "darwin"),
+        (report, "schema_version", 2),
+    ):
+        with pytest.raises(ValidationError):
+            setattr(model, field, value)
+
+
 def _review_payload() -> dict[str, object]:
     return {
         "review_id": "a" * 32,

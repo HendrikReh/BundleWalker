@@ -6,7 +6,7 @@
 import unicodedata
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     AwareDatetime,
@@ -26,6 +26,7 @@ MAX_SEARCH_CHARACTERS = 2_000
 MAX_SOURCE_NAME_CHARACTERS = 255
 MAX_INLINE_SOURCE_CHARACTERS = 1_000_000
 MAX_CONCEPT_PAGE_SIZE = 100
+MAX_DIAGNOSTIC_REMEDIATION_CHARACTERS = 300
 
 
 class DiagnosticSeverity(StrEnum):
@@ -68,13 +69,15 @@ def _single_line(value: str) -> str:
 
 
 class DiagnosticCheck(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     code: str = Field(pattern=r"^[a-z]+(?:\.[a-z]+)+$", max_length=80)
     category: DiagnosticCategory
     severity: DiagnosticSeverity
     summary: str = Field(min_length=1, max_length=300)
-    remediation: tuple[str, ...] = Field(default=(), max_length=5)
+    remediation: tuple[
+        Annotated[str, Field(max_length=MAX_DIAGNOSTIC_REMEDIATION_CHARACTERS)], ...
+    ] = Field(default=(), max_length=5)
 
     @field_validator("summary")
     @classmethod
@@ -88,7 +91,7 @@ class DiagnosticCheck(BaseModel):
 
 
 class DiagnosticCounts(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     passed: int = Field(ge=0)
     warnings: int = Field(ge=0)
@@ -96,7 +99,7 @@ class DiagnosticCounts(BaseModel):
 
 
 class DiagnosticResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     overall: DiagnosticSeverity
     bundlewalker_version: str = Field(min_length=1, max_length=80)
@@ -130,7 +133,7 @@ class DiagnosticResult(BaseModel):
 
 
 class SupportReport(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     schema_version: Literal[1] = 1
     generated_at: AwareDatetime
