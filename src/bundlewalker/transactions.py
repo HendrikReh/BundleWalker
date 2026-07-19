@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -13,7 +12,7 @@ import stat
 import tempfile
 import uuid
 from collections.abc import Generator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
@@ -21,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from bundlewalker.changes import ChangeValidationContext, build_prospective_wiki
+from bundlewalker.coordination import open_workspace_directory, workspace_lock
 from bundlewalker.domain import (
     MAX_CHANGESET_DRAFTS,
     MAX_CHANGESET_SUMMARY_CHARACTERS,
@@ -50,7 +50,6 @@ _PROSPECTIVE_NAME = "prospective-wiki"
 _BACKUP_NAME = "backup-wiki"
 _VALIDATION_WORKSPACE_NAME = "validation-workspace"
 _RAW_PAYLOAD_NAME = "raw-source"
-_LOCK_NAME = "transaction.lock"
 _QUARANTINE_PREFIX = ".retired-backup-"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REVIEW_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -83,6 +82,13 @@ class PreparedTransaction:
     @property
     def review_digest(self) -> str | None:
         return self._identity.review_digest
+
+
+@dataclass(frozen=True, slots=True)
+class QuiescentWorkspace:
+    """Proof that recovery and review checks passed while the workspace lock is held."""
+
+    workspace: Workspace
 
 
 class ReviewKind(StrEnum):
@@ -181,7 +187,7 @@ def prepare_transaction(
     kind: ReviewKind,
 ) -> PreparedTransaction:
     """Build a reviewed wiki tree and durable journal without changing live knowledge."""
-    with _workspace_transaction_lock(workspace):
+    with workspace_lock(workspace):
         transactions_root = _ensure_transactions_root(workspace)
         _recover_transactions_locked(workspace, transactions_root)
         existing = _get_pending_review_locked(workspace, transactions_root)
@@ -312,7 +318,7 @@ def _prepare_transaction_locked(
 
 def commit_transaction(prepared: PreparedTransaction) -> None:
     """Apply a review through its validated legacy in-memory handle."""
-    with _workspace_transaction_lock(prepared.workspace):
+    with workspace_lock(prepared.workspace):
         manifest = _load_manifest(prepared.workspace, prepared.transaction_dir)
         prospective, backup = _manifest_paths(
             prepared.workspace,
@@ -325,7 +331,7 @@ def commit_transaction(prepared: PreparedTransaction) -> None:
 
 def apply_pending_review(workspace: Workspace, review_id: str) -> None:
     """Apply the current durable review selected by its opaque identity."""
-    with _workspace_transaction_lock(workspace):
+    with workspace_lock(workspace):
         transaction_dir, manifest = _require_pending_manifest_locked(workspace, review_id)
         review = _load_transaction_review(workspace, transaction_dir, manifest)
         if review.status is ReviewStatus.STALE:
@@ -354,22 +360,30 @@ def _resume_accepted_commit_locked(
     transaction_dir: Path,
     manifest: _Manifest,
 ) -> None:
-    if manifest.phase != "accepted":
-        raise TransactionError(f"transaction decision is not accepted: {manifest.phase}")
+    if manifest.phase not in {"accepted", "raw-persisted", "swapping"}:
+        raise TransactionError(f"transaction decision cannot resume from phase: {manifest.phase}")
     identity = _load_authenticated_identity(transaction_dir, manifest)
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
 
-    try:
-        _persist_raw_source(workspace, transaction_dir, manifest)
-    except _RawDestinationCompatibilityError as exc:
-        _restore_accepted_review_after_raw_conflict(
+    if manifest.phase == "accepted":
+        try:
+            _persist_raw_source(workspace, transaction_dir, manifest)
+        except _RawDestinationCompatibilityError as exc:
+            _restore_accepted_review_after_raw_conflict(
+                workspace,
+                transaction_dir,
+                manifest,
+            )
+            raise ReviewStaleError(f"pending review is stale because {exc}") from exc
+        manifest = replace(manifest, phase="raw-persisted")
+        _write_manifest(transaction_dir, manifest)
+    else:
+        _persist_raw_source(
             workspace,
             transaction_dir,
             manifest,
+            require_existing=True,
         )
-        raise ReviewStaleError(f"pending review is stale because {exc}") from exc
-    manifest = replace(manifest, phase="raw-persisted")
-    _write_manifest(transaction_dir, manifest)
     _verify_prospective(
         prospective,
         workspace,
@@ -378,8 +392,9 @@ def _resume_accepted_commit_locked(
     )
     _sync_tree(prospective)
 
-    manifest = replace(manifest, phase="swapping")
-    _write_manifest(transaction_dir, manifest)
+    if manifest.phase != "swapping":
+        manifest = replace(manifest, phase="swapping")
+        _write_manifest(transaction_dir, manifest)
     try:
         _rename_workspace_entry(workspace, workspace.wiki_dir, backup)
         _sync_tree(backup)
@@ -416,7 +431,7 @@ def _resume_accepted_commit_locked(
 
 def discard_transaction(prepared: PreparedTransaction) -> None:
     """Discard a review through its validated legacy in-memory handle."""
-    with _workspace_transaction_lock(prepared.workspace):
+    with workspace_lock(prepared.workspace):
         manifest = _load_manifest(prepared.workspace, prepared.transaction_dir)
         prospective, backup = _manifest_paths(
             prepared.workspace,
@@ -433,7 +448,7 @@ def discard_transaction(prepared: PreparedTransaction) -> None:
 
 def discard_pending_review(workspace: Workspace, review_id: str) -> None:
     """Discard the current durable review selected by its opaque identity."""
-    with _workspace_transaction_lock(workspace):
+    with workspace_lock(workspace):
         transaction_dir, manifest = _require_pending_manifest_locked(
             workspace,
             review_id,
@@ -457,7 +472,7 @@ def recover_transactions(workspace: Workspace) -> None:
     transactions_root = workspace.root.joinpath(*_TRANSACTIONS_PATH.parts)
     if not transactions_root.exists():
         return
-    with _workspace_transaction_lock(workspace):
+    with workspace_lock(workspace):
         _recover_transactions_locked(workspace, transactions_root)
 
 
@@ -466,7 +481,7 @@ def get_pending_review(workspace: Workspace) -> TransactionReview | None:
     transactions_root = workspace.root.joinpath(*_TRANSACTIONS_PATH.parts)
     if not transactions_root.exists():
         return None
-    with _workspace_transaction_lock(workspace):
+    with workspace_lock(workspace):
         _recover_transactions_locked(workspace, transactions_root)
         return _get_pending_review_locked(workspace, transactions_root)
 
@@ -476,6 +491,19 @@ def ensure_no_pending_review(workspace: Workspace) -> None:
     pending = get_pending_review(workspace)
     if pending is not None:
         raise ReviewPendingError(pending.review_id)
+
+
+@contextmanager
+def quiescent_workspace(workspace: Workspace) -> Generator[QuiescentWorkspace]:
+    """Recover and retain the workspace lock while no durable review remains."""
+    transactions_root = workspace.root.joinpath(*_TRANSACTIONS_PATH.parts)
+    with workspace_lock(workspace):
+        if transactions_root.exists() or transactions_root.is_symlink():
+            _recover_transactions_locked(workspace, transactions_root)
+            pending = _get_pending_review_locked(workspace, transactions_root)
+            if pending is not None:
+                raise ReviewPendingError(pending.review_id)
+        yield QuiescentWorkspace(workspace)
 
 
 def _require_pending_manifest_locked(
@@ -733,7 +761,7 @@ def _raw_destination_compatibility(
     relative_value = _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
     relative = PurePosixPath(relative_value)
     try:
-        with _open_workspace_directory(
+        with open_workspace_directory(
             workspace,
             relative.parts[:-1],
             label="raw destination parent",
@@ -864,7 +892,7 @@ def _recover_transaction(
     ):
         raise TransactionError("manifest identities do not match transaction identity")
     _validate_manifest_review(transaction_dir, manifest)
-    if manifest.schema_version == _SCHEMA_VERSION and manifest.phase == "accepted":
+    if manifest.schema_version == _SCHEMA_VERSION and manifest.phase != "prepared":
         _recover_accepted_transaction(workspace, transaction_dir, manifest, identity)
         return
     _recover_known_topology(
@@ -906,7 +934,38 @@ def _recover_accepted_transaction(
     identity: _Identity,
 ) -> None:
     prospective, backup = _manifest_paths(workspace, transaction_dir, manifest)
-    backup = _recovery_backup_path(transaction_dir, backup)
+    recovery_backup = _recovery_backup_path(transaction_dir, backup)
+    resumes_before_swap = False
+    if manifest.phase != "accepted":
+        live_exists = _directory_exists(workspace.wiki_dir, "live wiki")
+        prospective_exists = _directory_exists(prospective, "prospective wiki")
+        backup_exists = _directory_exists(recovery_backup, "transaction backup")
+        resumes_before_swap = (
+            manifest.phase in {"raw-persisted", "swapping"}
+            and live_exists
+            and prospective_exists
+            and not backup_exists
+        )
+        if not resumes_before_swap:
+            invalid_pre_swap = manifest.phase == "raw-persisted" or (
+                manifest.phase == "swapping"
+                and live_exists
+                and not backup_exists
+                and _classify_tree(workspace.wiki_dir, transaction_dir, identity) == "base"
+            )
+            if invalid_pre_swap:
+                raise TransactionError("later accepted transaction has invalid pre-swap topology")
+            _recover_known_topology(
+                workspace,
+                transaction_dir,
+                manifest.phase,
+                prospective,
+                backup,
+                identity,
+            )
+            return
+
+    backup = recovery_backup
     _verify_pending_raw_payload(transaction_dir, manifest)
     _verify_prospective(prospective, workspace, identity.prospective_digest, lint=False)
     if _directory_exists(backup, "transaction backup"):
@@ -915,6 +974,13 @@ def _recover_accepted_transaction(
         raise TransactionError("accepted transaction has no authenticated live wiki")
 
     live_identity = _classify_tree(workspace.wiki_dir, transaction_dir, identity)
+    if resumes_before_swap:
+        if live_identity != "base":
+            raise TransactionError("later accepted transaction live wiki identity is invalid")
+        _validate_configured_wiki(workspace)
+        _revalidate_operations(workspace, manifest.drafts)
+        _resume_accepted_commit_locked(workspace, transaction_dir, manifest)
+        return
     if live_identity == "base":
         _validate_configured_wiki(workspace)
         _revalidate_operations(workspace, manifest.drafts)
@@ -1136,45 +1202,6 @@ def _cleanup_transaction(workspace: Workspace, transaction_dir: Path) -> None:
     _sync_directory(transaction_dir.parent)
 
 
-@contextmanager
-def _workspace_transaction_lock(workspace: Workspace) -> Generator[None]:
-    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    with _open_workspace_directory(
-        workspace,
-        (".bundlewalker",),
-        label="transaction lock parent",
-        create_from=0,
-    ) as parent_descriptor:
-        try:
-            try:
-                descriptor = os.open(
-                    _LOCK_NAME,
-                    flags | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                    dir_fd=parent_descriptor,
-                )
-                os.fsync(parent_descriptor)
-            except FileExistsError:
-                descriptor = os.open(
-                    _LOCK_NAME,
-                    flags,
-                    dir_fd=parent_descriptor,
-                )
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise TransactionError("workspace transaction lock is not a regular file")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        except OSError as exc:
-            raise TransactionError("could not acquire workspace transaction lock") from exc
-        try:
-            yield
-        finally:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            finally:
-                os.close(descriptor)
-
-
 def _stage_validation_workspace(
     workspace: Workspace,
     validation_workspace: Workspace,
@@ -1322,6 +1349,8 @@ def _persist_raw_source(
     workspace: Workspace,
     transaction_dir: Path,
     manifest: _Manifest,
+    *,
+    require_existing: bool = False,
 ) -> None:
     if manifest.raw_path is None:
         if manifest.raw_sha256 is not None:
@@ -1342,10 +1371,10 @@ def _persist_raw_source(
     link_created = False
     destination_uses_payload = False
     try:
-        with _open_workspace_directory(
+        with open_workspace_directory(
             workspace,
             parent_parts,
-            create_from=len(configured.parts),
+            create_from=None if require_existing else len(configured.parts),
             label="raw destination parent",
         ) as parent_descriptor:
             destination_stat = _compatible_raw_destination_stat_at(
@@ -1354,6 +1383,8 @@ def _persist_raw_source(
                 manifest.raw_sha256,
             )
             if destination_stat is None:
+                if require_existing:
+                    raise _RawDestinationCompatibilityError("persisted raw destination is missing")
                 current_payload = _require_authenticated_raw_payload_links(
                     transaction_dir,
                     manifest,
@@ -1416,7 +1447,7 @@ def _persist_raw_source(
                 )
             os.fsync(parent_descriptor)
 
-        with _open_workspace_directory(
+        with open_workspace_directory(
             workspace,
             parent_parts,
             label="current raw destination parent",
@@ -1468,7 +1499,7 @@ def _raw_destination_exists(workspace: Workspace, manifest: _Manifest) -> bool:
         return False
     relative_value = _validated_raw_relative(workspace, Path(manifest.raw_path))
     relative = PurePosixPath(relative_value)
-    with _open_workspace_directory(
+    with open_workspace_directory(
         workspace,
         relative.parts[:-1],
         label="raw destination parent",
@@ -2043,49 +2074,6 @@ def _configured_raw_root(workspace: Workspace) -> Path:
     return current
 
 
-@contextmanager
-def _open_workspace_directory(
-    workspace: Workspace,
-    parts: tuple[str, ...],
-    *,
-    label: str,
-    create_from: int | None = None,
-) -> Generator[int]:
-    if any(not part or part in {".", ".."} or "/" in part for part in parts):
-        raise TransactionError(f"{label} is not a safe workspace-relative directory")
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptors: list[int] = []
-    traversed: list[str] = []
-    try:
-        current = os.open(workspace.root, flags)
-        descriptors.append(current)
-        for index, part in enumerate(parts):
-            traversed.append(part)
-            try:
-                child = os.open(part, flags, dir_fd=current)
-            except FileNotFoundError:
-                if create_from is None or index < create_from:
-                    raise
-                with suppress(FileExistsError):
-                    os.mkdir(part, 0o700, dir_fd=current)
-                os.fsync(current)
-                child = os.open(part, flags, dir_fd=current)
-            descriptors.append(child)
-            current = child
-    except OSError as exc:
-        location = "/".join(traversed) or "."
-        for descriptor in reversed(descriptors):
-            with suppress(OSError):
-                os.close(descriptor)
-        raise TransactionError(f"{label} contains a symlink or non-directory: {location}") from exc
-    try:
-        yield current
-    finally:
-        for descriptor in reversed(descriptors):
-            with suppress(OSError):
-                os.close(descriptor)
-
-
 def _configured_wiki_parts(workspace: Workspace) -> tuple[str, ...]:
     relative = PurePosixPath(workspace.config.wiki_dir)
     if (
@@ -2104,7 +2092,7 @@ def _validate_configured_wiki(
     allow_missing: bool = False,
 ) -> bool:
     parts = _configured_wiki_parts(workspace)
-    with _open_workspace_directory(
+    with open_workspace_directory(
         workspace,
         parts[:-1],
         label="configured wiki path",
@@ -2146,12 +2134,12 @@ def _rename_workspace_entry(workspace: Workspace, source: Path, target: Path) ->
     target_parts = _workspace_entry_parts(workspace, target)
     try:
         with (
-            _open_workspace_directory(
+            open_workspace_directory(
                 workspace,
                 source_parts[:-1],
                 label="rename source parent",
             ) as source_parent,
-            _open_workspace_directory(
+            open_workspace_directory(
                 workspace,
                 target_parts[:-1],
                 label="rename target parent",
@@ -2177,7 +2165,7 @@ def _remove_live_wiki(workspace: Workspace) -> None:
         return
     parts = _configured_wiki_parts(workspace)
     try:
-        with _open_workspace_directory(
+        with open_workspace_directory(
             workspace,
             parts[:-1],
             label="configured wiki parent",

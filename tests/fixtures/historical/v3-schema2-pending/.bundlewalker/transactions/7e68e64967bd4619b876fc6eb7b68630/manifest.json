@@ -1,0 +1,19 @@
+{
+  "backup_path": ".bundlewalker/transactions/7e68e64967bd4619b876fc6eb7b68630/backup-wiki",
+  "base_wiki_digest": "eee708ef0d3053edd3df92c811b630bc1769a6c057a424858a4e4c878a2b691a",
+  "drafts": [
+    {
+      "base_digest": null,
+      "operation": "create",
+      "path": "sources/7fb0df98f02f-v3-source-notes"
+    }
+  ],
+  "phase": "prepared",
+  "prospective_digest": "30bfe14f95be87c7c8390787b626327df2567d1dfaa91dd89ba2f2b2e78a9054",
+  "prospective_path": ".bundlewalker/transactions/7e68e64967bd4619b876fc6eb7b68630/prospective-wiki",
+  "raw_path": "raw/7fb0df98f02f-v3-source-notes.txt",
+  "raw_sha256": "7fb0df98f02f6cec71181a2ef29544a158e70157cc9bc6107c968d5ceb6aa45b",
+  "schema_version": 2,
+  "summary": "Integrated source notes.",
+  "transaction_id": "7e68e64967bd4619b876fc6eb7b68630"
+}

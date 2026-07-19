@@ -1,0 +1,5 @@
+version = 1
+wiki_dir = "wiki"
+raw_dir = "raw"
+conventions_file = "conventions.md"
+max_source_characters = 100000

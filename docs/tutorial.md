@@ -17,7 +17,8 @@ Run every command block in the same shell session. That keeps `PROJECT_ROOT`, `T
 You will create a `personal-workbook` workspace, ingest a cautious observation, inspect and query
 the accepted knowledge, save a reviewed Synthesis, add a small comparison as newer evidence, and
 refresh the same Synthesis without assuming any model-generated title, prose, or slug. You will
-finish by checking the bundle and, optionally, putting its durable files under Git.
+finish by checking the bundle, rehearsing a verified backup and separate-target restore, and,
+optionally, putting its durable files under Git.
 
 ## Before you start
 
@@ -88,9 +89,9 @@ Initialize the workbook with conventions that emphasize the boundary between evi
 personal interpretation, enter it, and validate the deterministic scaffold:
 
 ```bash
-uv run bundlewalker init "$TUTORIAL_ROOT/workbook" \
+uv run bundlewalker init "$TUTORIAL_ROOT/knowledge" \
   --conventions-style personal-workbook
-cd "$TUTORIAL_ROOT/workbook"
+cd "$TUTORIAL_ROOT/knowledge"
 uv run --project "$PROJECT_ROOT" bundlewalker lint
 ```
 
@@ -221,7 +222,44 @@ a provider charge. Its findings vary by model and remain advisory. Neither lint 
 persists knowledge changes, opens a review, or approves a refresh. Before linting, either mode may
 complete or roll back an already-reviewed interrupted transaction.
 
-## 10. Optional Git checkpoint
+## 10. Back up and restore the workspace
+
+All reviews are now resolved. Return to the tutorial directory, create a verified workspace backup
+outside the workspace, and restore it to the separate new target `./knowledge-restored`:
+
+```bash
+cd "$TUTORIAL_ROOT"
+mkdir -p ./backups
+uv run --project "$PROJECT_ROOT" bundlewalker workspace status ./knowledge
+uv run --project "$PROJECT_ROOT" bundlewalker workspace backup \
+  ./backups/knowledge.zip --workspace ./knowledge
+uv run --project "$PROJECT_ROOT" bundlewalker workspace restore \
+  ./backups/knowledge.zip ./knowledge-restored
+```
+
+Record the backup and restore commands' printed `SHA-256` values and confirm that they match. The
+ZIP is unencrypted and may contain the exact raw source bytes accepted earlier; keep it on
+encrypted storage or apply an external encryption tool. The authoritative
+[workspace compatibility policy](workspace-compatibility.md) defines the precise archive scope
+and portability boundary.
+
+Run compatibility status against the restored target, then run offline deterministic lint from
+inside that restored workspace:
+
+```bash
+uv run --project "$PROJECT_ROOT" bundlewalker workspace status ./knowledge-restored
+(
+  cd ./knowledge-restored
+  uv run --project "$PROJECT_ROOT" bundlewalker lint
+)
+cd ./knowledge
+```
+
+Status should report `current`, and lint should report no deterministic errors. Restore verified
+the archive before publishing the new target and left the original `./knowledge` workspace in
+place.
+
+## 11. Optional Git checkpoint
 
 If the workbook is suitable for version control, ignore temporary transaction state and commit
 the durable configuration, conventions, source bytes, and wiki:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any, cast
 
@@ -102,6 +103,17 @@ def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
     for dependency in ("supported", "build", "artifact-smoke", "sdist-smoke"):
         assert dependency in required_needs
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_sdist_includes_historical_empty_directory_representation() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    force_include = project["tool"]["hatch"]["build"]["targets"]["sdist"]["force-include"]
+    assert force_include == {
+        "tests/fixtures/historical/empty-directories.json": (
+            "tests/fixtures/historical/empty-directories.json"
+        )
+    }
 
 
 def test_ci_requires_dependency_audit() -> None:
@@ -207,3 +219,47 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     verify_commands = _run_commands(workflow, "verify")
     assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_workspace_lifecycle_policy_and_commands_are_published() -> None:
+    policy = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    tutorial = (PROJECT_ROOT / "docs/tutorial.md").read_text(encoding="utf-8")
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+
+    for command in (
+        "bundlewalker workspace status",
+        "bundlewalker workspace backup",
+        "bundlewalker workspace restore",
+        "bundlewalker workspace upgrade",
+    ):
+        assert command in policy
+        assert command in user_guide
+    for warning in (
+        "unencrypted",
+        "raw source",
+        ".bundlewalker",
+        "pending review",
+        "new or empty",
+    ):
+        assert warning in policy.lower()
+    assert "docs/workspace-compatibility.md" in readme
+    assert "workspace backup" in tutorial.lower()
+    assert "pre-upgrade backup" in releases.lower()
+    assert "sha-256" in releases.lower()
+
+
+def test_historical_plan_embeds_current_user_guide_byte_for_byte() -> None:
+    guide = (PROJECT_ROOT / "docs/user-guide.md").read_bytes()
+    plan = (PROJECT_ROOT / "docs/superpowers/plans/2026-07-16-end-user-guide.md").read_bytes()
+    start_marker = b"Create `docs/user-guide.md` with exactly:\n\n````markdown\n"
+    end_marker = b"\n````\n\n- [ ] **Step 3: Link the guide from the README**"
+
+    assert plan.count(start_marker) == 1
+    assert plan.count(end_marker) == 1
+    embedded_start = plan.index(start_marker) + len(start_marker)
+    embedded_end = plan.index(end_marker, embedded_start)
+    embedded_guide = plan[embedded_start:embedded_end] + b"\n"
+
+    assert embedded_guide == guide

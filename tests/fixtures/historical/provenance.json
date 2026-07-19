@@ -1,0 +1,40 @@
+{
+  "v1": {
+    "tag": "v1",
+    "commit": "be165ac283ba7511592771fd876c89b12ef4ff1a",
+    "package_version": "0.1.0",
+    "workspace_format": 1,
+    "transaction_schema": 1,
+    "expected_compatibility": "current"
+  },
+  "v2": {
+    "tag": "v2",
+    "commit": "12ef119ac3b2ba84cff7ca9aee0fbf14b239d975",
+    "package_version": "0.2.0",
+    "workspace_format": 1,
+    "transaction_schema": 2,
+    "review_schema": 1,
+    "expected_compatibility": "current"
+  },
+  "v3": {
+    "tag": "v3",
+    "commit": "ab079a16a98cc31c46f77db73c941328c886075b",
+    "package_version": "0.3.0",
+    "workspace_format": 1,
+    "transaction_schema": 2,
+    "review_schema": 1,
+    "expected_compatibility": "current"
+  },
+  "fixtures": {
+    "v1-schema1-swapping": "recovers_base",
+    "v3-schema2-pending": "pending_review",
+    "invalid-malformed": "configuration_error",
+    "invalid-format-zero": "unsupported",
+    "future-format": "too_new"
+  },
+  "representation": {
+    "schema_version": 1,
+    "empty_directories": "empty-directories.json",
+    "ownership": "bundlewalker_fixture_representation"
+  }
+}

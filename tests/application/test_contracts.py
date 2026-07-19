@@ -3,10 +3,17 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from bundlewalker.application import (
+    BackupResult,
+    CompatibilityResult,
+    RestoreResult,
+    UpgradeResult,
+)
 from bundlewalker.application.contracts import (
     MAX_INLINE_SOURCE_CHARACTERS,
     MAX_SOURCE_NAME_CHARACTERS,
@@ -20,18 +27,31 @@ from bundlewalker.application.errors import (
     ApplicationErrorCode,
     translate_error,
 )
+from bundlewalker.backups import (
+    ARCHIVE_FORMAT,
+    ARCHIVE_SCHEMA_VERSION,
+    BackupManifest,
+    VerifiedBackup,
+)
+from bundlewalker.compatibility import CompatibilityStatus
 from bundlewalker.errors import (
     AgentRunError,
+    BackupError,
+    BackupVerificationError,
     BundleWalkerError,
     ChangeSetError,
     ConfigurationError,
+    MigrationExecutionError,
+    MigrationUnavailableError,
     OkfError,
+    RestoreTargetError,
     ReviewMismatchError,
     ReviewNotFoundError,
     ReviewPendingError,
     ReviewStaleError,
     TransactionError,
     UsageError,
+    WorkspaceCompatibilityError,
     WorkspaceError,
 )
 from bundlewalker.transactions import ReviewKind, ReviewStatus
@@ -463,3 +483,112 @@ def test_translate_error_uses_closed_fallback_for_unknown_core_error() -> None:
 
     assert mapped.code is ApplicationErrorCode.WORKSPACE_ERROR
     assert mapped.safe_message == "BundleWalker operation failed"
+
+
+def test_lifecycle_result_contracts_are_strict_and_json_round_trip() -> None:
+    backup = BackupResult(
+        archive_path="/tmp/knowledge.zip",
+        archive_sha256="a" * 64,
+        created_at=datetime(2026, 7, 18, 12, 0, tzinfo=UTC),
+        workspace_format=1,
+        file_count=4,
+        byte_count=100,
+    )
+    results = (
+        CompatibilityResult(
+            installed_version="0.4.0a1",
+            workspace_path="/tmp/knowledge",
+            workspace_format=1,
+            compatibility=CompatibilityStatus.CURRENT,
+            readable=True,
+            writable=True,
+            upgrade_available=False,
+        ),
+        backup,
+        RestoreResult(
+            target_path="/tmp/restored",
+            archive_sha256="a" * 64,
+            workspace_format=1,
+            file_count=4,
+            byte_count=100,
+        ),
+        UpgradeResult(
+            status="upgraded",
+            workspace_path="/tmp/knowledge",
+            source_version=1,
+            target_version=2,
+            backup=backup,
+        ),
+    )
+
+    for result in results:
+        assert type(result).model_validate_json(result.model_dump_json()) == result
+        with pytest.raises(ValidationError):
+            type(result).model_validate({**result.model_dump(), "private": "not public"})
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "message"),
+    [
+        (
+            WorkspaceCompatibilityError("too_new"),
+            ApplicationErrorCode.WORKSPACE_INCOMPATIBLE,
+            "workspace format is not supported for this operation",
+        ),
+        (
+            BackupVerificationError("archive contains token=private"),
+            ApplicationErrorCode.BACKUP_INVALID,
+            "backup archive verification failed",
+        ),
+        (
+            BackupError("could not read /tmp/private"),
+            ApplicationErrorCode.BACKUP_FAILED,
+            "workspace backup or restore failed",
+        ),
+        (
+            RestoreTargetError("target /tmp/private is occupied"),
+            ApplicationErrorCode.RESTORE_TARGET_INVALID,
+            "restore target must be a new or empty directory",
+        ),
+        (
+            MigrationUnavailableError("private migration details"),
+            ApplicationErrorCode.MIGRATION_UNAVAILABLE,
+            "no complete workspace migration path is available",
+        ),
+    ],
+)
+def test_translate_error_maps_lifecycle_errors_without_raw_details(
+    error: BundleWalkerError,
+    code: ApplicationErrorCode,
+    message: str,
+) -> None:
+    mapped = translate_error(error)
+
+    assert mapped.code is code
+    assert mapped.safe_message == message
+    assert "private" not in mapped.safe_message
+    assert mapped.backup_archive_path is None
+    assert mapped.backup_archive_sha256 is None
+
+
+def test_translate_migration_failure_retains_only_verified_backup_identity() -> None:
+    manifest = BackupManifest(
+        archive_format=ARCHIVE_FORMAT,
+        schema_version=ARCHIVE_SCHEMA_VERSION,
+        created_at=datetime(2026, 7, 18, 12, 0, tzinfo=UTC),
+        bundlewalker_version="0.4.0a1",
+        workspace_format_version=1,
+        directories=(),
+        files=(),
+    )
+    backup = VerifiedBackup(Path("pre-upgrade.zip"), "a" * 64, manifest)
+
+    mapped = translate_error(MigrationExecutionError("token=private-cause", backup=backup))
+
+    assert mapped.code is ApplicationErrorCode.MIGRATION_FAILED
+    assert mapped.safe_message == (
+        "workspace migration failed; restore the verified pre-upgrade backup"
+    )
+    assert mapped.backup_archive_path == "pre-upgrade.zip"
+    assert mapped.backup_archive_sha256 == "a" * 64
+    assert "private-cause" not in mapped.safe_message

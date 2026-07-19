@@ -846,8 +846,8 @@ def test_commit_does_not_enter_swapping_when_the_backup_path_is_occupied(
 @pytest.mark.parametrize(
     ("state", "expected_tree"),
     [
-        ("raw-persisted", "old"),
-        ("swapping-before-renames", "old"),
+        ("raw-persisted", "new"),
+        ("swapping-before-renames", "new"),
         ("swapping-after-old", "old"),
         ("swapping-after-new", "new"),
         ("new-live", "new"),
@@ -889,6 +889,42 @@ def test_recovery_at_each_phase_boundary_is_complete_and_idempotent(
     assert _tree_bytes(workspace.wiki_dir) == recovered
 
 
+@pytest.mark.parametrize(
+    ("phase", "expected_writes"),
+    [
+        ("raw-persisted", ["swapping", "new-live"]),
+        ("swapping", ["new-live"]),
+    ],
+)
+def test_later_accepted_recovery_only_publishes_monotonic_phases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    expected_writes: list[str],
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    expected_wiki = _tree_bytes(prepared.prospective_wiki)
+    _persist_raw(prepared, source)
+    _set_phase(prepared, phase)
+    writes: list[str] = []
+    original_write = transactions._write_manifest  # pyright: ignore[reportPrivateUsage]
+
+    def record_write(
+        transaction_dir: Path,
+        manifest: transactions._Manifest,  # pyright: ignore[reportPrivateUsage]
+    ) -> None:
+        writes.append(manifest.phase)
+        original_write(transaction_dir, manifest)
+
+    monkeypatch.setattr(transactions, "_write_manifest", record_write)
+
+    recover_transactions(prepared.workspace)
+
+    assert writes == expected_writes
+    assert _tree_bytes(prepared.workspace.wiki_dir) == expected_wiki
+    assert not prepared.transaction_dir.exists()
+
+
 def test_accepted_recovery_blocks_corrupt_transaction_owned_tree(tmp_path: Path) -> None:
     prepared, source = _prepare(tmp_path)
     live_wiki = _tree_bytes(prepared.workspace.wiki_dir)
@@ -928,6 +964,53 @@ def test_accepted_recovery_blocks_when_raw_persistence_is_ambiguous(tmp_path: Pa
     assert _tree_bytes(prepared.workspace.wiki_dir) == live_after_external_edit
     assert (prepared.workspace.root / source.stored_relative_path).read_bytes() == source.content
     assert prepared.transaction_dir.is_dir()
+
+
+@pytest.mark.parametrize("phase", ["raw-persisted", "swapping"])
+def test_later_accepted_recovery_retains_evidence_when_raw_is_missing_and_live_changed(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    _persist_raw(prepared, source)
+    _set_phase(prepared, phase)
+    (prepared.workspace.root / source.stored_relative_path).unlink()
+    (prepared.workspace.wiki_dir / "external.md").write_text(
+        "external live bytes\n",
+        encoding="utf-8",
+    )
+    actor_live = _tree_bytes(prepared.workspace.wiki_dir)
+    prospective = _tree_bytes(prepared.prospective_wiki)
+    review = (prepared.transaction_dir / "review.json").read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(TransactionError):
+            recover_transactions(prepared.workspace)
+
+        assert _manifest(prepared)["phase"] == phase
+        assert _tree_bytes(prepared.workspace.wiki_dir) == actor_live
+        assert _tree_bytes(prepared.prospective_wiki) == prospective
+        assert (prepared.transaction_dir / "review.json").read_bytes() == review
+
+
+def test_swapping_recovery_retains_evidence_when_pre_swap_topology_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    _persist_raw(prepared, source)
+    _set_phase(prepared, "swapping")
+    shutil.rmtree(prepared.prospective_wiki)
+    live = _tree_bytes(prepared.workspace.wiki_dir)
+    review = (prepared.transaction_dir / "review.json").read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(TransactionError):
+            recover_transactions(prepared.workspace)
+
+        assert _manifest(prepared)["phase"] == "swapping"
+        assert _tree_bytes(prepared.workspace.wiki_dir) == live
+        assert not prepared.prospective_wiki.exists()
+        assert (prepared.transaction_dir / "review.json").read_bytes() == review
 
 
 def test_accepted_raw_link_with_unreadable_identity_preserves_journal(
@@ -1443,17 +1526,40 @@ def test_manifest_update_does_not_follow_a_planted_fixed_temp_symlink(
     assert sentinel.read_text(encoding="utf-8") == "outside stays unchanged\n"
 
 
-def test_raw_persisted_recovery_restores_the_only_wiki_copy(tmp_path: Path) -> None:
+def test_legacy_raw_persisted_recovery_restores_the_only_wiki_copy(tmp_path: Path) -> None:
     prepared, source = _prepare(tmp_path)
     old_tree = _tree_bytes(prepared.workspace.wiki_dir)
     _persist_raw(prepared, source)
     _set_phase(prepared, "raw-persisted")
+    _set_legacy_schema(prepared)
     prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
 
     recover_transactions(prepared.workspace)
 
     assert _tree_bytes(prepared.workspace.wiki_dir) == old_tree
     assert not prepared.transaction_dir.exists()
+
+
+def test_schema_v2_raw_persisted_recovery_retains_impossible_backup_topology(
+    tmp_path: Path,
+) -> None:
+    prepared, source = _prepare(tmp_path)
+    prospective = _tree_bytes(prepared.prospective_wiki)
+    review = (prepared.transaction_dir / "review.json").read_bytes()
+    _persist_raw(prepared, source)
+    _set_phase(prepared, "raw-persisted")
+    prepared.workspace.wiki_dir.rename(prepared.backup_wiki)
+    backup = _tree_bytes(prepared.backup_wiki)
+
+    for _attempt in range(2):
+        with pytest.raises(TransactionError):
+            recover_transactions(prepared.workspace)
+
+        assert _manifest(prepared)["phase"] == "raw-persisted"
+        assert not prepared.workspace.wiki_dir.exists()
+        assert _tree_bytes(prepared.backup_wiki) == backup
+        assert _tree_bytes(prepared.prospective_wiki) == prospective
+        assert (prepared.transaction_dir / "review.json").read_bytes() == review
 
 
 def test_prepare_fsyncs_the_transactions_parent_after_directory_creation(
@@ -2024,3 +2130,27 @@ def test_discard_syncs_the_transaction_parent_after_owned_cleanup(
 
     assert observations
     assert observations[-1] is False
+
+
+def test_quiescent_workspace_yields_only_after_recovery(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+
+    with transactions.quiescent_workspace(workspace) as quiescent:
+        assert quiescent.workspace == workspace
+        assert (workspace.root / ".bundlewalker/transaction.lock").is_file()
+
+
+def test_quiescent_workspace_preserves_and_rejects_pending_review(tmp_path: Path) -> None:
+    prepared, _source = _prepare(tmp_path)
+
+    with (
+        pytest.raises(ReviewPendingError) as raised,
+        transactions.quiescent_workspace(prepared.workspace),
+    ):
+        pytest.fail("pending review must prevent a quiescent snapshot")
+
+    assert raised.value.review_id == prepared.transaction_id
+    assert prepared.transaction_dir.is_dir()
+    pending = get_pending_review(prepared.workspace)
+    assert pending is not None
+    assert pending.review_id == prepared.transaction_id

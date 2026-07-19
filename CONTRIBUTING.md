@@ -61,6 +61,15 @@ Convention presets are packaged Markdown resources under
 `src/bundlewalker/convention_presets/`. Treat both sets as versioned product inputs: review their
 behavioral effect and keep their package-loading tests current.
 
+Historical release workspaces under `tests/fixtures/historical/` preserve files byte-for-byte from
+their recorded release provenance. Git and source distributions cannot represent an empty
+directory directly, so release-owned empty directories are listed in the BundleWalker-owned
+`empty-directories.json` sidecar outside the managed fixture roots. Historical tests must copy or
+inspect fixtures through `tests.historical_fixtures.HistoricalFixtures`; do not add `.gitkeep` or
+other placeholder bytes to a managed `raw/` or `wiki/` tree. When adding a historical fixture,
+record any release-created empty directory in the sidecar, keep representation metadata distinct
+from release provenance, and retain the explicit Hatch source-distribution inclusion contract.
+
 ## Development setup
 
 BundleWalker requires Python `>=3.13`. Use the locked dependency graph so local results match CI

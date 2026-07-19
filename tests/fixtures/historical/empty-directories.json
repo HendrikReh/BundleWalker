@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "empty_directories": [
+    "v1-clean/raw",
+    "v2-clean/raw",
+    "v3-clean/raw",
+    "v3-schema2-pending/raw"
+  ]
+}
