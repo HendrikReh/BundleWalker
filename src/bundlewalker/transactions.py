@@ -232,11 +232,7 @@ def _inspect_private_transaction_state(
     root_descriptor: int,
     private_descriptor: int,
 ) -> TransactionDiagnosticStatus:
-    lock_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
+    lock_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     lock_descriptor = _open_optional_diagnostic_node(
         LOCK_NAME,
         lock_flags,
@@ -371,9 +367,7 @@ def _diagnostic_topology_is_valid(
     backup_kind = _diagnostic_backup_kind(transaction_descriptor)
     if manifest.phase in {"prepared", "accepted", "raw-persisted"}:
         return (
-            live_kind == "directory"
-            and prospective_kind == "directory"
-            and backup_kind == "absent"
+            live_kind == "directory" and prospective_kind == "directory" and backup_kind == "absent"
         )
     if live_kind not in {"directory", "absent"}:
         return False
@@ -1982,9 +1976,7 @@ def _load_diagnostic_manifest(
     try:
         descriptor = os.open(
             _MANIFEST_NAME,
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
             dir_fd=transaction_descriptor,
         )
         metadata = os.fstat(descriptor)
