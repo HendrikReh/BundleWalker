@@ -42,6 +42,11 @@ jobs:
         run: uv lock --check
       - name: Run offline tests
         run: uv run pytest -m 'not eval' -q
+      - name: Run benchmark correctness smoke
+        run: >-
+          uv run python -m benchmarks run --profiles smoke --correctness-only
+          --output "$RUNNER_TEMP/benchmark-smoke.json"
+          --work-root "$RUNNER_TEMP/benchmark-work"
       - name: Check formatting
         run: uv run ruff format --check .
       - name: Lint
