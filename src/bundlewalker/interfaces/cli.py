@@ -12,12 +12,19 @@ import typer
 from bundlewalker.application import (
     ApplicationError,
     ApplicationErrorCode,
+    DiagnosticsApplication,
     LifecycleApplication,
     ReviewResult,
     WorkspaceApplication,
 )
 from bundlewalker.conventions import ConventionsStyle
 from bundlewalker.errors import BundleWalkerError, UsageError
+from bundlewalker.interfaces.doctor import (
+    SupportReportTargetError,
+    SupportReportWriteError,
+    render_diagnostic_lines,
+    write_support_report,
+)
 from bundlewalker.workspace import Workspace, discover_workspace, initialize_workspace
 
 app = typer.Typer(
@@ -34,7 +41,7 @@ app.add_typer(workspace_app, name="workspace")
 @app.callback()
 def main(context: typer.Context) -> None:
     """Build and maintain a local, review-first OKF knowledge workspace."""
-    if context.invoked_subcommand in {None, "init", "workspace"}:
+    if context.invoked_subcommand in {None, "doctor", "init", "workspace"}:
         return
     try:
         context.obj = discover_workspace()
@@ -60,6 +67,37 @@ def init_command(
     except BundleWalkerError as exc:
         _exit_for_error(exc)
     typer.echo(f"Initialized BundleWalker workspace at {workspace.root}")
+
+
+@app.command("doctor")
+def doctor_command(
+    path: Path | None = typer.Argument(None),  # noqa: B008
+    report: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--report",
+        metavar="REPORT.json",
+    ),
+) -> None:
+    """Diagnose local BundleWalker health without repairing workspace state."""
+    application = DiagnosticsApplication()
+    result = application.run(path)
+    for line in render_diagnostic_lines(result):
+        typer.echo(line)
+    if report is not None:
+        try:
+            write_support_report(application.support_report(result), report)
+        except SupportReportTargetError:
+            typer.echo(
+                "Error: support report target must be a new file",
+                err=True,
+            )
+            raise typer.Exit(code=2) from None
+        except SupportReportWriteError:
+            typer.echo("Error: support report could not be written", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo("Support report written.")
+    if result.counts.failures > 0:
+        raise typer.Exit(code=1)
 
 
 @workspace_app.command("status")
