@@ -264,21 +264,49 @@ def _unlink_owned(path: Path, identity: tuple[int, int]) -> bool:
         except FileNotFoundError:
             return False
 
-        try:
-            _require_owned_path(candidate, identity)
-        except OSError:
+        if not _unlink_quarantined_owned(quarantine, identity):
             try:
                 os.link(candidate, path)
             except OSError:
                 return False
-            candidate.unlink()
+            os.unlink(candidate)
             return False
-
-        candidate.unlink()
         return True
     finally:
         with suppress(OSError):
             quarantine.rmdir()
+
+
+def _unlink_quarantined_owned(quarantine: Path, identity: tuple[int, int]) -> bool:
+    directory_descriptor = os.open(
+        quarantine,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    candidate_descriptor = -1
+    try:
+        candidate_descriptor = os.open(
+            "candidate",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_descriptor,
+        )
+        descriptor_state = os.fstat(candidate_descriptor)
+        path_state = os.stat("candidate", dir_fd=directory_descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(descriptor_state.st_mode)
+            or (descriptor_state.st_dev, descriptor_state.st_ino) != identity
+            or (path_state.st_dev, path_state.st_ino) != identity
+        ):
+            return False
+        os.unlink("candidate", dir_fd=directory_descriptor)
+        return True
+    finally:
+        try:
+            if candidate_descriptor >= 0:
+                descriptor_to_close = candidate_descriptor
+                candidate_descriptor = -1
+                os.close(descriptor_to_close)
+        finally:
+            os.close(directory_descriptor)
 
 
 def _fsync_parent(path: Path) -> None:
