@@ -109,7 +109,19 @@ jobs:
           uv venv --python "3.13" .testpypi-venv
           uv pip install --python .testpypi-venv/bin/python dist/*.whl
           uv pip uninstall --python .testpypi-venv/bin/python bundlewalker
-          uv pip install --python .testpypi-venv/bin/python --no-deps --default-index https://test.pypi.org/simple "bundlewalker==${{ inputs.version }}"
+          retry_delays=(5 10 20 40 80)
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python .testpypi-venv/bin/python --no-deps --default-index https://test.pypi.org/simple "bundlewalker==${{ inputs.version }}"; then
+              break
+            fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "::error::TestPyPI did not expose bundlewalker==${{ inputs.version }} after 6 attempts."
+              exit 1
+            fi
+            delay="${retry_delays[$((attempt - 1))]}"
+            echo "::notice::TestPyPI has not exposed bundlewalker==${{ inputs.version }}; retrying in ${delay}s after attempt ${attempt}/6."
+            sleep "$delay"
+          done
           test "$(.testpypi-venv/bin/python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = "${{ inputs.version }}"
           .testpypi-venv/bin/bundlewalker --help
           .testpypi-venv/bin/bundlewalker-mcp --help
