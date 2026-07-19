@@ -11,11 +11,13 @@ from pathlib import Path
 
 import pytest
 
+import benchmarks.worker as worker
 from benchmarks.contracts import SampleObservation, ScenarioName
 from benchmarks.fixtures import generate_fixture
 from benchmarks.profiles import PROFILES
 from benchmarks.scenarios import SCENARIOS
 from benchmarks.scenarios.mcp_startup import EXPECTED_TOOL_NAMES, run_mcp_startup
+from bundlewalker.okf.lint import lint_bundle
 
 PROJECT_ROOT = Path(__file__).parents[2]
 WORKER_TIMEOUT_SECONDS = 30
@@ -197,6 +199,41 @@ def test_worker_rejects_non_generated_fixture_identity(tmp_path: Path) -> None:
     )
 
     _assert_bounded_failure(result, output, "ValueError")
+
+
+def test_worker_rejects_same_size_lint_valid_fixture_mutation(tmp_path: Path) -> None:
+    fixture = generate_fixture(tmp_path / "fixture", PROFILES["smoke"])
+    concept = fixture.workspace.wiki_dir / "sources" / "concept-000000.md"
+    original = concept.read_bytes()
+    padding_index = original.rfind(b"x")
+    assert padding_index >= 0
+    concept.write_bytes(original[:padding_index] + b"y" + original[padding_index + 1 :])
+    assert concept.stat().st_size == len(original)
+    assert lint_bundle(fixture.workspace.wiki_dir, fixture.workspace.root) == []
+    output = tmp_path / "mutated-fixture.json"
+
+    result = _run_worker(
+        scenario="status",
+        workspace=fixture.workspace.root,
+        profile="smoke",
+        output=output,
+    )
+
+    _assert_bounded_failure(result, output, "ValueError")
+
+
+def test_suite_v1_tree_digest_catalog_is_closed_and_matches_generated_smoke(
+    tmp_path: Path,
+) -> None:
+    assert dict(worker.SUITE_V1_TREE_SHA256) == {
+        "smoke": "9b9a039500fde21786f3f467023f68d43d4446059b21a3f68dfbc67b1c1ba52d",
+        "small": "8ccea12ff08df9cfc02141658f577674727c6f63b15aadbfe762092fe836fb45",
+        "medium": "2e8849035a796bb8dd95d7aa5144e6d326bf08bed39c308101dbd5e1ecc3b7cb",
+        "large": "669d667ae88ecbe628e3cce5703a3ded4aef2e4323c698ca5478bfeb4ba7f97d",
+        "probe": "d0801c0dbd41b424bfd57fbed33ec5a28e294d37d1303c9b6d189438d2675f9e",
+    }
+    fixture = generate_fixture(tmp_path / "fixture", PROFILES["smoke"])
+    assert worker.SUITE_V1_TREE_SHA256["smoke"] == fixture.tree_sha256
 
 
 @pytest.mark.parametrize("boundary", ["workspace_symlink", "nested_path"])

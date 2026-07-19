@@ -7,8 +7,10 @@ import argparse
 import os
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
+from typing import Final
 
 from benchmarks.contracts import ScenarioName, WorkspaceProfile
 from benchmarks.evidence import write_new_json
@@ -36,6 +38,18 @@ _PRESENT_QUERY = "benchmark-needle"
 _ABSENT_QUERY = "benchmark-absent-needle"
 _READ_DOCUMENT_INDEX = 42
 _TYPE_RATIOS = (1, 4, 3, 2)
+
+# Frozen suite-v1 identities, derived once from the deterministic official profile generator.
+# Any generator change that alters these complete-tree digests requires a new suite version.
+SUITE_V1_TREE_SHA256: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "smoke": "9b9a039500fde21786f3f467023f68d43d4446059b21a3f68dfbc67b1c1ba52d",
+        "small": "8ccea12ff08df9cfc02141658f577674727c6f63b15aadbfe762092fe836fb45",
+        "medium": "2e8849035a796bb8dd95d7aa5144e6d326bf08bed39c308101dbd5e1ecc3b7cb",
+        "large": "669d667ae88ecbe628e3cce5703a3ded4aef2e4323c698ca5478bfeb4ba7f97d",
+        "probe": "d0801c0dbd41b424bfd57fbed33ec5a28e294d37d1303c9b6d189438d2675f9e",
+    }
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -127,13 +141,16 @@ def _reconstruct_fixture(workspace_path: Path, profile: WorkspaceProfile) -> Gen
         raise ValueError("generated fixture byte size does not match its profile")
     if lint_bundle(workspace.wiki_dir, workspace.root):
         raise ValueError("generated fixture must pass deterministic lint")
+    actual_tree_sha256 = tree_sha256(workspace.root)
+    if actual_tree_sha256 != SUITE_V1_TREE_SHA256[profile.name]:
+        raise ValueError("generated fixture tree identity does not match suite v1")
 
     return GeneratedFixture(
         workspace=workspace,
         profile=profile,
         exact_wiki_bytes=exact_wiki_bytes,
         exact_workspace_bytes=_regular_file_size(workspace.root),
-        tree_sha256=tree_sha256(workspace.root),
+        tree_sha256=actual_tree_sha256,
         concept_ids=expected_ids,
         present_query=_PRESENT_QUERY,
         absent_query=_ABSENT_QUERY,
