@@ -22,7 +22,7 @@ from bundlewalker.application import (
     DiagnosticsDependencies,
     DiagnosticSeverity,
 )
-from bundlewalker.compatibility import CompatibilityStatus, WorkspaceCompatibility
+from bundlewalker.compatibility import CompatibilityStatus
 from bundlewalker.transactions import TransactionDiagnosticStatus
 from bundlewalker.workspace import Workspace, initialize_workspace
 
@@ -116,6 +116,46 @@ def test_diagnostics_warning_policy_for_optional_and_experimental_environment(
     assert checks["storage.disk"].severity is DiagnosticSeverity.WARNING
 
 
+@pytest.mark.parametrize(
+    ("environment", "model_severity", "credential_summary"),
+    [
+        (
+            {"BUNDLEWALKER_MODEL": " \t\n "},
+            DiagnosticSeverity.WARNING,
+            "Provider credentials were not checked because no model is configured.",
+        ),
+        (
+            {"BUNDLEWALKER_MODEL": "unknown:private-model"},
+            DiagnosticSeverity.PASS,
+            "Credential verification is unavailable for the configured provider.",
+        ),
+        (
+            {"BUNDLEWALKER_MODEL": "openai:private-model"},
+            DiagnosticSeverity.PASS,
+            "The OpenAI credential is not configured.",
+        ),
+        (
+            {"BUNDLEWALKER_MODEL": f"{' ' * 64}openai:private-model"},
+            DiagnosticSeverity.PASS,
+            "The OpenAI credential is not configured.",
+        ),
+    ],
+)
+def test_diagnostics_model_and_credential_policy_is_bounded_and_normalized(
+    tmp_path: Path,
+    environment: dict[str, str],
+    model_severity: DiagnosticSeverity,
+    credential_summary: str,
+) -> None:
+    result = DiagnosticsApplication(replace(_dependencies(), environment=environment)).run(tmp_path)
+    checks = _by_code(result)
+
+    assert checks["configuration.model"].severity is model_severity
+    assert checks["configuration.credential"].severity is DiagnosticSeverity.WARNING
+    assert checks["configuration.credential"].summary == credential_summary
+    assert all(value not in result.model_dump_json() for value in environment.values())
+
+
 def test_diagnostics_unsupported_python_and_missing_mcp_are_failures(
     tmp_path: Path,
 ) -> None:
@@ -139,6 +179,99 @@ def test_diagnostics_unsupported_python_and_missing_mcp_are_failures(
     assert checks["mcp.package"].severity is DiagnosticSeverity.FAILURE
     assert checks["mcp.entrypoint"].severity is DiagnosticSeverity.FAILURE
     assert result.overall is DiagnosticSeverity.FAILURE
+
+
+@pytest.mark.parametrize(
+    ("python_version", "severity"),
+    [
+        ((3, 13, 0), DiagnosticSeverity.PASS),
+        ((3, 14, 9), DiagnosticSeverity.PASS),
+        ((3, 12, 9), DiagnosticSeverity.FAILURE),
+        ((3, 15, 0), DiagnosticSeverity.FAILURE),
+    ],
+)
+def test_diagnostics_python_support_policy(
+    tmp_path: Path,
+    python_version: tuple[int, int, int],
+    severity: DiagnosticSeverity,
+) -> None:
+    result = DiagnosticsApplication(replace(_dependencies(), python_version=python_version)).run(
+        tmp_path
+    )
+
+    assert _by_code(result)["runtime.python"].severity is severity
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "normalized_name", "severity"),
+    [
+        ("Darwin", "macos", DiagnosticSeverity.PASS),
+        ("Linux", "linux", DiagnosticSeverity.PASS),
+        ("Windows", "windows", DiagnosticSeverity.WARNING),
+        ("FreeBSD", "other", DiagnosticSeverity.WARNING),
+    ],
+)
+def test_diagnostics_platform_support_policy(
+    tmp_path: Path,
+    platform_name: str,
+    normalized_name: str,
+    severity: DiagnosticSeverity,
+) -> None:
+    result = DiagnosticsApplication(replace(_dependencies(), platform_name=platform_name)).run(
+        tmp_path
+    )
+
+    assert result.platform == normalized_name
+    assert _by_code(result)["runtime.platform"].severity is severity
+
+
+@pytest.mark.parametrize(
+    ("package_available", "entrypoint_available"),
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+def test_diagnostics_mcp_package_and_entrypoint_are_independent(
+    tmp_path: Path,
+    package_available: bool,
+    entrypoint_available: bool,
+) -> None:
+    def module_available(_name: str) -> bool:
+        return package_available
+
+    def executable_lookup(_name: str) -> str | None:
+        return "/private/bin/bundlewalker-mcp" if entrypoint_available else None
+
+    result = DiagnosticsApplication(
+        replace(
+            _dependencies(),
+            module_available=module_available,
+            executable_lookup=executable_lookup,
+        )
+    ).run(tmp_path)
+    checks = _by_code(result)
+
+    assert checks["mcp.package"].severity is (
+        DiagnosticSeverity.PASS if package_available else DiagnosticSeverity.FAILURE
+    )
+    assert checks["mcp.entrypoint"].severity is (
+        DiagnosticSeverity.PASS if entrypoint_available else DiagnosticSeverity.FAILURE
+    )
+    assert "/private" not in result.model_dump_json()
+
+
+def test_diagnostics_disk_inspection_unavailability_is_a_bounded_warning(
+    tmp_path: Path,
+) -> None:
+    marker = "private-disk-inspection-marker"
+
+    def fail_disk(_path: Path) -> int:
+        raise OSError(marker)
+
+    result = DiagnosticsApplication(replace(_dependencies(), disk_free=fail_disk)).run(tmp_path)
+    check = _by_code(result)["storage.disk"]
+
+    assert check.severity is DiagnosticSeverity.WARNING
+    assert check.summary == "Available disk space could not be inspected."
+    assert marker not in result.model_dump_json()
 
 
 def test_diagnostics_unexpected_defect_uses_bounded_application_error(
@@ -177,7 +310,10 @@ def test_diagnostics_current_workspace_passes_workspace_checks(tmp_path: Path) -
     )
 
 
-@pytest.mark.parametrize("start_kind", ["workspace", "directory", "file"])
+@pytest.mark.parametrize(
+    "start_kind",
+    ["workspace_directory", "workspace_config", "ancestor_directory", "ancestor_file"],
+)
 def test_diagnostics_preserves_workspace_start_semantics(
     tmp_path: Path,
     start_kind: str,
@@ -188,9 +324,10 @@ def test_diagnostics_preserves_workspace_start_semantics(
     start_file = child / "note.txt"
     start_file.write_bytes(b"start file\n")
     starts = {
-        "workspace": workspace.root,
-        "directory": child,
-        "file": start_file,
+        "workspace_directory": workspace.root,
+        "workspace_config": workspace.root / "bundlewalker.toml",
+        "ancestor_directory": child,
+        "ancestor_file": start_file,
     }
 
     result = DiagnosticsApplication(_dependencies()).run(starts[start_kind])
@@ -198,10 +335,23 @@ def test_diagnostics_preserves_workspace_start_semantics(
     assert _by_code(result)["workspace.discovery"].severity is DiagnosticSeverity.PASS
 
 
+def test_diagnostics_none_start_discovers_from_current_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    child = workspace.root / "nested"
+    child.mkdir()
+    monkeypatch.chdir(child)
+
+    result = DiagnosticsApplication(_dependencies()).run()
+
+    assert _by_code(result)["workspace.discovery"].severity is DiagnosticSeverity.PASS
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
 def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspection(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     unsafe_kind: str,
 ) -> None:
     workspace = initialize_workspace(tmp_path / "ancestor", occurred_at=NOW)
@@ -213,22 +363,13 @@ def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspect
     else:
         unsafe_config.mkdir()
 
-    calls = {"workspace": 0, "transaction": 0}
-    discover_workspace = diagnostics_module.discover_workspace
-
-    def count_workspace_discovery(start: Path | None = None) -> Workspace:
-        calls["workspace"] += 1
-        return discover_workspace(start)
+    transaction_calls = 0
 
     def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
-        calls["transaction"] += 1
+        nonlocal transaction_calls
+        transaction_calls += 1
         return TransactionDiagnosticStatus.CLEAN
 
-    monkeypatch.setattr(
-        diagnostics_module,
-        "discover_workspace",
-        count_workspace_discovery,
-    )
     dependencies = replace(_dependencies(), transaction_inspector=count_transaction)
 
     result = DiagnosticsApplication(dependencies).run(child)
@@ -243,7 +384,37 @@ def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspect
         "transactions.state",
     ):
         assert checks[code].severity is DiagnosticSeverity.WARNING
-    assert calls == {"workspace": 0, "transaction": 0}
+    assert transaction_calls == 0
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
+def test_diagnostics_explicit_unsafe_config_start_never_falls_through(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "ancestor", occurred_at=NOW)
+    child = workspace.root / "nested"
+    child.mkdir()
+    unsafe_config = child / "bundlewalker.toml"
+    if unsafe_kind == "symlink":
+        unsafe_config.symlink_to(workspace.root / "bundlewalker.toml")
+    else:
+        unsafe_config.mkdir()
+    transaction_calls = 0
+
+    def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
+        nonlocal transaction_calls
+        transaction_calls += 1
+        return TransactionDiagnosticStatus.CLEAN
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), transaction_inspector=count_transaction)
+    ).run(unsafe_config)
+    checks = _by_code(result)
+
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
+    assert transaction_calls == 0
 
 
 def test_diagnostics_missing_workspace_fails_discovery_and_marks_dependents_skipped(
@@ -316,32 +487,32 @@ def test_diagnostics_noncurrent_compatibility_is_bounded_and_gates_current_inspe
     remediation_command: str,
 ) -> None:
     workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
-    calls = {"workspace": 0, "transaction": 0}
+    calls = {"configuration": 0, "transaction": 0}
 
-    def inspect_as_noncurrent(_start: Path | None = None) -> WorkspaceCompatibility:
-        return WorkspaceCompatibility(
-            root=workspace.root,
-            config_path=workspace.root / "bundlewalker.toml",
-            workspace_format_version=0,
-            status=status,
-            readable=False,
-            writable=False,
-            upgrade_available=status is CompatibilityStatus.UPGRADEABLE,
-        )
+    def inspect_as_noncurrent(
+        _config_path: Path,
+    ) -> tuple[CompatibilityStatus, None]:
+        return status, None
 
-    def count_workspace_discovery(_start: Path | None = None) -> Workspace:
-        calls["workspace"] += 1
-        return workspace
+    load_workspace_config = diagnostics_module.load_workspace_config
+
+    def count_configuration(config_path: Path) -> object:
+        calls["configuration"] += 1
+        return load_workspace_config(config_path)
 
     def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
         calls["transaction"] += 1
         return TransactionDiagnosticStatus.CLEAN
 
-    monkeypatch.setattr(diagnostics_module, "inspect_workspace", inspect_as_noncurrent)
     monkeypatch.setattr(
         diagnostics_module,
-        "discover_workspace",
-        count_workspace_discovery,
+        "_inspect_selected_workspace_config",
+        inspect_as_noncurrent,
+    )
+    monkeypatch.setattr(
+        diagnostics_module,
+        "load_workspace_config",
+        count_configuration,
     )
     dependencies = replace(_dependencies(), transaction_inspector=count_transaction)
 
@@ -353,7 +524,7 @@ def test_diagnostics_noncurrent_compatibility_is_bounded_and_gates_current_inspe
     assert checks["workspace.compatibility"].summary == summary
     assert remediation_command in " ".join(checks["workspace.compatibility"].remediation)
     assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
-    assert calls == {"workspace": 0, "transaction": 0}
+    assert calls == {"configuration": 0, "transaction": 0}
 
 
 def test_diagnostics_broken_structure_gates_permissions_and_transactions(

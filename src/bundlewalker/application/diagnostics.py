@@ -24,7 +24,11 @@ from bundlewalker.application.contracts import (
     SupportReport,
 )
 from bundlewalker.application.errors import ApplicationError, ApplicationErrorCode
-from bundlewalker.compatibility import CompatibilityStatus, inspect_workspace
+from bundlewalker.compatibility import (
+    CURRENT_WORKSPACE_FORMAT,
+    CompatibilityStatus,
+    read_workspace_format_version,
+)
 from bundlewalker.errors import BundleWalkerError
 from bundlewalker.transactions import (
     TransactionDiagnosticStatus,
@@ -37,8 +41,8 @@ from bundlewalker.workflows.context import (
 from bundlewalker.workspace import (
     CONFIG_FILENAME,
     Workspace,
-    discover_workspace,
-    find_workspace_config,
+    WorkspaceConfig,
+    load_workspace_config,
 )
 
 ONE_GIB = 1024**3
@@ -199,20 +203,10 @@ def _workspace_checks(
     dependencies: DiagnosticsDependencies,
 ) -> tuple[tuple[DiagnosticCheck, ...], Workspace | None]:
     try:
-        if not _nearest_workspace_config_is_safe(start):
-            return _unavailable_workspace_checks(
-                _check(
-                    "workspace.discovery",
-                    DiagnosticCategory.WORKSPACE,
-                    DiagnosticSeverity.FAILURE,
-                    "No usable BundleWalker workspace was found.",
-                    "Run `bundlewalker init PATH` or pass an existing workspace to "
-                    "`bundlewalker doctor PATH`.",
-                ),
-                _SKIPPED_CONFIGURATION,
-            )
-        find_workspace_config(start)
+        config_path = _find_nearest_workspace_config(start)
     except (BundleWalkerError, OSError):
+        config_path = None
+    if config_path is None:
         return _unavailable_workspace_checks(
             _check(
                 "workspace.discovery",
@@ -232,7 +226,7 @@ def _workspace_checks(
         "A BundleWalker workspace configuration was found.",
     )
     try:
-        compatibility = inspect_workspace(start)
+        compatibility_status, workspace_config = _inspect_selected_workspace_config(config_path)
     except (BundleWalkerError, OSError):
         return _unavailable_workspace_checks(
             discovery_check,
@@ -240,7 +234,7 @@ def _workspace_checks(
             configuration_severity=DiagnosticSeverity.FAILURE,
         )
 
-    if compatibility.status is not CompatibilityStatus.CURRENT:
+    if compatibility_status is not CompatibilityStatus.CURRENT:
         return (
             (
                 discovery_check,
@@ -250,7 +244,7 @@ def _workspace_checks(
                     DiagnosticSeverity.WARNING,
                     "Current-format configuration parsing was not attempted for this workspace.",
                 ),
-                _compatibility_failure(compatibility.status),
+                _compatibility_failure(compatibility_status),
                 _check(
                     "workspace.structure",
                     DiagnosticCategory.WORKSPACE,
@@ -267,14 +261,9 @@ def _workspace_checks(
             None,
         )
 
-    try:
-        workspace = discover_workspace(start)
-    except (BundleWalkerError, OSError):
-        return _unavailable_workspace_checks(
-            discovery_check,
-            "Workspace configuration is invalid or unreadable.",
-            configuration_severity=DiagnosticSeverity.FAILURE,
-        )
+    if workspace_config is None:
+        raise TypeError("current workspace inspection returned no configuration")
+    workspace = Workspace(root=config_path.parent, config=workspace_config)
 
     configuration_check = _check(
         "workspace.configuration",
@@ -353,19 +342,44 @@ def _workspace_checks(
     )
 
 
-def _nearest_workspace_config_is_safe(start: Path | None) -> bool:
-    candidate = (start or Path.cwd()).expanduser().resolve(strict=False)
-    if candidate.is_file():
-        candidate = candidate.parent
-    for directory in (candidate, *candidate.parents):
+def _find_nearest_workspace_config(start: Path | None) -> Path | None:
+    candidate = (start or Path.cwd()).expanduser()
+    try:
+        candidate_metadata = candidate.lstat()
+    except FileNotFoundError:
+        candidate_metadata = None
+
+    if candidate.name == CONFIG_FILENAME and candidate_metadata is not None:
+        if stat.S_ISREG(candidate_metadata.st_mode):
+            return candidate
+        return None
+
+    search_root = (
+        candidate.parent
+        if candidate_metadata is not None and stat.S_ISREG(candidate_metadata.st_mode)
+        else candidate
+    )
+    for directory in (search_root, *search_root.parents):
+        config_path = directory / CONFIG_FILENAME
         try:
-            metadata = (directory / CONFIG_FILENAME).lstat()
+            config_metadata = config_path.lstat()
         except FileNotFoundError:
             continue
-        except OSError:
-            return False
-        return stat.S_ISREG(metadata.st_mode)
-    return True
+        if stat.S_ISREG(config_metadata.st_mode):
+            return config_path
+        return None
+    return None
+
+
+def _inspect_selected_workspace_config(
+    config_path: Path,
+) -> tuple[CompatibilityStatus, WorkspaceConfig | None]:
+    version = read_workspace_format_version(config_path)
+    if version > CURRENT_WORKSPACE_FORMAT:
+        return CompatibilityStatus.TOO_NEW, None
+    if version < CURRENT_WORKSPACE_FORMAT:
+        return CompatibilityStatus.UNSUPPORTED, None
+    return CompatibilityStatus.CURRENT, load_workspace_config(config_path)
 
 
 def _unavailable_workspace_checks(
@@ -538,13 +552,18 @@ def _configuration_checks(
 
 
 def _model_configuration_facts(model_value: str) -> tuple[bool, bool]:
-    model_present = any(not character.isspace() for character in model_value)
-    bounded_prefix = model_value[:32]
+    meaningful_start = next(
+        (index for index, character in enumerate(model_value) if not character.isspace()),
+        None,
+    )
+    if meaningful_start is None:
+        return False, False
+    bounded_prefix = model_value[meaningful_start : meaningful_start + 32].strip()
     separator_index = bounded_prefix.find(":")
     provider_prefix = (
         bounded_prefix[:separator_index].strip().casefold() if separator_index >= 0 else ""
     )
-    return model_present, provider_prefix == "openai"
+    return True, provider_prefix == "openai"
 
 
 def _transaction_check(
