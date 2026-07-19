@@ -151,12 +151,12 @@ def test_environment_probe_uses_bounded_explicit_darwin_stat_command(
 ) -> None:
     calls: list[tuple[list[str | Path], dict[str, Any]]] = []
 
-    def run_stat(command: list[str | Path], **options: Any) -> subprocess.CompletedProcess[str]:
+    def open_stat(command: list[str | Path], **options: Any) -> _CompletedStat:
         calls.append((command, options))
-        return subprocess.CompletedProcess(command, 0, stdout="apfs\n", stderr="")
+        return _CompletedStat(b"apfs\n")
 
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(subprocess, "run", run_stat)
+    monkeypatch.setattr(subprocess, "Popen", open_stat)
 
     environment = collect_environment(tmp_path)
 
@@ -164,7 +164,7 @@ def test_environment_probe_uses_bounded_explicit_darwin_stat_command(
     assert calls == [
         (
             ["stat", "-f", "%T", tmp_path],
-            {"capture_output": True, "check": False, "text": True, "timeout": 5},
+            {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL},
         )
     ]
 
@@ -175,11 +175,11 @@ def test_environment_probe_rejects_unbounded_or_incomplete_output(
     monkeypatch: pytest.MonkeyPatch,
     stdout: str,
 ) -> None:
-    def run_stat(command: list[str | Path], **_options: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+    def open_stat(_command: list[str | Path], **_options: Any) -> _CompletedStat:
+        return _CompletedStat(stdout.encode())
 
     monkeypatch.setattr(platform, "system", lambda: "Linux")
-    monkeypatch.setattr(subprocess, "run", run_stat)
+    monkeypatch.setattr(subprocess, "Popen", open_stat)
 
     assert collect_environment(tmp_path).filesystem_type is None
 
@@ -291,9 +291,148 @@ def test_atomic_writer_never_deletes_an_unowned_temporary_replacement(
     with pytest.raises(OSError, match="injected publication failure"):
         write_new_text(destination, "ours\n")
 
-    replacements = list(tmp_path.glob("*.partial"))
-    assert len(replacements) == 1
-    assert replacements[0].read_text(encoding="utf-8") == "actor-owned\n"
+    assert "actor-owned\n" in {
+        item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()
+    }
+
+
+def test_atomic_writer_rejects_an_unowned_inode_published_during_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "preview.md"
+    actor_content = "actor-owned\n"
+    original_link = os.link
+
+    def replace_source_then_publish(source: Path, target: Path) -> None:
+        source.unlink()
+        source.write_text(actor_content, encoding="utf-8")
+        original_link(source, target)
+
+    monkeypatch.setattr(os, "link", replace_source_then_publish)
+
+    with pytest.raises(OSError, match="changed during publication"):
+        write_new_text(destination, "ours\n")
+
+    assert destination.read_text(encoding="utf-8") == actor_content
+
+
+def test_atomic_writer_preserves_replacement_installed_during_owned_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "preview.md"
+    actor_content = "actor-owned\n"
+    original_rename = os.rename
+    replacement_installed = False
+
+    def replace_then_quarantine(source: Path, target: Path) -> None:
+        nonlocal replacement_installed
+        source.unlink()
+        source.write_text(actor_content, encoding="utf-8")
+        replacement_installed = True
+        original_rename(source, target)
+
+    def fail_link(_source: Path, _target: Path) -> None:
+        raise OSError("injected publication failure")
+
+    monkeypatch.setattr(os, "link", fail_link)
+    monkeypatch.setattr(os, "rename", replace_then_quarantine)
+
+    with pytest.raises(OSError, match="injected publication failure"):
+        write_new_text(destination, "ours\n")
+
+    assert replacement_installed
+    assert actor_content in {
+        item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()
+    }
+
+
+def test_atomic_writer_cleans_up_after_initial_fstat_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "preview.md"
+    original_fstat = os.fstat
+    calls = 0
+
+    def fail_first_fstat(descriptor: int) -> os.stat_result:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("injected fstat failure")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(os, "fstat", fail_first_fstat)
+
+    with pytest.raises(OSError, match="injected fstat failure"):
+        write_new_text(destination, "ours\n")
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_atomic_writer_does_not_retry_an_ambiguous_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "preview.md"
+    original_close = os.close
+    close_calls = 0
+
+    def close_then_fail(descriptor: int) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        original_close(descriptor)
+        if close_calls == 1:
+            raise OSError("injected close failure")
+
+    monkeypatch.setattr(os, "close", close_then_fail)
+
+    with pytest.raises(OSError, match="injected close failure"):
+        write_new_text(destination, "ours\n")
+
+    assert close_calls == 2
+    assert not destination.exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_environment_probe_uses_a_bounded_pipe_instead_of_buffered_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read_descriptor, write_descriptor = os.pipe()
+    os.write(write_descriptor, b"apfs\n")
+    os.close(write_descriptor)
+
+    class CompletedStat:
+        def __init__(self) -> None:
+            self.stdout = os.fdopen(read_descriptor, "rb", buffering=0)
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    process = CompletedStat()
+
+    def open_stat(*_arguments: Any, **_options: Any) -> CompletedStat:
+        return process
+
+    def reject_buffered_capture(*_arguments: Any, **_options: Any) -> None:
+        raise AssertionError("subprocess.run must not buffer stat output")
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(subprocess, "Popen", open_stat)
+    monkeypatch.setattr(subprocess, "run", reject_buffered_capture)
+
+    assert collect_environment(tmp_path).filesystem_type == "apfs"
+    assert process.stdout.closed
 
 
 def _observations(scenario: ScenarioName, count: int) -> tuple[SampleObservation, ...]:
@@ -306,3 +445,26 @@ def _observations(scenario: ScenarioName, count: int) -> tuple[SampleObservation
         )
         for value in range(1, count + 1)
     )
+
+
+class _CompletedStat:
+    def __init__(self, output: bytes) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        os.write(write_descriptor, output)
+        os.close(write_descriptor)
+        self.stdout = os.fdopen(read_descriptor, "rb", buffering=0)
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        self.returncode = 0
+        return 0
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9

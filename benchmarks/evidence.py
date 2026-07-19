@@ -7,8 +7,11 @@ import json
 import os
 import platform
 import secrets
+import selectors
 import stat
 import subprocess
+import tempfile
+import time
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
@@ -164,18 +167,11 @@ def _portable_filesystem_type(root: Path) -> str | None:
     else:
         return None
 
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=_STAT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    output = _bounded_stat_output(command)
+    if output is None:
         return None
-    lines = result.stdout.splitlines()
-    if result.returncode != 0 or len(lines) != 1:
+    lines = output.splitlines()
+    if len(lines) != 1:
         return None
     filesystem_type = lines[0]
     if not 1 <= len(filesystem_type) <= _MAX_FILESYSTEM_TYPE_CHARACTERS:
@@ -190,28 +186,38 @@ def _write_new_bytes(path: Path, content: bytes) -> None:
         raise FileExistsError(path)
 
     temporary, descriptor = _create_temporary_sibling(path)
-    identity = os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino
+    identity: tuple[int, int] | None = None
     try:
         metadata = os.fstat(descriptor)
+        identity = metadata.st_dev, metadata.st_ino
         if not stat.S_ISREG(metadata.st_mode):
             raise OSError("temporary evidence output is not a regular file")
         os.fchmod(descriptor, 0o600)
         _write_all(descriptor, content)
         os.fsync(descriptor)
-        os.close(descriptor)
+        descriptor_to_close = descriptor
         descriptor = -1
+        os.close(descriptor_to_close)
         _require_owned_path(temporary, identity)
         os.link(temporary, path)
+        _require_owned_path(path, identity, message="evidence output changed during publication")
     except BaseException:
-        if descriptor >= 0:
+        if identity is None and descriptor >= 0:
             with suppress(OSError):
-                os.close(descriptor)
-        removed = _unlink_owned(temporary, identity)
-        if removed:
+                metadata = os.fstat(descriptor)
+                identity = metadata.st_dev, metadata.st_ino
+        if descriptor >= 0:
+            descriptor_to_close = descriptor
+            descriptor = -1
+            with suppress(OSError):
+                os.close(descriptor_to_close)
+        if identity is not None:
+            _unlink_owned(temporary, identity)
             with suppress(OSError):
                 _fsync_parent(path)
         raise
 
+    assert identity is not None
     removed = _unlink_owned(temporary, identity)
     if not removed:
         raise OSError("temporary evidence output changed during publication")
@@ -238,21 +244,41 @@ def _write_all(descriptor: int, content: bytes) -> None:
         remaining = remaining[written:]
 
 
-def _require_owned_path(path: Path, identity: tuple[int, int]) -> None:
+def _require_owned_path(
+    path: Path,
+    identity: tuple[int, int],
+    *,
+    message: str = "temporary evidence output changed during creation",
+) -> None:
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity:
-        raise OSError("temporary evidence output changed during creation")
+        raise OSError(message)
 
 
 def _unlink_owned(path: Path, identity: tuple[int, int]) -> bool:
+    quarantine = Path(tempfile.mkdtemp(prefix=f".{path.name}.cleanup-", dir=path.parent))
+    candidate = quarantine / "candidate"
     try:
-        _require_owned_path(path, identity)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return False
-    path.unlink()
-    return True
+        try:
+            os.rename(path, candidate)
+        except FileNotFoundError:
+            return False
+
+        try:
+            _require_owned_path(candidate, identity)
+        except OSError:
+            try:
+                os.link(candidate, path)
+            except OSError:
+                return False
+            candidate.unlink()
+            return False
+
+        candidate.unlink()
+        return True
+    finally:
+        with suppress(OSError):
+            quarantine.rmdir()
 
 
 def _fsync_parent(path: Path) -> None:
@@ -264,3 +290,52 @@ def _fsync_parent(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _bounded_stat_output(command: list[str | Path]) -> str | None:
+    process: subprocess.Popen[bytes] | None = None
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + _STAT_TIMEOUT_SECONDS
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if process.stdout is None:
+            return None
+        selector.register(process.stdout, selectors.EVENT_READ)
+        captured = bytearray()
+        while len(captured) <= _MAX_FILESYSTEM_TYPE_CHARACTERS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise subprocess.TimeoutExpired(command, _STAT_TIMEOUT_SECONDS)
+            chunk = os.read(process.stdout.fileno(), 66 - len(captured))
+            if not chunk:
+                break
+            captured.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, _STAT_TIMEOUT_SECONDS)
+        return_code = process.wait(timeout=remaining)
+        if return_code != 0 or len(captured) > 65:
+            return None
+        try:
+            return captured.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        selector.close()
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    with suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=1)
