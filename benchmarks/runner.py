@@ -116,10 +116,7 @@ class AnchoredPublication:
 
     def publish(self, writer: Callable[[Path], None]) -> None:
         self._validate_identity()
-        if sys.platform == "darwin":
-            self._publish_from_directory(writer)
-        else:
-            writer(Path(f"/dev/fd/{self.descriptor}") / self.leaf)
+        self._publish_from_directory(writer)
         self._validate_identity()
         os.fsync(self.descriptor)
         self._validate_identity()
@@ -290,8 +287,23 @@ def _validate_run_paths(config: RunConfig) -> None:
     output_parent = _require_unaliased_directory(config.output.parent)
     output = output_parent / config.output.name
     work_root = _resolve_intended_directory(config.work_root)
+    _reject_bundlewalker_workspace_path(output)
+    _reject_bundlewalker_workspace_path(work_root)
     if output == work_root or output.is_relative_to(work_root) or work_root.is_relative_to(output):
         raise BenchmarkRunError("benchmark output must be outside the work root")
+
+
+def _reject_bundlewalker_workspace_path(candidate: Path) -> None:
+    for ancestor in (candidate, *candidate.parents):
+        marker = ancestor / "bundlewalker.toml"
+        try:
+            marker_state = marker.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise BenchmarkRunError("benchmark workspace marker could not be validated") from error
+        if stat.S_ISREG(marker_state.st_mode):
+            raise BenchmarkRunError("benchmark paths must be outside BundleWalker workspaces")
 
 
 def _require_unaliased_directory(path: Path) -> Path:
@@ -695,7 +707,19 @@ def _snapshot_tree(
             raise BenchmarkRunError("generated fixture topology root must be a directory")
         metadata: dict[str, _TreeMetadata] = {".": _tree_metadata(root_state)}
         declared_bytes = [0]
-        _preflight_directory(root_descriptor, "", metadata, limits, declared_bytes)
+        remaining_entries = [limits.max_entries - 1]
+        if remaining_entries[0] < 0:
+            raise BenchmarkRunError(
+                "generated fixture topology entries exceed the validation bound"
+            )
+        _preflight_directory(
+            root_descriptor,
+            "",
+            metadata,
+            limits,
+            declared_bytes,
+            remaining_entries,
+        )
         if expected is not None and metadata != {
             relative: _entry_metadata(entry) for relative, entry in expected.items()
         }:
@@ -715,8 +739,17 @@ def _snapshot_directory(
     snapshot: _TreeSnapshot,
     metadata: dict[str, _TreeMetadata],
 ) -> None:
-    with os.scandir(directory_descriptor) as iterator:
-        names = sorted(entry.name for entry in iterator)
+    prefix = "" if not relative_parent else f"{relative_parent}/"
+    expected_names = {
+        relative.removeprefix(prefix)
+        for relative in metadata
+        if relative != "."
+        and relative.startswith(prefix)
+        and "/" not in relative.removeprefix(prefix)
+    }
+    names = _bounded_directory_names(directory_descriptor, len(expected_names))
+    if set(names) != expected_names:
+        raise BenchmarkRunError("generated fixture topology changed during validation")
     for name in names:
         relative = name if not relative_parent else f"{relative_parent}/{name}"
         state = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
@@ -757,9 +790,10 @@ def _preflight_directory(
     metadata: dict[str, _TreeMetadata],
     limits: _TreeLimits,
     declared_bytes: list[int],
+    remaining_entries: list[int],
 ) -> None:
-    with os.scandir(directory_descriptor) as iterator:
-        names = sorted(entry.name for entry in iterator)
+    names = _bounded_directory_names(directory_descriptor, remaining_entries[0])
+    remaining_entries[0] -= len(names)
     for name in names:
         relative = name if not relative_parent else f"{relative_parent}/{name}"
         state = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
@@ -795,9 +829,29 @@ def _preflight_directory(
             )
             try:
                 _require_same_inode(state, os.fstat(child_descriptor))
-                _preflight_directory(child_descriptor, relative, metadata, limits, declared_bytes)
+                _preflight_directory(
+                    child_descriptor,
+                    relative,
+                    metadata,
+                    limits,
+                    declared_bytes,
+                    remaining_entries,
+                )
             finally:
                 os.close(child_descriptor)
+
+
+def _bounded_directory_names(directory_descriptor: int, maximum: int) -> list[str]:
+    names: list[str] = []
+    with os.scandir(directory_descriptor) as iterator:
+        for entry in iterator:
+            if len(names) >= maximum:
+                raise BenchmarkRunError(
+                    "generated fixture topology entries exceed the validation bound"
+                )
+            names.append(entry.name)
+    names.sort()
+    return names
 
 
 def _tree_metadata(

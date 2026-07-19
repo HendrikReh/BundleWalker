@@ -313,9 +313,6 @@ def _validate_full_policy_record(record: EvidenceRecord) -> None:
         except ValueError as error:
             raise ValueError("matrix evidence has an invalid capacity-stop position") from error
         expected_keys = catalog_keys[:stop_index]
-        expected_deadline = max(30_000_000_000, 3 * target_ns(record.capacity_stop.scenario))
-        if record.capacity_stop.deadline_ns != expected_deadline:
-            raise ValueError("matrix evidence has an invalid capacity-stop deadline")
     if actual_keys != expected_keys or len(actual_keys) != len(set(actual_keys)):
         raise ValueError("matrix evidence requires exact full-policy scenario-prefix coverage")
 
@@ -346,9 +343,16 @@ def _validate_capacity_stop_prefix(record: EvidenceRecord) -> None:
         stop_index = catalog_keys.index(stop_key)
     except ValueError as error:
         raise ValueError("capacity stop has an invalid scenario-prefix position") from error
+    expected_deadline = _capacity_stop_deadline_ns(record.capacity_stop.scenario)
+    if record.capacity_stop.deadline_ns != expected_deadline:
+        raise ValueError("evidence has an invalid capacity-stop deadline")
     actual_keys = tuple((scenario.profile, scenario.scenario) for scenario in record.scenarios)
     if actual_keys != catalog_keys[:stop_index] or len(actual_keys) != len(set(actual_keys)):
         raise ValueError("capacity stop requires exact scenario-prefix coverage")
+
+
+def _capacity_stop_deadline_ns(scenario: ScenarioName) -> int:
+    return max(30_000_000_000, 3 * target_ns(scenario))
 
 
 def _candidate_status(

@@ -327,3 +327,14 @@ def test_capacity_stop_report_rejects_a_gap_before_the_stop() -> None:
 
     with pytest.raises(ValueError, match="exact scenario-prefix"):
         render_report((gapped,), provisional=True)
+
+
+def test_capacity_stop_report_rejects_nonreference_deadline() -> None:
+    stopped = _capacity_stopped_record()
+    values = stopped.model_dump(mode="python")
+    assert stopped.capacity_stop is not None
+    values["capacity_stop"] = stopped.capacity_stop.model_copy(update={"deadline_ns": 1})
+    invalid = EvidenceRecord.model_validate(values)
+
+    with pytest.raises(ValueError, match="invalid capacity-stop deadline"):
+        render_report((invalid,), provisional=True)

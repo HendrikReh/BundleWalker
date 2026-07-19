@@ -395,6 +395,47 @@ def test_cli_rejects_generated_workspace_root_as_exact_work_root(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("candidate", ["work_exact", "work_beneath", "output_beneath"])
+def test_direct_runner_rejects_paths_in_generated_workspace_before_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: str,
+) -> None:
+    workspace = tmp_path / "generated-workspace"
+    workspace.mkdir()
+    (workspace / "bundlewalker.toml").write_text("[workspace]\n", encoding="ascii")
+    output = (
+        workspace / "evidence.json" if candidate == "output_beneath" else tmp_path / "evidence.json"
+    )
+    work_root = (
+        workspace
+        if candidate == "work_exact"
+        else workspace / "nested" / "work"
+        if candidate == "work_beneath"
+        else tmp_path / "work"
+    )
+    before = tuple(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+
+    def unexpected_create(_cls: type[object], _root: Path) -> None:
+        raise AssertionError("workspace exclusion must run before workspace creation")
+
+    monkeypatch.setattr(runner_module._RunWorkspace, "create", classmethod(unexpected_create))
+
+    with pytest.raises(BenchmarkRunError, match="workspace"):
+        run_benchmarks(
+            RunConfig(
+                profiles=(PROFILES["smoke"],),
+                output=output,
+                work_root=work_root,
+                run_id=f"direct-{candidate}",
+                correctness_only=True,
+            )
+        )
+
+    assert tuple(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
+    assert not output.exists()
+
+
 def test_failed_read_only_worker_residue_must_equal_frozen_baseline(tmp_path: Path) -> None:
     measured = tmp_path / "measured"
     measured.mkdir()
@@ -458,10 +499,49 @@ def test_snapshot_rejects_excessive_entries_before_content_hashing(
         )
 
 
+def test_snapshot_rejects_entry_flood_during_bounded_enumeration(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    external = tmp_path / "external"
+    external.write_text("must not be inspected", encoding="ascii")
+    (root / "000-link").symlink_to(external)
+    for index in range(1, 100):
+        (root / f"{index:03d}.txt").write_text("x", encoding="ascii")
+
+    with pytest.raises(BenchmarkRunError, match="entries exceed"):
+        runner_module._snapshot_tree(
+            root,
+            limits=runner_module._TreeLimits(1, 1024, 1024),
+        )
+    assert external.read_text(encoding="ascii") == "must not be inspected"
+
+
+def test_snapshot_reserves_sibling_entry_budget_before_recursing(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    nested = root / "a-nested"
+    nested.mkdir(parents=True)
+    (root / "z-sibling.txt").write_text("sibling", encoding="ascii")
+    (nested / "000-file.txt").write_text("nested", encoding="ascii")
+    external = tmp_path / "external"
+    external.write_text("must not be inspected", encoding="ascii")
+    (nested / "001-link").symlink_to(external)
+
+    with pytest.raises(BenchmarkRunError, match="entries exceed"):
+        runner_module._snapshot_tree(
+            root,
+            limits=runner_module._TreeLimits(4, 1024, 1024),
+        )
+    assert external.read_text(encoding="ascii") == "must not be inspected"
+
+
 def test_run_publication_stays_anchored_when_parent_is_replaced(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
+    monkeypatch.setattr(runner_module.sys, "platform", platform)
     publication_parent = tmp_path / "publication"
     publication_parent.mkdir()
     original_parent = tmp_path / "original-publication"
@@ -477,24 +557,49 @@ def test_run_publication_stays_anchored_when_parent_is_replaced(
 
     monkeypatch.setattr(runner_module, "_generate_fixtures", swap_then_generate)
 
-    evidence = run_benchmarks(
-        RunConfig(
-            profiles=(PROFILES["smoke"],),
-            output=output,
-            work_root=tmp_path / "work",
-            run_id="anchored-run",
-            correctness_only=True,
-        )
+    result = benchmark_cli.main(
+        [
+            "run",
+            "--profiles",
+            "smoke",
+            "--correctness-only",
+            "--run-id",
+            "anchored-run",
+            "--output",
+            str(output),
+            "--work-root",
+            str(tmp_path / "work"),
+        ]
     )
 
-    assert load_evidence(original_parent / "evidence.json") == evidence
+    assert result == 0
+    assert load_evidence(original_parent / "evidence.json").run_id == "anchored-run"
     assert not output.exists()
+    entries = frozenset(path.name for path in original_parent.iterdir())
+    with pytest.raises(BenchmarkRunError, match="already exists"):
+        run_benchmarks(
+            RunConfig(
+                profiles=(PROFILES["smoke"],),
+                output=original_parent / "evidence.json",
+                work_root=tmp_path / "retry-work",
+                run_id="anchored-run-retry",
+                correctness_only=True,
+            )
+        )
+    assert frozenset(path.name for path in original_parent.iterdir()) == entries
+
+
+@pytest.fixture(params=("darwin", "linux"))
+def platform(request: pytest.FixtureRequest) -> str:
+    return cast(str, request.param)
 
 
 def test_report_publication_stays_anchored_when_parent_is_replaced(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
+    monkeypatch.setattr(runner_module.sys, "platform", platform)
     evidence_directory = tmp_path / "records"
     evidence_directory.mkdir()
     write_evidence(evidence_directory / "evidence.json", evidence_record())
