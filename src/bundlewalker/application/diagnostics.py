@@ -354,11 +354,8 @@ def _find_nearest_workspace_config(start: Path | None) -> Path | None:
             return candidate
         return None
 
-    search_root = (
-        candidate.parent
-        if candidate_metadata is not None and stat.S_ISREG(candidate_metadata.st_mode)
-        else candidate
-    )
+    candidate = candidate.resolve(strict=False)
+    search_root = candidate.parent if candidate.is_file() else candidate
     for directory in (search_root, *search_root.parents):
         config_path = directory / CONFIG_FILENAME
         try:

@@ -349,6 +349,54 @@ def test_diagnostics_none_start_discovers_from_current_directory(
     assert _by_code(result)["workspace.discovery"].severity is DiagnosticSeverity.PASS
 
 
+def test_diagnostics_symlink_to_ordinary_child_file_uses_target_parent(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    child = workspace.root / "nested"
+    child.mkdir()
+    target = child / "note.txt"
+    target.write_bytes(b"ordinary child file\n")
+    start = tmp_path / "outside" / "start-link"
+    start.parent.mkdir()
+    start.symlink_to(target)
+
+    result = DiagnosticsApplication(_dependencies()).run(start)
+    checks = _by_code(result)
+
+    for code in (
+        "workspace.discovery",
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert checks[code].severity is DiagnosticSeverity.PASS
+
+
+def test_diagnostics_symlink_to_workspace_directory_uses_target_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    start = tmp_path / "outside" / "workspace-link"
+    start.parent.mkdir()
+    start.symlink_to(workspace.root, target_is_directory=True)
+
+    result = DiagnosticsApplication(_dependencies()).run(start)
+    checks = _by_code(result)
+
+    for code in (
+        "workspace.discovery",
+        "workspace.configuration",
+        "workspace.compatibility",
+        "workspace.structure",
+        "workspace.permissions",
+        "transactions.state",
+    ):
+        assert checks[code].severity is DiagnosticSeverity.PASS
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
 def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspection(
     tmp_path: Path,
