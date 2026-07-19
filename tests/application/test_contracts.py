@@ -193,9 +193,7 @@ def test_diagnostic_text_rejects_control_characters(value: str) -> None:
 @pytest.mark.parametrize("value", [True, "1", 1.0])
 def test_diagnostic_counts_rejects_coercible_wire_values(value: object) -> None:
     with pytest.raises(ValidationError):
-        DiagnosticCounts.model_validate(
-            {"passed": value, "warnings": 0, "failures": 0}
-        )
+        DiagnosticCounts.model_validate({"passed": value, "warnings": 0, "failures": 0})
 
 
 def test_diagnostic_remediation_rejects_entry_longer_than_300_characters() -> None:
