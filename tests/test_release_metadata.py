@@ -10,7 +10,7 @@ import tarfile
 import tomllib
 from dataclasses import replace
 from importlib.metadata import version as distribution_version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -199,6 +199,7 @@ def test_cc0_scope_matches_the_packaged_convention_presets() -> None:
 def test_all_python_files_have_gpl_spdx_headers() -> None:
     python_files = sorted((PROJECT_ROOT / "src").rglob("*.py"))
     python_files.extend(sorted((PROJECT_ROOT / "tests").rglob("*.py")))
+    python_files.extend(sorted((PROJECT_ROOT / "benchmarks").rglob("*.py")))
     missing = [
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in python_files
@@ -207,6 +208,26 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
 
     assert python_files
     assert not missing, "missing GPL SPDX header:\n" + "\n".join(missing)
+
+
+def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["uv", "build", "--clear", "--no-sources", "--out-dir", str(tmp_path)],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    wheel = next(tmp_path.glob("*.whl"))
+    unpacked = tmp_path / "wheel"
+    shutil.unpack_archive(wheel, unpacked, "zip")
+    assert not (unpacked / "benchmarks").exists()
+    sdist = next(tmp_path.glob("*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        assert not any(
+            PurePosixPath(name).parts[1:2] == ("benchmarks",) for name in archive.getnames()
+        )
 
 
 def test_public_policy_documents_exist_and_are_linked() -> None:
