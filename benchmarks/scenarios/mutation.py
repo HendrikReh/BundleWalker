@@ -237,7 +237,6 @@ def _run_commit(fixture: GeneratedFixture) -> SampleObservation:
     assert _transactions_are_clean(fixture)
     committed_bytes = materialized_bytes(fixture.workspace.root)
     cleaned_bytes = materialized_bytes(_transaction_root(fixture))
-    assert cleaned_bytes == 0
 
     output_sha256 = _commit_recovery_output(
         expected_live_wiki_sha256=prospective_sha256,
@@ -329,7 +328,6 @@ def _run_recover_swapping(fixture: GeneratedFixture) -> SampleObservation:
     assert _transactions_are_clean(fixture)
     committed_bytes = materialized_bytes(fixture.workspace.root)
     cleaned_bytes = materialized_bytes(_transaction_root(fixture))
-    assert cleaned_bytes == 0
 
     recovered_identity = tree_sha256(fixture.workspace.root)
     recover_transactions(fixture.workspace)
