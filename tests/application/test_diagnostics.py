@@ -465,6 +465,30 @@ def test_diagnostics_explicit_unsafe_config_start_never_falls_through(
     assert transaction_calls == 0
 
 
+def test_diagnostics_explicit_missing_config_start_never_falls_through(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "ancestor", occurred_at=NOW)
+    child = workspace.root / "nested"
+    child.mkdir()
+    missing_config = child / "bundlewalker.toml"
+    transaction_calls = 0
+
+    def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
+        nonlocal transaction_calls
+        transaction_calls += 1
+        return TransactionDiagnosticStatus.CLEAN
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), transaction_inspector=count_transaction)
+    ).run(missing_config)
+    checks = _by_code(result)
+
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
+    assert transaction_calls == 0
+
+
 def test_diagnostics_missing_workspace_fails_discovery_and_marks_dependents_skipped(
     tmp_path: Path,
 ) -> None:

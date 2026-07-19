@@ -349,8 +349,8 @@ def _find_nearest_workspace_config(start: Path | None) -> Path | None:
     except FileNotFoundError:
         candidate_metadata = None
 
-    if candidate.name == CONFIG_FILENAME and candidate_metadata is not None:
-        if stat.S_ISREG(candidate_metadata.st_mode):
+    if candidate.name == CONFIG_FILENAME:
+        if candidate_metadata is not None and stat.S_ISREG(candidate_metadata.st_mode):
             return candidate
         return None
 
