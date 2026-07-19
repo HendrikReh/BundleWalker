@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import SupportsIndex, cast
 
 import pytest
 from pydantic import ValidationError
@@ -169,6 +169,17 @@ def test_diagnostics_does_not_scan_unbounded_model_leading_whitespace(
         def __iter__(self) -> Iterator[str]:
             raise AssertionError("model diagnostics iterated the complete provider value")
 
+        def __getitem__(
+            self,
+            key: SupportsIndex
+            | slice[SupportsIndex | None, SupportsIndex | None, SupportsIndex | None],
+        ) -> str:
+            assert isinstance(key, slice)
+            assert key.start is None
+            assert key.stop == 128
+            assert key.step is None
+            return super().__getitem__(key)
+
     model = GuardedModel(" " * 10_000 + "openai:private-model")
 
     result = DiagnosticsApplication(
@@ -176,9 +187,11 @@ def test_diagnostics_does_not_scan_unbounded_model_leading_whitespace(
     ).run(tmp_path)
     checks = _by_code(result)
 
-    assert checks["configuration.model"].severity is DiagnosticSeverity.PASS
+    assert checks["configuration.model"].severity is DiagnosticSeverity.WARNING
+    assert checks["configuration.model"].summary == "No agent model is configured."
+    assert checks["configuration.credential"].severity is DiagnosticSeverity.WARNING
     assert checks["configuration.credential"].summary == (
-        "Credential verification is unavailable for the configured provider."
+        "Provider credentials were not checked because no model is configured."
     )
 
 
@@ -343,6 +356,44 @@ def test_diagnostics_mcp_package_requires_metadata_and_module_availability(
     assert _by_code(result)["mcp.package"].severity is severity
 
 
+@pytest.mark.parametrize("error_type", [OSError, PermissionError])
+def test_diagnostics_contains_mcp_distribution_metadata_os_failures(
+    tmp_path: Path,
+    error_type: type[OSError],
+) -> None:
+    marker = "private-mcp-distribution-marker"
+
+    def fail_distribution(_name: str) -> bool:
+        raise error_type(marker)
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), distribution_available=fail_distribution)
+    ).run(tmp_path)
+
+    assert len(result.checks) == 14
+    assert _by_code(result)["mcp.package"].severity is DiagnosticSeverity.FAILURE
+    assert marker not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("error_type", [OSError, PermissionError])
+def test_diagnostics_contains_mcp_module_availability_os_failures(
+    tmp_path: Path,
+    error_type: type[OSError],
+) -> None:
+    marker = "private-mcp-module-marker"
+
+    def fail_module(_name: str) -> bool:
+        raise error_type(marker)
+
+    result = DiagnosticsApplication(replace(_dependencies(), module_available=fail_module)).run(
+        tmp_path
+    )
+
+    assert len(result.checks) == 14
+    assert _by_code(result)["mcp.package"].severity is DiagnosticSeverity.FAILURE
+    assert marker not in result.model_dump_json()
+
+
 @pytest.mark.parametrize(
     ("targets", "executable", "severity"),
     [
@@ -377,6 +428,73 @@ def test_diagnostics_mcp_entrypoint_requires_expected_metadata_and_executable(
     ).run(tmp_path)
 
     assert _by_code(result)["mcp.entrypoint"].severity is severity
+
+
+@pytest.mark.parametrize("error_type", [OSError, PermissionError])
+def test_diagnostics_contains_mcp_entrypoint_metadata_os_failures(
+    tmp_path: Path,
+    error_type: type[OSError],
+) -> None:
+    marker = "private-mcp-entrypoint-metadata-marker"
+
+    def fail_targets(_name: str) -> tuple[str, ...]:
+        raise error_type(marker)
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), console_script_targets=fail_targets)
+    ).run(tmp_path)
+
+    assert len(result.checks) == 14
+    assert _by_code(result)["mcp.entrypoint"].severity is DiagnosticSeverity.FAILURE
+    assert marker not in result.model_dump_json()
+
+
+@pytest.mark.parametrize("error_type", [OSError, PermissionError])
+def test_diagnostics_contains_mcp_executable_lookup_os_failures(
+    tmp_path: Path,
+    error_type: type[OSError],
+) -> None:
+    marker = "private-mcp-executable-marker"
+
+    def fail_executable(_name: str) -> str | None:
+        raise error_type(marker)
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), executable_lookup=fail_executable)
+    ).run(tmp_path)
+
+    assert len(result.checks) == 14
+    assert _by_code(result)["mcp.entrypoint"].severity is DiagnosticSeverity.FAILURE
+    assert marker not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    [
+        "distribution_available",
+        "module_available",
+        "console_script_targets",
+        "executable_lookup",
+    ],
+)
+def test_diagnostics_does_not_hide_unexpected_mcp_programming_defects(
+    tmp_path: Path,
+    dependency: str,
+) -> None:
+    marker = "private-mcp-programming-defect"
+
+    def fail(_name: str) -> object:
+        raise RuntimeError(marker)
+
+    dependencies = replace(_dependencies(), **{dependency: fail})
+
+    with pytest.raises(ApplicationError) as raised:
+        DiagnosticsApplication(dependencies).run(tmp_path)
+
+    assert raised.value.code is ApplicationErrorCode.DIAGNOSTIC_FAILED
+    assert raised.value.safe_message == "diagnostic operation failed"
+    assert raised.value.__cause__ is not None
+    assert marker not in raised.value.safe_message
 
 
 def test_diagnostics_disk_inspection_unavailability_is_a_bounded_warning(
@@ -518,7 +636,7 @@ def test_diagnostics_symlink_to_workspace_directory_uses_target_workspace(
         assert checks[code].severity is DiagnosticSeverity.PASS
 
 
-@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory", "fifo"])
 def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspection(
     tmp_path: Path,
     unsafe_kind: str,
@@ -529,8 +647,10 @@ def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspect
     unsafe_config = child / "bundlewalker.toml"
     if unsafe_kind == "symlink":
         unsafe_config.symlink_to(workspace.root / "bundlewalker.toml")
-    else:
+    elif unsafe_kind == "directory":
         unsafe_config.mkdir()
+    else:
+        os.mkfifo(unsafe_config)
 
     transaction_calls = 0
 
@@ -545,6 +665,12 @@ def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspect
     checks = _by_code(result)
 
     assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert checks["workspace.discovery"].summary == (
+        "An unsafe BundleWalker workspace configuration was found."
+    )
+    assert checks["workspace.discovery"].remediation == (
+        "Replace bundlewalker.toml with a regular non-linked configuration file.",
+    )
     for code in (
         "workspace.configuration",
         "workspace.compatibility",
@@ -556,7 +682,7 @@ def test_diagnostics_nearest_unsafe_config_blocks_valid_ancestor_without_inspect
     assert transaction_calls == 0
 
 
-@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory"])
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "directory", "fifo"])
 def test_diagnostics_explicit_unsafe_config_start_never_falls_through(
     tmp_path: Path,
     unsafe_kind: str,
@@ -567,8 +693,10 @@ def test_diagnostics_explicit_unsafe_config_start_never_falls_through(
     unsafe_config = child / "bundlewalker.toml"
     if unsafe_kind == "symlink":
         unsafe_config.symlink_to(workspace.root / "bundlewalker.toml")
-    else:
+    elif unsafe_kind == "directory":
         unsafe_config.mkdir()
+    else:
+        os.mkfifo(unsafe_config)
     transaction_calls = 0
 
     def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
@@ -582,6 +710,12 @@ def test_diagnostics_explicit_unsafe_config_start_never_falls_through(
     checks = _by_code(result)
 
     assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert checks["workspace.discovery"].summary == (
+        "An unsafe BundleWalker workspace configuration was found."
+    )
+    assert checks["workspace.discovery"].remediation == (
+        "Replace bundlewalker.toml with a regular non-linked configuration file.",
+    )
     assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
     assert transaction_calls == 0
 
@@ -606,6 +740,10 @@ def test_diagnostics_explicit_missing_config_start_never_falls_through(
     checks = _by_code(result)
 
     assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert checks["workspace.discovery"].summary == "No usable BundleWalker workspace was found."
+    assert checks["workspace.discovery"].remediation == (
+        "Run `bundlewalker init PATH` or pass an existing workspace to `bundlewalker doctor PATH`.",
+    )
     assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
     assert transaction_calls == 0
 
@@ -728,6 +866,10 @@ def test_diagnostics_missing_workspace_fails_discovery_and_marks_dependents_skip
     checks = _by_code(result)
 
     assert checks["workspace.discovery"].severity is DiagnosticSeverity.FAILURE
+    assert checks["workspace.discovery"].summary == "No usable BundleWalker workspace was found."
+    assert checks["workspace.discovery"].remediation == (
+        "Run `bundlewalker init PATH` or pass an existing workspace to `bundlewalker doctor PATH`.",
+    )
     for code in (
         "workspace.configuration",
         "workspace.compatibility",

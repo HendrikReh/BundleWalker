@@ -348,6 +348,41 @@ def test_transaction_diagnostics_enforces_schema_identity_rules_in_every_phase(
 
     assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
     assert _tree_snapshot(workspace.root) == before
+    with pytest.raises(transactions.TransactionError):
+        recover_transactions(workspace)
+    assert _tree_snapshot(workspace.root) == before
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["prepared", "accepted", "raw-persisted", "swapping", "new-live"],
+)
+@pytest.mark.parametrize(
+    ("mutation", "review_digest"),
+    [("null", None), ("non-string", 7), ("malformed", "not-a-sha256")],
+)
+def test_schema_v2_identity_requires_a_non_null_sha256_review_digest_in_every_phase(
+    tmp_path: Path,
+    phase: str,
+    mutation: str,
+    review_digest: object,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    _materialize_phase_topology(workspace, phase)
+    identity_path = _transaction_dir(workspace) / "identity.json"
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    identity["review_digest"] = review_digest
+    identity_path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    before = _tree_snapshot(workspace.root)
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED, mutation
+    assert _tree_snapshot(workspace.root) == before
+    with pytest.raises(transactions.TransactionError):
+        recover_transactions(workspace)
+    assert _tree_snapshot(workspace.root) == before
 
 
 @pytest.mark.parametrize(

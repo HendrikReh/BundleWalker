@@ -14,6 +14,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum, auto
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
@@ -133,6 +134,12 @@ class _WorkspaceConfigSnapshot:
     content: bytes
 
 
+class _WorkspaceConfigDiscoveryStatus(Enum):
+    FOUND = auto()
+    NOT_FOUND = auto()
+    UNSAFE = auto()
+
+
 def _check(
     code: str,
     category: DiagnosticCategory,
@@ -248,22 +255,32 @@ def _workspace_checks(
     start: Path | None,
     dependencies: DiagnosticsDependencies,
 ) -> tuple[tuple[DiagnosticCheck, ...], Workspace | None]:
-    try:
-        config_path = _find_nearest_workspace_config(start)
-    except (BundleWalkerError, OSError):
-        config_path = None
-    if config_path is None:
-        return _unavailable_workspace_checks(
+    discovery_status, config_path = _find_nearest_workspace_config(start)
+    if discovery_status is not _WorkspaceConfigDiscoveryStatus.FOUND:
+        discovery_check = (
             _check(
+                "workspace.discovery",
+                DiagnosticCategory.WORKSPACE,
+                DiagnosticSeverity.FAILURE,
+                "An unsafe BundleWalker workspace configuration was found.",
+                "Replace bundlewalker.toml with a regular non-linked configuration file.",
+            )
+            if discovery_status is _WorkspaceConfigDiscoveryStatus.UNSAFE
+            else _check(
                 "workspace.discovery",
                 DiagnosticCategory.WORKSPACE,
                 DiagnosticSeverity.FAILURE,
                 "No usable BundleWalker workspace was found.",
                 "Run `bundlewalker init PATH` or pass an existing workspace to "
                 "`bundlewalker doctor PATH`.",
-            ),
+            )
+        )
+        return _unavailable_workspace_checks(
+            discovery_check,
             _SKIPPED_CONFIGURATION,
         )
+    if config_path is None:
+        raise TypeError("found workspace configuration has no path")
 
     discovery_check = _check(
         "workspace.discovery",
@@ -394,30 +411,44 @@ def _workspace_checks(
     )
 
 
-def _find_nearest_workspace_config(start: Path | None) -> Path | None:
+def _find_nearest_workspace_config(
+    start: Path | None,
+) -> tuple[_WorkspaceConfigDiscoveryStatus, Path | None]:
     candidate = (start or Path.cwd()).expanduser()
     try:
         candidate_metadata = candidate.lstat()
     except FileNotFoundError:
         candidate_metadata = None
+    except OSError:
+        return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
 
     if candidate.name == CONFIG_FILENAME:
         if candidate_metadata is not None and stat.S_ISREG(candidate_metadata.st_mode):
-            return candidate
-        return None
+            return _WorkspaceConfigDiscoveryStatus.FOUND, candidate
+        status = (
+            _WorkspaceConfigDiscoveryStatus.NOT_FOUND
+            if candidate_metadata is None
+            else _WorkspaceConfigDiscoveryStatus.UNSAFE
+        )
+        return status, None
 
-    candidate = candidate.resolve(strict=False)
-    search_root = candidate.parent if candidate.is_file() else candidate
+    try:
+        candidate = candidate.resolve(strict=False)
+        search_root = candidate.parent if candidate.is_file() else candidate
+    except OSError:
+        return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
     for directory in (search_root, *search_root.parents):
         config_path = directory / CONFIG_FILENAME
         try:
             config_metadata = config_path.lstat()
         except FileNotFoundError:
             continue
+        except OSError:
+            return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
         if stat.S_ISREG(config_metadata.st_mode):
-            return config_path
-        return None
-    return None
+            return _WorkspaceConfigDiscoveryStatus.FOUND, config_path
+        return _WorkspaceConfigDiscoveryStatus.UNSAFE, None
+    return _WorkspaceConfigDiscoveryStatus.NOT_FOUND, None
 
 
 def _inspect_selected_workspace_config(
@@ -664,7 +695,7 @@ def _model_configuration_facts(model_value: str) -> tuple[bool, bool]:
         None,
     )
     if meaningful_start is None:
-        return len(model_value) > len(bounded_value), False
+        return False, False
     bounded_prefix = bounded_value[meaningful_start:].strip()
     separator_index = bounded_prefix.find(":")
     provider_prefix = (
@@ -744,7 +775,7 @@ def _mcp_package_check(
 ) -> DiagnosticCheck:
     try:
         installed = distribution_available("mcp") and module_available("mcp")
-    except (ImportError, AttributeError, ValueError):
+    except (ImportError, AttributeError, ValueError, OSError):
         installed = False
     if installed:
         return _check(

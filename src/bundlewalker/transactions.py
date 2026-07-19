@@ -2102,16 +2102,19 @@ def _load_diagnostic_identity(
         or _SHA256.fullmatch(base) is None
         or not isinstance(prospective, str)
         or _SHA256.fullmatch(prospective) is None
-        or (review is not None and not isinstance(review, str))
-        or (isinstance(review, str) and _SHA256.fullmatch(review) is None)
+        or (
+            manifest.schema_version == _SCHEMA_VERSION
+            and (not isinstance(review, str) or _SHA256.fullmatch(review) is None)
+        )
     ):
         raise _IncompleteManifestError
     if base != manifest.base_wiki_digest or prospective != manifest.prospective_digest:
         raise TransactionError("manifest identities do not match transaction identity")
+    validated_review = review if isinstance(review, str) else None
     return _Identity(
         base_wiki_digest=base,
         prospective_digest=prospective,
-        review_digest=review,
+        review_digest=validated_review,
     )
 
 
@@ -2277,14 +2280,17 @@ def _load_identity(transaction_dir: Path) -> _Identity:
         or _SHA256.fullmatch(base) is None
         or not isinstance(prospective, str)
         or _SHA256.fullmatch(prospective) is None
-        or (review_digest is not None and not isinstance(review_digest, str))
-        or (isinstance(review_digest, str) and _SHA256.fullmatch(review_digest) is None)
+        or (
+            "review_digest" in values
+            and (not isinstance(review_digest, str) or _SHA256.fullmatch(review_digest) is None)
+        )
     ):
         raise _IncompleteManifestError
+    validated_review_digest = review_digest if isinstance(review_digest, str) else None
     return _Identity(
         base_wiki_digest=base,
         prospective_digest=prospective,
-        review_digest=review_digest,
+        review_digest=validated_review_digest,
     )
 
 
