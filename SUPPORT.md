@@ -11,6 +11,8 @@ Support is community-based and has no guaranteed response time or service-level 
   POSIX-specific.
 - The supported product surface is the local CLI and workspace-bound MCP `stdio` server.
 - Current ingestion accepts one regular UTF-8 Markdown or text file at a time.
+- No supported workspace capacity is published until reviewed cross-platform evidence exists; see
+  the [performance and capacity methodology](docs/performance-and-capacity.md).
 
 Hosted operation, remote MCP transport, multi-user synchronization, a web UI, embeddings, vector
 databases, additional source formats, and automatic Git operations are outside the first beta.

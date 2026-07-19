@@ -8,6 +8,8 @@ All notable BundleWalker releases are recorded here.
 
 - Added the offline, read-only `bundlewalker doctor` health check with stable remediation,
   automation-friendly exit behavior, and explicit redacted JSON support reports.
+- Added a reproducible synthetic benchmark foundation, a scheduled/manual supported-platform
+  evidence workflow, and provisional capacity documentation.
 
 ### Changed
 

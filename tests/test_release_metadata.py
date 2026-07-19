@@ -54,6 +54,20 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
+def test_performance_document_is_provisional_and_linked() -> None:
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+    assert "Supported capacity is not yet published." in performance
+    assert "candidate only" in performance
+    assert "100,000 Unicode characters" in performance
+    assert "remote model-provider latency is excluded" in performance
+    assert "Windows remains experimental" in performance
+    assert "BundleWalker supports up to" not in performance
+
+    for relative in ("README.md", "SUPPORT.md", "docs/user-guide.md"):
+        content = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+        assert "performance-and-capacity.md" in content
+
+
 @pytest.mark.parametrize(
     "error_type",
     [importlib.metadata.PackageNotFoundError, OSError, PermissionError],

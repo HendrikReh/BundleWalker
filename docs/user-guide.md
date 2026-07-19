@@ -313,6 +313,10 @@ log structure, raw-source identity, citation structure, source line ranges, and 
 Broken internal links and orphans are warnings. Deterministic errors set process status `1`; a
 clean run or warnings-only run exits `0`.
 
+The provisional [performance and capacity methodology](performance-and-capacity.md) describes the
+local workspace scenarios that are measured. Model-provider latency is not controlled by
+BundleWalker and is excluded from that methodology.
+
 `--semantic` runs one additional read-only model-backed pass for contradictions, staleness,
 unsupported claims, missing concepts, and knowledge gaps. Semantic findings may use `ERROR`,
 `WARNING`, or `INFO` display severities, but all are advisory. They do not control process status;
