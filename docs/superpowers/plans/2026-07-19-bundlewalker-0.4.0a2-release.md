@@ -133,15 +133,15 @@ Stage only the files listed for Task 1 and commit with:
 git commit -m "build: prepare 0.4.0a2 alpha"
 ```
 
-## Post-implementation release procedure
-
-## Artifact hygiene follow-up
+#### Artifact hygiene follow-up
 
 The source distribution must exclude untracked local worker state under `.superpowers/**`, so a
 locally built release artifact matches a clean GitHub checkout. Keep this as an sdist-only Hatch
 exclusion: tracked release plans under `docs/superpowers/**` remain included. The focused
 regression coverage is `tests/test_release_metadata.py`, and the release build configuration scope
 is `pyproject.toml`.
+
+## Post-implementation release procedure
 
 After Task 1 passes task-scoped and whole-branch review:
 

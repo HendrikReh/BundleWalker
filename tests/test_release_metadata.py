@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import hashlib
+import shutil
 import subprocess
 import tarfile
 import tomllib
@@ -145,15 +146,42 @@ def test_development_version_is_second_alpha() -> None:
 def test_source_distribution_excludes_untracked_superpowers_worker_state(
     tmp_path: Path,
 ) -> None:
+    source = tmp_path / "source"
+    artifacts = tmp_path / "dist"
+    shutil.copytree(
+        PROJECT_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".superpowers",
+            ".venv",
+            "__pycache__",
+            "dist",
+        ),
+    )
+    worker_state = source / ".superpowers/sdd/sentinel.txt"
+    worker_state.parent.mkdir(parents=True)
+    worker_state.write_text("must not be packaged\n", encoding="utf-8")
+    gitignore = source / ".gitignore"
+    gitignore.write_text(
+        gitignore.read_text(encoding="utf-8").replace(".superpowers/\n", ""),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "--quiet"], cwd=source, check=True)
+
     subprocess.run(
-        ["uv", "build", "--sdist", "--out-dir", str(tmp_path), "--no-sources"],
-        cwd=PROJECT_ROOT,
+        ["uv", "build", "--sdist", "--out-dir", str(artifacts), "--no-sources"],
+        cwd=source,
         check=True,
     )
 
-    sdist = next(tmp_path.glob("bundlewalker-*.tar.gz"))
+    sdist = next(artifacts.glob("bundlewalker-*.tar.gz"))
     with tarfile.open(sdist) as archive:
         packaged_paths = archive.getnames()
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
-    assert any("/docs/superpowers/plans/" in path for path in packaged_paths)
+    assert (
+        "bundlewalker-0.4.0a2/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+    ) in packaged_paths
