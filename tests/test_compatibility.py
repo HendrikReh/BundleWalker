@@ -11,6 +11,7 @@ import bundlewalker.compatibility as compatibility_module
 from bundlewalker.compatibility import (
     CompatibilityStatus,
     MigrationStep,
+    classify_workspace_version,
     inspect_workspace,
     migration_path,
 )
@@ -139,3 +140,24 @@ def test_upgradeable_status_uses_an_injected_complete_registry(tmp_path: Path) -
     assert result.readable is False
     assert result.writable is False
     assert result.upgrade_available is True
+
+
+def test_workspace_version_classifier_uses_the_injected_migration_policy() -> None:
+    def apply(_quiescent: QuiescentWorkspace) -> None:
+        return None
+
+    def verify(_workspace: Workspace) -> None:
+        return None
+
+    migrations = {1: MigrationStep(1, 2, apply, verify)}
+
+    assert (
+        classify_workspace_version(1, target_version=2, migrations=migrations)
+        is CompatibilityStatus.UPGRADEABLE
+    )
+    assert (
+        classify_workspace_version(1, target_version=2, migrations={})
+        is CompatibilityStatus.UNSUPPORTED
+    )
+    assert classify_workspace_version(1) is CompatibilityStatus.CURRENT
+    assert classify_workspace_version(2) is CompatibilityStatus.TOO_NEW

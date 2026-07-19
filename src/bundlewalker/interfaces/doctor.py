@@ -31,7 +31,11 @@ _TOKENS = {
 
 
 def render_diagnostic_lines(result: DiagnosticResult) -> tuple[str, ...]:
-    lines: list[str] = []
+    lines = [
+        f"BundleWalker: {result.bundlewalker_version}",
+        f"Python: {result.python_version}",
+        f"Platform: {result.platform}",
+    ]
     for check in result.checks:
         lines.append(f"{_TOKENS[check.severity]} {check.code} — {check.summary}")
         lines.extend(f"  Next: {instruction}" for instruction in check.remediation)

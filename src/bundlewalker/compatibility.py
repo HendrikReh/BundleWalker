@@ -80,6 +80,29 @@ def migration_path(
     return tuple(path) if current == target_version else None
 
 
+def classify_workspace_version(
+    version: int,
+    *,
+    target_version: int = CURRENT_WORKSPACE_FORMAT,
+    migrations: Mapping[int, MigrationStep] | None = None,
+) -> CompatibilityStatus:
+    """Classify a parsed workspace version against an explicit migration policy."""
+    if version > CURRENT_WORKSPACE_FORMAT:
+        return CompatibilityStatus.TOO_NEW
+    if version < MINIMUM_WORKSPACE_FORMAT:
+        return CompatibilityStatus.UNSUPPORTED
+    if version < target_version:
+        path = migration_path(
+            version,
+            target_version=target_version,
+            migrations=migrations,
+        )
+        return (
+            CompatibilityStatus.UPGRADEABLE if path is not None else CompatibilityStatus.UNSUPPORTED
+        )
+    return CompatibilityStatus.CURRENT
+
+
 def inspect_workspace(
     start: Path | None = None,
     *,
@@ -89,31 +112,28 @@ def inspect_workspace(
     config_path = find_workspace_config(start)
     version = read_workspace_format_version(config_path)
     root = config_path.parent
-    if version > CURRENT_WORKSPACE_FORMAT:
-        return WorkspaceCompatibility(
-            root, config_path, version, CompatibilityStatus.TOO_NEW, False, False, False
-        )
-    if version < MINIMUM_WORKSPACE_FORMAT:
-        return WorkspaceCompatibility(
-            root, config_path, version, CompatibilityStatus.UNSUPPORTED, False, False, False
-        )
-    path = migration_path(
+    status = classify_workspace_version(
         version,
         target_version=target_version,
         migrations=migrations,
     )
-    if version < target_version:
-        status = (
-            CompatibilityStatus.UPGRADEABLE if path is not None else CompatibilityStatus.UNSUPPORTED
+    if status is CompatibilityStatus.TOO_NEW:
+        return WorkspaceCompatibility(
+            root, config_path, version, CompatibilityStatus.TOO_NEW, False, False, False
         )
+    if status is CompatibilityStatus.UNSUPPORTED:
+        return WorkspaceCompatibility(
+            root, config_path, version, CompatibilityStatus.UNSUPPORTED, False, False, False
+        )
+    if status is CompatibilityStatus.UPGRADEABLE:
         return WorkspaceCompatibility(
             root,
             config_path,
             version,
-            status,
+            CompatibilityStatus.UPGRADEABLE,
             False,
             False,
-            path is not None,
+            True,
         )
     discover_workspace(root)
     return WorkspaceCompatibility(
@@ -130,9 +150,13 @@ def read_workspace_format_version(config_path: Path) -> int:
         raise ConfigurationError("workspace configuration exceeds the supported size")
     try:
         parsed = tomllib.loads(content.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError) as exc:
         raise ConfigurationError(f"could not read workspace configuration: {config_path}") from exc
-    values = cast(dict[str, object], parsed)
+    return workspace_format_version(cast(dict[str, object], parsed))
+
+
+def workspace_format_version(values: Mapping[str, object]) -> int:
+    """Return the format version from one already parsed TOML mapping."""
     version = values.get("version")
     if type(version) is not int:
         raise ConfigurationError("workspace configuration version must be an integer")

@@ -108,7 +108,12 @@ def test_renderer_uses_stable_tokens_order_remediation_and_summary() -> None:
 
     lines = render_diagnostic_lines(result)
 
-    assert lines[0].startswith("PASS runtime.bundlewalker — ")
+    assert lines[:3] == (
+        "BundleWalker: 0.4.0a2",
+        "Python: 3.13.5",
+        "Platform: linux",
+    )
+    assert lines[3].startswith("PASS runtime.bundlewalker — ")
     assert any(line.startswith("WARN configuration.model — ") for line in lines)
     assert any(line.startswith("FAIL workspace.discovery — ") for line in lines)
     assert "  Next: Set BUNDLEWALKER_MODEL before model-backed commands." in lines

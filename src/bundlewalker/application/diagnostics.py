@@ -6,12 +6,15 @@ from __future__ import annotations
 import importlib.util
 import os
 import platform
+import re
 import shutil
 import stat
 import sys
+import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 
 from bundlewalker import __version__
@@ -27,7 +30,9 @@ from bundlewalker.application.errors import ApplicationError, ApplicationErrorCo
 from bundlewalker.compatibility import (
     CURRENT_WORKSPACE_FORMAT,
     CompatibilityStatus,
-    read_workspace_format_version,
+    MigrationStep,
+    classify_workspace_version,
+    workspace_format_version,
 )
 from bundlewalker.errors import BundleWalkerError
 from bundlewalker.transactions import (
@@ -40,12 +45,16 @@ from bundlewalker.workflows.context import (
 )
 from bundlewalker.workspace import (
     CONFIG_FILENAME,
+    MAX_WORKSPACE_CONFIG_BYTES,
     Workspace,
     WorkspaceConfig,
-    load_workspace_config,
+    workspace_config_from_mapping,
 )
 
 ONE_GIB = 1024**3
+MAX_MODEL_PREFIX_CHARACTERS = 128
+_EXPECTED_MCP_ENTRYPOINT = "bundlewalker.interfaces.mcp:main"
+_PACKAGE_IDENTITY = re.compile(r"^(?=.*[0-9])[A-Za-z0-9][A-Za-z0-9.!+_-]{0,79}$")
 
 _SKIPPED_CONFIGURATION = "Workspace configuration was not checked because discovery failed."
 _SKIPPED_COMPATIBILITY = (
@@ -70,6 +79,24 @@ def _module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def _distribution_available(name: str) -> bool:
+    try:
+        importlib_metadata.distribution(name)
+    except importlib_metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _console_script_targets(name: str) -> tuple[str, ...]:
+    return tuple(
+        entry_point.value
+        for entry_point in importlib_metadata.entry_points(
+            group="console_scripts",
+            name=name,
+        )
+    )
+
+
 def _disk_free(path: Path) -> int:
     return shutil.disk_usage(path).free
 
@@ -86,12 +113,24 @@ class DiagnosticsDependencies:
     platform_name: str = platform.system()
     clock: Callable[[], datetime] = _utc_now
     module_available: Callable[[str], bool] = _module_available
+    distribution_available: Callable[[str], bool] = _distribution_available
+    console_script_targets: Callable[[str], tuple[str, ...]] = _console_script_targets
     executable_lookup: Callable[[str], str | None] = shutil.which
     permission_check: Callable[[Path, int], bool] = os.access
     disk_free: Callable[[Path], int] = _disk_free
     transaction_inspector: Callable[[Workspace], TransactionDiagnosticStatus] = (
         inspect_transaction_state
     )
+    workspace_target_version: int = CURRENT_WORKSPACE_FORMAT
+    workspace_migrations: Mapping[int, MigrationStep] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkspaceConfigSnapshot:
+    root: Path
+    root_device: int
+    root_inode: int
+    content: bytes
 
 
 def _check(
@@ -119,6 +158,13 @@ def _normalized_platform(name: str) -> str:
     return "other"
 
 
+def _normalized_bundlewalker_version(version: str) -> str | None:
+    normalized = version.strip()
+    if _PACKAGE_IDENTITY.fullmatch(normalized) is None:
+        return None
+    return normalized
+
+
 def _result(
     bundlewalker_version: str,
     python_version: tuple[int, int, int],
@@ -139,7 +185,7 @@ def _result(
     )
     return DiagnosticResult(
         overall=overall,
-        bundlewalker_version=bundlewalker_version.strip() or "unknown",
+        bundlewalker_version=_normalized_bundlewalker_version(bundlewalker_version) or "unknown",
         python_version=".".join(str(value) for value in python_version),
         platform=_normalized_platform(platform_name),
         counts=counts,
@@ -148,7 +194,7 @@ def _result(
 
 
 def _bundlewalker_check(version: str) -> DiagnosticCheck:
-    if version.strip():
+    if _normalized_bundlewalker_version(version) is not None:
         return _check(
             "runtime.bundlewalker",
             DiagnosticCategory.RUNTIME,
@@ -226,7 +272,11 @@ def _workspace_checks(
         "A BundleWalker workspace configuration was found.",
     )
     try:
-        compatibility_status, workspace_config = _inspect_selected_workspace_config(config_path)
+        snapshot = _read_selected_workspace_config(config_path)
+        compatibility_status, workspace_config = _inspect_selected_workspace_config(
+            snapshot,
+            dependencies,
+        )
     except (BundleWalkerError, OSError):
         return _unavailable_workspace_checks(
             discovery_check,
@@ -263,7 +313,7 @@ def _workspace_checks(
 
     if workspace_config is None:
         raise TypeError("current workspace inspection returned no configuration")
-    workspace = Workspace(root=config_path.parent, config=workspace_config)
+    workspace = Workspace(root=snapshot.root, config=workspace_config)
 
     configuration_check = _check(
         "workspace.configuration",
@@ -278,7 +328,9 @@ def _workspace_checks(
         "The workspace format is current.",
     )
     try:
-        structure_valid = _workspace_structure_valid(workspace)
+        structure_valid = _workspace_root_matches_snapshot(snapshot) and _workspace_structure_valid(
+            workspace
+        )
     except (BundleWalkerError, OSError):
         structure_valid = False
     if not structure_valid:
@@ -326,7 +378,7 @@ def _workspace_checks(
             "workspace.permissions",
             DiagnosticCategory.WORKSPACE,
             DiagnosticSeverity.FAILURE,
-            "Required workspace paths are not readable and writable.",
+            "Required workspace paths are not readable, writable, and traversable.",
             "Correct workspace permissions before running write operations.",
         )
     )
@@ -369,14 +421,73 @@ def _find_nearest_workspace_config(start: Path | None) -> Path | None:
 
 
 def _inspect_selected_workspace_config(
-    config_path: Path,
+    snapshot: _WorkspaceConfigSnapshot,
+    dependencies: DiagnosticsDependencies,
 ) -> tuple[CompatibilityStatus, WorkspaceConfig | None]:
-    version = read_workspace_format_version(config_path)
-    if version > CURRENT_WORKSPACE_FORMAT:
-        return CompatibilityStatus.TOO_NEW, None
-    if version < CURRENT_WORKSPACE_FORMAT:
-        return CompatibilityStatus.UNSUPPORTED, None
-    return CompatibilityStatus.CURRENT, load_workspace_config(config_path)
+    try:
+        text = snapshot.content.decode("utf-8", errors="strict")
+        parsed = tomllib.loads(text)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise BundleWalkerError("workspace configuration is invalid") from exc
+    version = workspace_format_version(parsed)
+    status = classify_workspace_version(
+        version,
+        target_version=dependencies.workspace_target_version,
+        migrations=dependencies.workspace_migrations,
+    )
+    if status is not CompatibilityStatus.CURRENT:
+        return status, None
+    return status, workspace_config_from_mapping(parsed)
+
+
+def _read_selected_workspace_config(config_path: Path) -> _WorkspaceConfigSnapshot:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    root_descriptor = os.open(config_path.parent, directory_flags)
+    try:
+        root_metadata = os.fstat(root_descriptor)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise OSError
+        config_descriptor = os.open(
+            CONFIG_FILENAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=root_descriptor,
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(config_descriptor).st_mode):
+                raise OSError
+            content = bytearray()
+            remaining = MAX_WORKSPACE_CONFIG_BYTES + 1
+            while remaining:
+                chunk = os.read(config_descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                content.extend(chunk)
+                remaining -= len(chunk)
+            if len(content) > MAX_WORKSPACE_CONFIG_BYTES:
+                raise BundleWalkerError("workspace configuration exceeds the supported size")
+        finally:
+            os.close(config_descriptor)
+    finally:
+        os.close(root_descriptor)
+    return _WorkspaceConfigSnapshot(
+        root=config_path.parent,
+        root_device=root_metadata.st_dev,
+        root_inode=root_metadata.st_ino,
+        content=bytes(content),
+    )
+
+
+def _workspace_root_matches_snapshot(snapshot: _WorkspaceConfigSnapshot) -> bool:
+    metadata = os.stat(snapshot.root, follow_symlinks=False)
+    return stat.S_ISDIR(metadata.st_mode) and (
+        metadata.st_dev,
+        metadata.st_ino,
+    ) == (snapshot.root_device, snapshot.root_inode)
 
 
 def _unavailable_workspace_checks(
@@ -480,16 +591,14 @@ def _workspace_permissions_valid(
     workspace: Workspace,
     permission_check: Callable[[Path, int], bool],
 ) -> bool:
-    required_paths = (
-        workspace.root,
-        workspace.root / CONFIG_FILENAME,
-        workspace.wiki_dir,
-        workspace.raw_dir,
-        workspace.conventions_file,
+    required_checks = (
+        (workspace.root, (os.R_OK, os.W_OK, os.X_OK)),
+        (workspace.root / CONFIG_FILENAME, (os.R_OK, os.W_OK)),
+        (workspace.wiki_dir, (os.R_OK, os.W_OK, os.X_OK)),
+        (workspace.raw_dir, (os.R_OK, os.W_OK, os.X_OK)),
+        (workspace.conventions_file, (os.R_OK, os.W_OK)),
     )
-    return all(
-        permission_check(path, mode) for path in required_paths for mode in (os.R_OK, os.W_OK)
-    )
+    return all(permission_check(path, mode) for path, modes in required_checks for mode in modes)
 
 
 def _configuration_checks(
@@ -549,13 +658,14 @@ def _configuration_checks(
 
 
 def _model_configuration_facts(model_value: str) -> tuple[bool, bool]:
+    bounded_value = model_value[:MAX_MODEL_PREFIX_CHARACTERS]
     meaningful_start = next(
-        (index for index, character in enumerate(model_value) if not character.isspace()),
+        (index for index, character in enumerate(bounded_value) if not character.isspace()),
         None,
     )
     if meaningful_start is None:
-        return False, False
-    bounded_prefix = model_value[meaningful_start : meaningful_start + 32].strip()
+        return len(model_value) > len(bounded_value), False
+    bounded_prefix = bounded_value[meaningful_start:].strip()
     separator_index = bounded_prefix.find(":")
     provider_prefix = (
         bounded_prefix[:separator_index].strip().casefold() if separator_index >= 0 else ""
@@ -628,9 +738,12 @@ def _transaction_check(
     raise TypeError("transaction inspector returned an invalid status")
 
 
-def _mcp_package_check(available: Callable[[str], bool]) -> DiagnosticCheck:
+def _mcp_package_check(
+    distribution_available: Callable[[str], bool],
+    module_available: Callable[[str], bool],
+) -> DiagnosticCheck:
     try:
-        installed = available("mcp")
+        installed = distribution_available("mcp") and module_available("mcp")
     except (ImportError, AttributeError, ValueError):
         installed = False
     if installed:
@@ -649,10 +762,17 @@ def _mcp_package_check(available: Callable[[str], bool]) -> DiagnosticCheck:
     )
 
 
-def _mcp_entrypoint_check(lookup: Callable[[str], str | None]) -> DiagnosticCheck:
+def _mcp_entrypoint_check(
+    targets: Callable[[str], tuple[str, ...]],
+    lookup: Callable[[str], str | None],
+) -> DiagnosticCheck:
     try:
-        installed = lookup("bundlewalker-mcp") is not None
-    except OSError:
+        registered_targets = targets("bundlewalker-mcp")
+        installed = (
+            registered_targets == (_EXPECTED_MCP_ENTRYPOINT,)
+            and lookup("bundlewalker-mcp") is not None
+        )
+    except (ImportError, AttributeError, ValueError, OSError):
         installed = False
     if installed:
         return _check(
@@ -731,8 +851,14 @@ class DiagnosticsApplication:
             model_check,
             credential_check,
             _transaction_check(workspace, self.dependencies.transaction_inspector),
-            _mcp_package_check(self.dependencies.module_available),
-            _mcp_entrypoint_check(self.dependencies.executable_lookup),
+            _mcp_package_check(
+                self.dependencies.distribution_available,
+                self.dependencies.module_available,
+            ),
+            _mcp_entrypoint_check(
+                self.dependencies.console_script_targets,
+                self.dependencies.executable_lookup,
+            ),
             _storage_check(start, workspace, self.dependencies.disk_free),
         )
         return _result(

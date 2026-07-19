@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import stat
+import tomllib
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +15,6 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-import bundlewalker.application.diagnostics as diagnostics_module
 from bundlewalker.application import (
     ApplicationError,
     ApplicationErrorCode,
@@ -23,9 +24,9 @@ from bundlewalker.application import (
     DiagnosticsDependencies,
     DiagnosticSeverity,
 )
-from bundlewalker.compatibility import CompatibilityStatus
-from bundlewalker.transactions import TransactionDiagnosticStatus
-from bundlewalker.workspace import Workspace, initialize_workspace
+from bundlewalker.compatibility import CompatibilityStatus, MigrationStep
+from bundlewalker.transactions import QuiescentWorkspace, TransactionDiagnosticStatus
+from bundlewalker.workspace import MAX_WORKSPACE_CONFIG_BYTES, Workspace, initialize_workspace
 
 NOW = datetime(2026, 7, 19, 8, 0, tzinfo=UTC)
 ONE_GIB = 1024**3
@@ -42,6 +43,10 @@ def _dependencies() -> DiagnosticsDependencies:
         platform_name="Linux",
         clock=lambda: NOW,
         module_available=lambda name: name == "mcp",
+        distribution_available=lambda name: name == "mcp",
+        console_script_targets=(
+            lambda name: ("bundlewalker.interfaces.mcp:main",) if name == "bundlewalker-mcp" else ()
+        ),
         executable_lookup=(
             lambda name: "/private/bin/bundlewalker-mcp" if name == "bundlewalker-mcp" else None
         ),
@@ -157,6 +162,26 @@ def test_diagnostics_model_and_credential_policy_is_bounded_and_normalized(
     assert all(value not in result.model_dump_json() for value in environment.values())
 
 
+def test_diagnostics_does_not_scan_unbounded_model_leading_whitespace(
+    tmp_path: Path,
+) -> None:
+    class GuardedModel(str):
+        def __iter__(self) -> Iterator[str]:
+            raise AssertionError("model diagnostics iterated the complete provider value")
+
+    model = GuardedModel(" " * 10_000 + "openai:private-model")
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), environment={"BUNDLEWALKER_MODEL": model})
+    ).run(tmp_path)
+    checks = _by_code(result)
+
+    assert checks["configuration.model"].severity is DiagnosticSeverity.PASS
+    assert checks["configuration.credential"].summary == (
+        "Credential verification is unavailable for the configured provider."
+    )
+
+
 def test_diagnostics_unsupported_python_and_missing_mcp_are_failures(
     tmp_path: Path,
 ) -> None:
@@ -180,6 +205,33 @@ def test_diagnostics_unsupported_python_and_missing_mcp_are_failures(
     assert checks["mcp.package"].severity is DiagnosticSeverity.FAILURE
     assert checks["mcp.entrypoint"].severity is DiagnosticSeverity.FAILURE
     assert result.overall is DiagnosticSeverity.FAILURE
+
+
+@pytest.mark.parametrize(
+    "private_identity",
+    ["private-version-marker\n0.4.0", "private-version-marker" * 20],
+)
+def test_diagnostics_bounds_invalid_bundlewalker_identity(
+    tmp_path: Path,
+    private_identity: str,
+) -> None:
+    result = DiagnosticsApplication(
+        replace(_dependencies(), bundlewalker_version=private_identity)
+    ).run(tmp_path)
+
+    assert result.bundlewalker_version == "unknown"
+    assert _by_code(result)["runtime.bundlewalker"].severity is DiagnosticSeverity.FAILURE
+    assert "private-version-marker" not in result.model_dump_json()
+
+
+def test_diagnostics_reports_missing_bundlewalker_identity_without_aborting(
+    tmp_path: Path,
+) -> None:
+    result = DiagnosticsApplication(replace(_dependencies(), bundlewalker_version="")).run(tmp_path)
+
+    assert len(result.checks) == 14
+    assert result.bundlewalker_version == "unknown"
+    assert _by_code(result)["runtime.bundlewalker"].severity is DiagnosticSeverity.FAILURE
 
 
 @pytest.mark.parametrize(
@@ -257,6 +309,74 @@ def test_diagnostics_mcp_package_and_entrypoint_are_independent(
         DiagnosticSeverity.PASS if entrypoint_available else DiagnosticSeverity.FAILURE
     )
     assert "/private" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("metadata_available", "module_available", "severity"),
+    [
+        (True, True, DiagnosticSeverity.PASS),
+        (True, False, DiagnosticSeverity.FAILURE),
+        (False, True, DiagnosticSeverity.FAILURE),
+        (False, False, DiagnosticSeverity.FAILURE),
+    ],
+)
+def test_diagnostics_mcp_package_requires_metadata_and_module_availability(
+    tmp_path: Path,
+    metadata_available: bool,
+    module_available: bool,
+    severity: DiagnosticSeverity,
+) -> None:
+    def distribution_available(_name: str) -> bool:
+        return metadata_available
+
+    def find_module(_name: str) -> bool:
+        return module_available
+
+    result = DiagnosticsApplication(
+        replace(
+            _dependencies(),
+            distribution_available=distribution_available,
+            module_available=find_module,
+        )
+    ).run(tmp_path)
+
+    assert _by_code(result)["mcp.package"].severity is severity
+
+
+@pytest.mark.parametrize(
+    ("targets", "executable", "severity"),
+    [
+        (
+            ("bundlewalker.interfaces.mcp:main",),
+            "/private/bin/bundlewalker-mcp",
+            DiagnosticSeverity.PASS,
+        ),
+        (("bundlewalker.interfaces.mcp:main",), None, DiagnosticSeverity.FAILURE),
+        (("private.module:main",), "/private/bin/bundlewalker-mcp", DiagnosticSeverity.FAILURE),
+        ((), "/private/bin/bundlewalker-mcp", DiagnosticSeverity.FAILURE),
+    ],
+)
+def test_diagnostics_mcp_entrypoint_requires_expected_metadata_and_executable(
+    tmp_path: Path,
+    targets: tuple[str, ...],
+    executable: str | None,
+    severity: DiagnosticSeverity,
+) -> None:
+    def console_script_targets(_name: str) -> tuple[str, ...]:
+        return targets
+
+    def executable_lookup(_name: str) -> str | None:
+        return executable
+
+    result = DiagnosticsApplication(
+        replace(
+            _dependencies(),
+            console_script_targets=console_script_targets,
+            executable_lookup=executable_lookup,
+        )
+    ).run(tmp_path)
+
+    assert _by_code(result)["mcp.entrypoint"].severity is severity
 
 
 def test_diagnostics_disk_inspection_unavailability_is_a_bounded_warning(
@@ -490,6 +610,117 @@ def test_diagnostics_explicit_missing_config_start_never_falls_through(
     assert transaction_calls == 0
 
 
+def test_diagnostics_reads_one_opened_config_snapshot_during_final_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    config_path = workspace.root / "bundlewalker.toml"
+    retained_config = workspace.root / "retained-config.toml"
+    outside_config = tmp_path / "outside.toml"
+    outside_config.write_bytes(b"version = " + b"9" * 5_000 + b"\n")
+    transaction_calls = 0
+    config_descriptor: int | None = None
+    config_opens = 0
+    swapped = False
+    original_open = os.open
+    original_fstat = os.fstat
+
+    def tracked_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal config_descriptor, config_opens
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(path) == "bundlewalker.toml" and dir_fd is not None:
+            config_descriptor = descriptor
+            config_opens += 1
+            assert flags & getattr(os, "O_NOFOLLOW", 0)
+            assert flags & getattr(os, "O_NONBLOCK", 0)
+        return descriptor
+
+    def swap_after_fstat(descriptor: int) -> os.stat_result:
+        nonlocal swapped
+        metadata = original_fstat(descriptor)
+        if descriptor == config_descriptor and not swapped:
+            config_path.rename(retained_config)
+            config_path.symlink_to(outside_config)
+            swapped = True
+        return metadata
+
+    def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
+        nonlocal transaction_calls
+        transaction_calls += 1
+        return TransactionDiagnosticStatus.CLEAN
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(os, "open", tracked_open)
+        guarded.setattr(os, "fstat", swap_after_fstat)
+        result = DiagnosticsApplication(
+            replace(_dependencies(), transaction_inspector=count_transaction)
+        ).run(workspace.root)
+
+    checks = _by_code(result)
+    assert swapped
+    assert config_opens == 1
+    assert checks["workspace.configuration"].severity is DiagnosticSeverity.PASS
+    assert checks["workspace.compatibility"].severity is DiagnosticSeverity.PASS
+    assert checks["workspace.structure"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
+    assert transaction_calls == 0
+
+
+def test_diagnostics_stays_on_opened_root_during_parent_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    selected_root = workspace.root
+    retained_root = tmp_path / "retained-root"
+    outside_root = tmp_path / "outside-root"
+    outside_root.mkdir()
+    (outside_root / "bundlewalker.toml").write_bytes(b"version = " + b"9" * 5_000 + b"\n")
+    transaction_calls = 0
+    replaced = False
+    original_open = os.open
+
+    def replace_before_config_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal replaced
+        if os.fsdecode(path) == "bundlewalker.toml" and dir_fd is not None and not replaced:
+            selected_root.rename(retained_root)
+            selected_root.symlink_to(outside_root, target_is_directory=True)
+            replaced = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
+        nonlocal transaction_calls
+        transaction_calls += 1
+        return TransactionDiagnosticStatus.CLEAN
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(os, "open", replace_before_config_open)
+        result = DiagnosticsApplication(
+            replace(_dependencies(), transaction_inspector=count_transaction)
+        ).run(selected_root)
+
+    checks = _by_code(result)
+    assert replaced
+    assert checks["workspace.configuration"].severity is DiagnosticSeverity.PASS
+    assert checks["workspace.compatibility"].severity is DiagnosticSeverity.PASS
+    assert checks["workspace.structure"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
+    assert transaction_calls == 0
+
+
 def test_diagnostics_missing_workspace_fails_discovery_and_marks_dependents_skipped(
     tmp_path: Path,
 ) -> None:
@@ -517,6 +748,70 @@ def test_diagnostics_invalid_current_configuration_is_bounded(tmp_path: Path) ->
     assert _by_code(result)["workspace.configuration"].severity is DiagnosticSeverity.FAILURE
     assert str(workspace.root) not in serialized
     assert "Traceback" not in serialized
+
+
+def test_diagnostics_contains_toml_integer_limit_as_configuration_failure(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "integer-limit"
+    root.mkdir()
+    (root / "bundlewalker.toml").write_bytes(b"version = " + b"9" * 5_000 + b"\n")
+
+    result = DiagnosticsApplication(_dependencies()).run(root)
+    checks = _by_code(result)
+
+    assert len(result.checks) == 14
+    assert checks["workspace.discovery"].severity is DiagnosticSeverity.PASS
+    assert checks["workspace.configuration"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
+
+
+def test_diagnostics_rejects_oversized_config_before_toml_parsing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "oversized"
+    root.mkdir()
+    (root / "bundlewalker.toml").write_bytes(b"x" * (MAX_WORKSPACE_CONFIG_BYTES + 2))
+    original_open = os.open
+    original_read = os.read
+    config_descriptor: int | None = None
+    requested_bytes = 0
+
+    def tracked_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal config_descriptor
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fsdecode(path) == "bundlewalker.toml" and dir_fd is not None:
+            config_descriptor = descriptor
+        return descriptor
+
+    def bounded_read(descriptor: int, size: int) -> bytes:
+        nonlocal requested_bytes
+        if descriptor == config_descriptor:
+            requested_bytes += size
+            assert requested_bytes <= MAX_WORKSPACE_CONFIG_BYTES + 1
+        return original_read(descriptor, size)
+
+    def unexpected_parse(_content: str) -> object:
+        pytest.fail("oversized workspace configuration was parsed")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(os, "open", tracked_open)
+        guarded.setattr(os, "read", bounded_read)
+        guarded.setattr(tomllib, "loads", unexpected_parse)
+        result = DiagnosticsApplication(_dependencies()).run(root)
+
+    checks = _by_code(result)
+    assert config_descriptor is not None
+    assert requested_bytes <= MAX_WORKSPACE_CONFIG_BYTES + 1
+    assert checks["workspace.configuration"].severity is DiagnosticSeverity.FAILURE
+    assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
 
 
 def test_diagnostics_future_workspace_reports_compatibility_without_current_parse(
@@ -554,40 +849,38 @@ def test_diagnostics_future_workspace_reports_compatibility_without_current_pars
 )
 def test_diagnostics_noncurrent_compatibility_is_bounded_and_gates_current_inspection(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     status: CompatibilityStatus,
     summary: str,
     remediation_command: str,
 ) -> None:
     workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
-    calls = {"configuration": 0, "transaction": 0}
+    transaction_calls = 0
 
-    def inspect_as_noncurrent(
-        _config_path: Path,
-    ) -> tuple[CompatibilityStatus, None]:
-        return status, None
+    def apply(_quiescent: QuiescentWorkspace) -> None:
+        return None
 
-    load_workspace_config = diagnostics_module.load_workspace_config
+    def verify(_workspace: Workspace) -> None:
+        return None
 
-    def count_configuration(config_path: Path) -> object:
-        calls["configuration"] += 1
-        return load_workspace_config(config_path)
+    if status is CompatibilityStatus.UPGRADEABLE:
+        target_version = 2
+        migrations = {1: MigrationStep(1, 2, apply, verify)}
+    else:
+        target_version = 1
+        migrations = None
+        (workspace.root / "bundlewalker.toml").write_text("version = 0\n", encoding="utf-8")
 
     def count_transaction(_workspace: Workspace) -> TransactionDiagnosticStatus:
-        calls["transaction"] += 1
+        nonlocal transaction_calls
+        transaction_calls += 1
         return TransactionDiagnosticStatus.CLEAN
 
-    monkeypatch.setattr(
-        diagnostics_module,
-        "_inspect_selected_workspace_config",
-        inspect_as_noncurrent,
+    dependencies = replace(
+        _dependencies(),
+        transaction_inspector=count_transaction,
+        workspace_target_version=target_version,
+        workspace_migrations=migrations,
     )
-    monkeypatch.setattr(
-        diagnostics_module,
-        "load_workspace_config",
-        count_configuration,
-    )
-    dependencies = replace(_dependencies(), transaction_inspector=count_transaction)
 
     result = DiagnosticsApplication(dependencies).run(workspace.root)
     checks = _by_code(result)
@@ -597,7 +890,7 @@ def test_diagnostics_noncurrent_compatibility_is_bounded_and_gates_current_inspe
     assert checks["workspace.compatibility"].summary == summary
     assert remediation_command in " ".join(checks["workspace.compatibility"].remediation)
     assert checks["transactions.state"].severity is DiagnosticSeverity.WARNING
-    assert calls == {"configuration": 0, "transaction": 0}
+    assert transaction_calls == 0
 
 
 def test_diagnostics_broken_structure_gates_permissions_and_transactions(
@@ -641,6 +934,28 @@ def test_diagnostics_write_permission_denial_is_failure_without_probe_file(
 
     assert _by_code(result)["workspace.permissions"].severity is DiagnosticSeverity.FAILURE
     assert sorted(path.relative_to(workspace.root) for path in workspace.root.rglob("*")) == before
+
+
+def test_diagnostics_requires_traversal_permission_for_managed_directories(
+    tmp_path: Path,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    checked: list[tuple[Path, int]] = []
+
+    def deny_raw_traversal(path: Path, mode: int) -> bool:
+        checked.append((path, mode))
+        return not (path == workspace.raw_dir and mode == os.X_OK)
+
+    result = DiagnosticsApplication(
+        replace(_dependencies(), permission_check=deny_raw_traversal)
+    ).run(workspace.root)
+
+    assert _by_code(result)["workspace.permissions"].severity is DiagnosticSeverity.FAILURE
+    assert (workspace.root, os.X_OK) in checked
+    assert (workspace.wiki_dir, os.X_OK) in checked
+    assert (workspace.raw_dir, os.X_OK) in checked
+    assert (workspace.root / "bundlewalker.toml", os.X_OK) not in checked
+    assert (workspace.conventions_file, os.X_OK) not in checked
 
 
 def test_diagnostics_run_preserves_bytes_modes_node_kinds_and_symlink_targets(

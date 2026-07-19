@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import hashlib
+import importlib.metadata
+import importlib.util
 import shutil
 import subprocess
 import tarfile
 import tomllib
 from importlib.metadata import version as distribution_version
 from pathlib import Path
+
+import pytest
 
 import bundlewalker
 
@@ -42,6 +46,23 @@ def test_release_versions_are_consistent() -> None:
     assert bundlewalker.__version__ == expected
     assert distribution_version("bundlewalker") == expected
     assert editable_package["version"] == expected
+
+
+def test_package_import_survives_missing_distribution_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_version(_distribution_name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError("bundlewalker")
+
+    monkeypatch.setattr(importlib.metadata, "version", missing_version)
+    package_init = PROJECT_ROOT / "src/bundlewalker/__init__.py"
+    spec = importlib.util.spec_from_file_location("isolated_bundlewalker", package_init)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+
+    spec.loader.exec_module(module)
+
+    assert module.__version__ == ""
 
 
 def test_public_package_metadata_is_complete() -> None:
