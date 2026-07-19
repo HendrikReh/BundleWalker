@@ -456,8 +456,9 @@ The JSON report has schema version `1`. Its target must be a new regular file: e
 unsafe targets, and missing parents are rejected, and the command does not echo the destination.
 On POSIX systems BundleWalker creates the file with mode `0600`; filesystem behavior on Windows is
 experimental. If a write fails after creation, BundleWalker conservatively retains any partial
-file rather than deleting a path that could have changed ownership; inspect and remove that file
-yourself when appropriate.
+file. Portable macOS and Linux pathname APIs cannot atomically prove that the destination still
+names the created inode, so automatic cleanup could delete an unrelated replacement.
+Inspect and remove the newly created report target when appropriate before retrying.
 
 The report excludes credentials, model values, workspace content, filesystem paths, host identity,
 review and transaction identifiers, and exception or provider payloads. This is a bounded privacy

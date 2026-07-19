@@ -297,8 +297,11 @@ invalid arguments retain exit code `2`.
 The output is canonical UTF-8 JSON with a trailing newline. The report does not contain its own
 destination. Parent directories must already exist. The writer opens a new regular file without
 following symlinks and refuses an existing path rather than overwriting it. On platforms that
-support POSIX modes, the new file uses owner-only permissions. If a write fails after creation,
-the writer removes only the partial file it created when it can do so safely.
+support POSIX modes, the new file uses owner-only permissions. If any write, `fchmod`, `fsync`, or
+close operation fails after creation, the writer retains the owner-only partial target. Portable
+macOS and Linux pathname APIs cannot atomically prove that a path still names the created inode;
+automatic cleanup could delete an unrelated replacement. The user must inspect and remove the
+newly created report target when appropriate before retrying.
 
 An existing target, symlink, directory, or otherwise invalid report target is an invalid-input
 error and exits `2`. An I/O failure while fulfilling a valid report request is an operational
@@ -370,7 +373,8 @@ Implementation is test-first and remains offline.
 - Verify warning-only exit `0` and any failure exit `1`.
 - Validate the report against its versioned Pydantic schema.
 - Refuse existing files, symlinks, directories, and missing parents without overwriting anything.
-- Verify partial-file cleanup for simulated write failures.
+- Verify owner-only partial-target retention for simulated write, `fchmod`, `fsync`, and close
+  failures, including a regression that proves an unrelated replacement is never deleted.
 - Assert no workspace mutation for plain `doctor` and no mutation beyond the authorized report for
   `doctor --report`.
 - Feed secret values, private paths, hostnames, raw content, review identifiers, and exception

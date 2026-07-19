@@ -11,6 +11,8 @@ All notable BundleWalker releases are recorded here.
 
 ### Changed
 
+- Clarified that post-creation report failures retain the owner-only partial support-report target
+  so automatic pathname cleanup cannot delete an unrelated replacement.
 - Hardened TestPyPI post-upload verification with six bounded exponential installation attempts
   while preserving permanent failures and immutable-version safety.
 

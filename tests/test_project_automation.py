@@ -279,6 +279,12 @@ def test_workspace_lifecycle_policy_and_commands_are_published() -> None:
 def test_doctor_diagnostics_and_redacted_support_reports_are_published() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    design = (
+        PROJECT_ROOT / "docs/superpowers/specs/2026-07-19-bundlewalker-doctor-diagnostics-design.md"
+    ).read_text(encoding="utf-8")
+    implementation_plan = (
+        PROJECT_ROOT / "docs/superpowers/plans/2026-07-19-bundlewalker-doctor-diagnostics.md"
+    ).read_text(encoding="utf-8")
     support = (PROJECT_ROOT / "SUPPORT.md").read_text(encoding="utf-8")
     security = (PROJECT_ROOT / "SECURITY.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -298,6 +304,14 @@ def test_doctor_diagnostics_and_redacted_support_reports_are_published() -> None
     assert "review the report" in support.lower()
     assert "private vulnerability" in security.lower()
     assert "doctor" in changelog.lower()
+    for document in (design, implementation_plan):
+        assert "cannot atomically prove" in document
+        assert "unrelated replacement" in document
+        assert "retains the owner-only partial target" in document
+    for document in (readme, user_guide, support, security):
+        assert "inspect and remove" in document.lower()
+        assert "before retrying" in document.lower()
+    assert "owner-only partial support-report target" in changelog
 
 
 def test_historical_plan_embeds_current_user_guide_byte_for_byte() -> None:

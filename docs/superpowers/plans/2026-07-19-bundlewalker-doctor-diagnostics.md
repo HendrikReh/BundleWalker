@@ -13,6 +13,7 @@
 - Plain `bundlewalker doctor` is offline and byte-for-byte read-only; it never creates, repairs, recovers, deletes, renames, fsyncs, or otherwise mutates workspace state.
 - `doctor --report REPORT.json` writes only the explicitly authorized new report file and performs no workspace mutation.
 - The report writer refuses every existing target, symlink, directory, and missing parent; it never overwrites a path.
+- After any post-creation write, `fchmod`, `fsync`, or close failure, the writer retains the owner-only partial target. Portable macOS and Linux pathname APIs cannot atomically prove that a path still names the created inode, so automatic cleanup could delete an unrelated replacement. The user must inspect and remove the newly created report target when appropriate before retrying.
 - Warnings exit `0`; one or more diagnostic failures exit `1`; Typer syntax errors and invalid report targets exit `2`.
 - Every run returns exactly the fourteen check codes and categories defined by the approved design, in the approved order.
 - Diagnostic contracts never contain environment values, credential data, full model identifiers, source or generated content, review diffs, transaction/review identifiers, filesystem paths, usernames, hostnames, provider payloads, or exception text.
@@ -1375,7 +1376,7 @@ def test_report_writer_refuses_symlink_directory_and_missing_parent(tmp_path: Pa
     assert existing.read_text(encoding="utf-8") == "keep"
 
 
-def test_report_writer_removes_only_its_partial_file_on_write_failure(
+def test_report_writer_retains_its_owner_only_partial_file_on_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1389,7 +1390,8 @@ def test_report_writer_removes_only_its_partial_file_on_write_failure(
 
     with pytest.raises(SupportReportWriteError):
         write_support_report(report, destination)
-    assert not destination.exists()
+    assert destination.exists()
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 ```
 
 - [ ] **Step 2: Run the focused tests and verify RED**
@@ -1441,7 +1443,7 @@ def _noun(value: int, singular: str, plural: str) -> str:
     return singular if value == 1 else plural
 ```
 
-Implement `write_support_report` with `os.open(destination, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)`, a complete `os.write` loop over `(report.model_dump_json(indent=2) + "\n").encode("utf-8")`, `os.fsync`, and descriptor close. Convert `FileExistsError`, `FileNotFoundError`, `NotADirectoryError`, and an existing non-regular target to `SupportReportTargetError` without exception text. Convert other `OSError` values to `SupportReportWriteError`. Track whether this invocation created the destination and unlink only that partial file after a write/fsync failure.
+Implement `write_support_report` with `os.open(destination, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)`, a complete `os.write` loop over `(report.model_dump_json(indent=2) + "\n").encode("utf-8")`, `os.fsync`, and descriptor close. Convert `FileExistsError`, `FileNotFoundError`, `NotADirectoryError`, and an existing non-regular target to `SupportReportTargetError` without exception text. Convert other `OSError` values to `SupportReportWriteError`. After creation, retain the owner-only partial target on write, `fchmod`, `fsync`, or close failure. Portable macOS and Linux pathname APIs cannot atomically prove that the destination still names the created inode, and automatic cleanup could delete an unrelated replacement; do not unlink it. Tell the user to inspect and remove the newly created report target when appropriate before retrying.
 
 - [ ] **Step 4: Write failing public CLI tests**
 

@@ -30,6 +30,10 @@ it to a public issue. The report omits credentials, model values, workspace cont
 paths, host identity, and transaction or review identifiers, but it is still your responsibility
 to confirm that the diagnostic context is appropriate to share.
 
+If report creation fails after the target is created, BundleWalker retains the owner-only partial
+target because automatic pathname cleanup could delete an unrelated replacement.
+Inspect and remove the newly created report target when appropriate before retrying.
+
 Security-sensitive reports do not belong in public issues. Follow the
 [Security Policy](SECURITY.md) instead.
 

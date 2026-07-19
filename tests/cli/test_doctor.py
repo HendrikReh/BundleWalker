@@ -277,7 +277,7 @@ def test_report_writer_leaves_partial_on_descriptor_operation_failure(
     assert destination.exists()
 
 
-def test_report_writer_never_deletes_replacement_installed_during_failure_cleanup(
+def test_report_writer_never_deletes_replacement_installed_during_failure_handling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
