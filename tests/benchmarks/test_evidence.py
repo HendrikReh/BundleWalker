@@ -71,6 +71,10 @@ def test_environment_record_contains_no_identity_or_paths(tmp_path: Path) -> Non
         "x" * 65,
         "ubuntu 24",
         "",
+        "hendrik",
+        "build-host-01",
+        "runner_image.v1",
+        "macos-15",
     ],
 )
 def test_environment_rejects_unsafe_runner_image_tokens(
@@ -94,8 +98,8 @@ def test_environment_rejects_runner_image_containing_the_benchmark_root(
     assert str(tmp_path) not in environment.model_dump_json()
 
 
-@pytest.mark.parametrize("runner_image", ["ubuntu24", "macos-15", "runner_image.v1"])
-def test_environment_accepts_bounded_runner_image_tokens(
+@pytest.mark.parametrize("runner_image", ["ubuntu24", "macos15"])
+def test_environment_accepts_recognized_phase_one_runner_images(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     runner_image: str,

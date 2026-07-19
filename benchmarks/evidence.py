@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import re
 import secrets
 import selectors
 import stat
@@ -45,7 +44,7 @@ _READ_ONLY_SCENARIOS = frozenset(
 _STAT_TIMEOUT_SECONDS = 5
 _MAX_FILESYSTEM_TYPE_CHARACTERS = 64
 _TEMPORARY_CREATION_ATTEMPTS = 32
-_RUNNER_IMAGE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_OFFICIAL_RUNNER_IMAGES = frozenset({"macos15", "ubuntu24"})
 
 
 def nearest_rank_p95(samples: Sequence[int]) -> int:
@@ -111,7 +110,7 @@ def collect_environment(root: Path) -> EnvironmentRecord:
         architecture=platform.machine(),
         logical_cpu_count=os.cpu_count(),
         total_memory_bytes=_portable_total_memory(),
-        runner_image=_safe_runner_image(root),
+        runner_image=_safe_runner_image(),
         filesystem_type=_portable_filesystem_type(root),
     )
 
@@ -160,13 +159,9 @@ def _portable_total_memory() -> int | None:
     return total if total > 0 else None
 
 
-def _safe_runner_image(root: Path) -> str | None:
+def _safe_runner_image() -> str | None:
     value = os.environ.get("ImageOS")  # noqa: SIM112 - GitHub's documented key
-    if value is None or _RUNNER_IMAGE_TOKEN.fullmatch(value) is None:
-        return None
-    if os.fspath(root) in value:
-        return None
-    return value
+    return value if value in _OFFICIAL_RUNNER_IMAGES else None
 
 
 def _portable_filesystem_type(root: Path) -> str | None:
