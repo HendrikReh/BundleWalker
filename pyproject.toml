@@ -61,6 +61,9 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+exclude = [".superpowers/**"]
+
 [tool.hatch.build.targets.sdist.force-include]
 "tests/fixtures/historical/empty-directories.json" = "tests/fixtures/historical/empty-directories.json"
 

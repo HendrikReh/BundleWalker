@@ -135,6 +135,14 @@ git commit -m "build: prepare 0.4.0a2 alpha"
 
 ## Post-implementation release procedure
 
+## Artifact hygiene follow-up
+
+The source distribution must exclude untracked local worker state under `.superpowers/**`, so a
+locally built release artifact matches a clean GitHub checkout. Keep this as an sdist-only Hatch
+exclusion: tracked release plans under `docs/superpowers/**` remain included. The focused
+regression coverage is `tests/test_release_metadata.py`, and the release build configuration scope
+is `pyproject.toml`.
+
 After Task 1 passes task-scoped and whole-branch review:
 
 1. Push `codex/release-0.4.0a2` and open a ready pull request into `master`.

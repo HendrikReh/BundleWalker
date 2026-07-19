@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import hashlib
+import subprocess
+import tarfile
 import tomllib
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -138,3 +140,20 @@ def test_development_version_is_second_alpha() -> None:
 
     assert project["project"]["version"] == "0.4.0a2"
     assert bundlewalker.__version__ == "0.4.0a2"
+
+
+def test_source_distribution_excludes_untracked_superpowers_worker_state(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(
+        ["uv", "build", "--sdist", "--out-dir", str(tmp_path), "--no-sources"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+
+    sdist = next(tmp_path.glob("bundlewalker-*.tar.gz"))
+    with tarfile.open(sdist) as archive:
+        packaged_paths = archive.getnames()
+
+    assert not any("/.superpowers/" in path for path in packaged_paths)
+    assert any("/docs/superpowers/plans/" in path for path in packaged_paths)
