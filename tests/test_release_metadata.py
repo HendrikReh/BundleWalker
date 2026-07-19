@@ -40,6 +40,44 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/software-agent.md",
 }
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
+ALLOWED_SUPPORTED_CAPACITY_SENTENCES = frozenset(
+    {
+        "Supported capacity is not yet published.",
+        (
+            "Local runs are useful for development, but they do not themselves establish a "
+            "supported capacity."
+        ),
+    }
+)
+
+
+def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
+    text_parts: list[str] = []
+    for token in MarkdownIt("commonmark").parse(markdown):
+        if token.type != "inline":
+            continue
+        inline_parts: list[str] = []
+        for child in token.children or ():
+            if child.type in {"text", "code_inline"}:
+                inline_parts.append(child.content)
+            elif child.type in {"softbreak", "hardbreak"}:
+                inline_parts.append(" ")
+        text_parts.append("".join(inline_parts))
+
+    normalized_text = re.sub(r"\s+", " ", " ".join(text_parts)).strip()
+    sentences = {
+        match.group(0).strip() for match in re.finditer(r"[^.!?]+[.!?](?=\s|$)", normalized_text)
+    }
+    return frozenset(
+        sentence
+        for sentence in sentences
+        if re.search(r"\bsupported\b", sentence, re.IGNORECASE)
+        and re.search(r"\bcapacity\b", sentence, re.IGNORECASE)
+    )
+
+
+def _assert_provisional_capacity_claims(markdown: str) -> None:
+    assert _supported_capacity_sentences(markdown) == ALLOWED_SUPPORTED_CAPACITY_SENTENCES
 
 
 def test_release_versions_are_consistent() -> None:
@@ -68,14 +106,8 @@ def test_performance_document_is_provisional_and_linked() -> None:
     assert "remote model-provider latency is excluded" in performance
     assert "Windows remains experimental" in performance
 
-    normalized = performance.casefold()
-    for prohibited_claim in (
-        "bundlewalker supports up to",
-        "supported capacity:",
-        "supported envelope",
-        "supported size",
-    ):
-        assert prohibited_claim not in normalized
+    _assert_provisional_capacity_claims(performance)
+    assert "BundleWalker supports up to" not in performance
     assert re.search(r"\bbeta\s+(?:is\s+)?complete\b", performance, re.IGNORECASE) is None
     assert re.search(r"\b(?:release|version)\s+(?:is|:|\d)", performance, re.IGNORECASE) is None
 
@@ -179,6 +211,23 @@ def test_performance_document_is_provisional_and_linked() -> None:
                 if target:
                     targets.add((source.parent / target).resolve())
         assert performance_path.resolve() in targets
+
+
+@pytest.mark.parametrize(
+    "affirmative_claim",
+    [
+        "BundleWalker has a supported workspace capacity of 50 MiB.",
+        "A capacity of 50 MiB is supported.",
+        "A CAPACITY of 50 MiB is SUPPORTED.",
+    ],
+)
+def test_performance_contract_rejects_affirmative_supported_capacity_claims(
+    affirmative_claim: str,
+) -> None:
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_provisional_capacity_claims(f"{performance}\n\n{affirmative_claim}\n")
 
 
 @pytest.mark.parametrize(
