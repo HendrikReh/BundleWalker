@@ -45,7 +45,7 @@ def test_initialization_measures_a_new_standard_workspace(tmp_path: Path) -> Non
     assert observation.checkpoint_bytes["initialized_workspace"] > 0
 
 
-@pytest.mark.parametrize("destination_kind", ["directory", "file"])
+@pytest.mark.parametrize("destination_kind", ["directory", "file", "broken_symlink"])
 def test_initialization_rejects_existing_destination_before_measurement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -54,8 +54,10 @@ def test_initialization_rejects_existing_destination_before_measurement(
     destination = tmp_path / "existing"
     if destination_kind == "directory":
         destination.mkdir()
-    else:
+    elif destination_kind == "file":
         destination.write_text("keep", encoding="ascii")
+    else:
+        destination.symlink_to(tmp_path / "missing")
 
     calls: list[str] = []
 
@@ -78,5 +80,8 @@ def test_initialization_rejects_existing_destination_before_measurement(
     assert calls == []
     if destination_kind == "directory":
         assert list(destination.iterdir()) == []
-    else:
+    elif destination_kind == "file":
         assert destination.read_text(encoding="ascii") == "keep"
+    else:
+        assert destination.is_symlink()
+        assert not destination.exists()
