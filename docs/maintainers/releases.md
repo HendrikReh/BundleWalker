@@ -73,6 +73,12 @@ gh workflow run publish-testpypi.yml --ref master -f version=0.4.0a2
 The build, publish, and TestPyPI installation jobs must all pass. TestPyPI versions are immutable;
 increment the prerelease version instead of attempting to overwrite a failed publication.
 
+The verification job retries only the exact TestPyPI installation up to six times, waiting 5,
+10, 20, 40, and 80 seconds after successive propagation failures. Build, upload, artifact,
+metadata, and CLI failures remain immediate. If upload succeeded but post-upload verification
+exhausted the propagation window, confirm the immutable version is present on TestPyPI and rerun
+only the failed verification job; do not dispatch a new build or publication for that version.
+
 ## Production PyPI and GitHub releases
 
 Production publication is a later milestone. Before enabling it, add a separate `pypi` environment

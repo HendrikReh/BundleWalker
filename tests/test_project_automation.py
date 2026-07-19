@@ -221,6 +221,32 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     _assert_actions_are_sha_pinned(workflow)
 
 
+def test_testpypi_verification_retries_bounded_propagation_delay() -> None:
+    workflow = _yaml(".github/workflows/publish-testpypi.yml")
+    verify = workflow["jobs"]["verify"]
+    install_step = next(
+        step
+        for step in _steps(workflow, "verify")
+        if step["name"] == "Install and smoke-test published prerelease"
+    )
+    script = install_step["run"]
+    install_command = (
+        "uv pip install --python .testpypi-venv/bin/python --no-deps "
+        '--default-index https://test.pypi.org/simple "bundlewalker==${{ inputs.version }}"'
+    )
+
+    assert "continue-on-error" not in verify
+    assert "continue-on-error" not in install_step
+    assert "retry_delays=(5 10 20 40 80)" in script
+    assert "for attempt in 1 2 3 4 5 6; do" in script
+    assert f"if {install_command}; then" in script
+    assert 'if [ "$attempt" -eq 6 ]; then' in script
+    assert "exit 1" in script
+    assert "break" in script
+    assert 'delay="${retry_delays[$((attempt - 1))]}"' in script
+    assert 'sleep "$delay"' in script
+
+
 def test_workspace_lifecycle_policy_and_commands_are_published() -> None:
     policy = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")

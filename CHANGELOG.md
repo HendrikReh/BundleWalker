@@ -2,6 +2,13 @@
 
 All notable BundleWalker releases are recorded here.
 
+## [Unreleased]
+
+### Changed
+
+- Hardened TestPyPI post-upload verification with six bounded exponential installation attempts
+  while preserving permanent failures and immutable-version safety.
+
 ## [v0.4.0a2] - 2026-07-19
 
 ### Added
@@ -76,6 +83,7 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
+[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...HEAD
 [v3]: https://github.com/HendrikReh/BundleWalker/compare/v2...v3
 [v0.4.0a2]: https://github.com/HendrikReh/BundleWalker/compare/v3...v0.4.0a2
 [v2]: https://github.com/HendrikReh/BundleWalker/compare/v1...v2
