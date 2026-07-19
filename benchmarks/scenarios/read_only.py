@@ -158,6 +158,8 @@ def run_read_only(scenario: ScenarioName, fixture: GeneratedFixture) -> SampleOb
 
 
 def run_initialization(destination: Path) -> SampleObservation:
+    if destination.exists():
+        raise ValueError("initialization destination must not exist")
     started = time.perf_counter_ns()
     workspace = initialize_workspace(destination)
     duration = time.perf_counter_ns() - started
