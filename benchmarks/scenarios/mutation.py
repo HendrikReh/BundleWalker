@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from benchmarks.contracts import SampleObservation, ScenarioName
+from benchmarks.evidence import materialized_bytes
 from benchmarks.fixtures import GeneratedFixture, tree_sha256
 from benchmarks.scenarios import ScenarioCallable
 from bundlewalker.agents.common import AgentDependencies
@@ -106,14 +107,6 @@ def _prospective_wiki(fixture: GeneratedFixture, review_id: str) -> Path:
     return _transaction_dir(fixture, review_id) / "prospective-wiki"
 
 
-def _tree_size(root: Path) -> int:
-    if not root.is_dir() or root.is_symlink():
-        return 0
-    return sum(
-        path.stat().st_size for path in root.rglob("*") if path.is_file() and not path.is_symlink()
-    )
-
-
 def _transactions_are_clean(fixture: GeneratedFixture) -> bool:
     root = _transaction_root(fixture)
     if not root.exists():
@@ -182,8 +175,8 @@ def _prepare_review(
     prospective = _prospective_wiki(fixture, pending.review_id)
     assert prospective.is_dir() and not prospective.is_symlink()
     prospective_sha256 = tree_sha256(prospective)
-    prepared_bytes = _tree_size(fixture.workspace.root)
-    assert prepared_bytes > fixture.exact_workspace_bytes
+    prepared_bytes = materialized_bytes(_transaction_root(fixture))
+    assert prepared_bytes > 0
     return application, expected_source, pending.review_id, prospective_sha256, prepared_bytes
 
 
@@ -209,8 +202,8 @@ def _run_prepare_ingestion(fixture: GeneratedFixture) -> SampleObservation:
     prospective = _prospective_wiki(fixture, pending.review_id)
     assert prospective.is_dir() and not prospective.is_symlink()
     prospective_sha256 = tree_sha256(prospective)
-    prepared_bytes = _tree_size(fixture.workspace.root)
-    assert prepared_bytes > fixture.exact_workspace_bytes
+    prepared_bytes = materialized_bytes(_transaction_root(fixture))
+    assert prepared_bytes > 0
     _assert_valid_wiki(fixture)
 
     output_sha256 = _output_sha256(
@@ -242,8 +235,8 @@ def _run_commit(fixture: GeneratedFixture) -> SampleObservation:
     _assert_valid_wiki(fixture)
     assert get_pending_review(fixture.workspace) is None
     assert _transactions_are_clean(fixture)
-    committed_bytes = _tree_size(fixture.workspace.root)
-    cleaned_bytes = _tree_size(_transaction_root(fixture))
+    committed_bytes = materialized_bytes(fixture.workspace.root)
+    cleaned_bytes = materialized_bytes(_transaction_root(fixture))
     assert cleaned_bytes == 0
 
     output_sha256 = _commit_recovery_output(
@@ -323,7 +316,7 @@ def _crash_at_swapping(fixture: GeneratedFixture, review_id: str) -> None:
 def _run_recover_swapping(fixture: GeneratedFixture) -> SampleObservation:
     _, source, review_id, prospective_sha256, prepared_bytes = _prepare_review(fixture)
     _crash_at_swapping(fixture, review_id)
-    interrupted_bytes = _tree_size(fixture.workspace.root)
+    interrupted_bytes = materialized_bytes(_transaction_root(fixture))
     assert interrupted_bytes > 0
 
     started = time.perf_counter_ns()
@@ -334,8 +327,8 @@ def _run_recover_swapping(fixture: GeneratedFixture) -> SampleObservation:
     _assert_persisted_raw(source, fixture)
     _assert_valid_wiki(fixture)
     assert _transactions_are_clean(fixture)
-    committed_bytes = _tree_size(fixture.workspace.root)
-    cleaned_bytes = _tree_size(_transaction_root(fixture))
+    committed_bytes = materialized_bytes(fixture.workspace.root)
+    cleaned_bytes = materialized_bytes(_transaction_root(fixture))
     assert cleaned_bytes == 0
 
     recovered_identity = tree_sha256(fixture.workspace.root)
