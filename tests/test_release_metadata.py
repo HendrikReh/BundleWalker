@@ -133,8 +133,8 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
-def test_development_version_is_foundation_alpha() -> None:
+def test_development_version_is_second_alpha() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0a1"
-    assert bundlewalker.__version__ == "0.4.0a1"
+    assert project["project"]["version"] == "0.4.0a2"
+    assert bundlewalker.__version__ == "0.4.0a2"

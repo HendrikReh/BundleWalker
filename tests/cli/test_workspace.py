@@ -34,7 +34,7 @@ def test_workspace_status_reports_future_format_without_creating_state(tmp_path:
 
     assert result.exit_code == 0, result.output
     assert result.output == (
-        "BundleWalker version: 0.4.0a1\n"
+        "BundleWalker version: 0.4.0a2\n"
         f"Workspace: {root.resolve()}\n"
         "Workspace format: 2\n"
         "Compatibility: too_new\n"
