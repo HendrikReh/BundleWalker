@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -534,6 +535,59 @@ def test_snapshot_reserves_sibling_entry_budget_before_recursing(tmp_path: Path)
             limits=runner_module._TreeLimits(4, 1024, 1024),
         )
     assert external.read_text(encoding="ascii") == "must not be inspected"
+
+
+def test_snapshot_traversal_never_scans_global_metadata_per_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(64):
+        directory = root / f"directory-{index:03d}"
+        directory.mkdir()
+        (directory / "content.txt").write_text("x", encoding="ascii")
+
+    lookups: dict[str, int] = {}
+
+    class LookupOnlyMetadata(dict[str, runner_module._TreeMetadata]):
+        def __iter__(self) -> Iterator[str]:
+            raise AssertionError("snapshot traversal must not scan global metadata")
+
+        def __getitem__(self, key: str) -> runner_module._TreeMetadata:
+            lookups[key] = lookups.get(key, 0) + 1
+            return super().__getitem__(key)
+
+    original = runner_module._snapshot_directory
+
+    def prohibit_global_scan(
+        directory_descriptor: int,
+        relative_parent: str,
+        snapshot: runner_module._TreeSnapshot,
+        metadata: dict[str, runner_module._TreeMetadata],
+        *extra: object,
+    ) -> None:
+        guarded = (
+            metadata if isinstance(metadata, LookupOnlyMetadata) else LookupOnlyMetadata(metadata)
+        )
+        cast(Any, original)(
+            directory_descriptor,
+            relative_parent,
+            snapshot,
+            guarded,
+            *extra,
+        )
+
+    monkeypatch.setattr(runner_module, "_snapshot_directory", prohibit_global_scan)
+
+    snapshot = runner_module._snapshot_tree(
+        root,
+        limits=runner_module._TreeLimits(256, 1024, 1024),
+    )
+
+    assert len(snapshot) == 129
+    assert lookups
+    assert max(lookups.values()) == 1
 
 
 def test_run_publication_stays_anchored_when_parent_is_replaced(

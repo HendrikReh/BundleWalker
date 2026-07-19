@@ -89,6 +89,7 @@ class _TreeLimits:
 
 
 type _TreeMetadata = tuple[Literal["directory", "file"], int, int, int, int, int, int]
+type _TreeChildren = dict[str, tuple[str, ...]]
 
 
 @dataclass(slots=True)
@@ -706,6 +707,7 @@ def _snapshot_tree(
         if not stat.S_ISDIR(root_state.st_mode):
             raise BenchmarkRunError("generated fixture topology root must be a directory")
         metadata: dict[str, _TreeMetadata] = {".": _tree_metadata(root_state)}
+        children: _TreeChildren = {}
         declared_bytes = [0]
         remaining_entries = [limits.max_entries - 1]
         if remaining_entries[0] < 0:
@@ -719,13 +721,14 @@ def _snapshot_tree(
             limits,
             declared_bytes,
             remaining_entries,
+            children,
         )
         if expected is not None and metadata != {
             relative: _entry_metadata(entry) for relative, entry in expected.items()
         }:
             raise BenchmarkRunError("generated fixture topology changed")
         snapshot = {".": _directory_entry(root_descriptor, root_state)}
-        _snapshot_directory(root_descriptor, "", snapshot, metadata)
+        _snapshot_directory(root_descriptor, "", snapshot, metadata, children)
         if expected is not None and snapshot != expected:
             raise BenchmarkRunError("generated fixture topology changed")
         return snapshot
@@ -738,17 +741,11 @@ def _snapshot_directory(
     relative_parent: str,
     snapshot: _TreeSnapshot,
     metadata: dict[str, _TreeMetadata],
+    children: _TreeChildren,
 ) -> None:
-    prefix = "" if not relative_parent else f"{relative_parent}/"
-    expected_names = {
-        relative.removeprefix(prefix)
-        for relative in metadata
-        if relative != "."
-        and relative.startswith(prefix)
-        and "/" not in relative.removeprefix(prefix)
-    }
+    expected_names = children[relative_parent]
     names = _bounded_directory_names(directory_descriptor, len(expected_names))
-    if set(names) != expected_names:
+    if tuple(names) != expected_names:
         raise BenchmarkRunError("generated fixture topology changed during validation")
     for name in names:
         relative = name if not relative_parent else f"{relative_parent}/{name}"
@@ -764,7 +761,7 @@ def _snapshot_directory(
                 descriptor_state = os.fstat(child_descriptor)
                 _require_same_inode(state, descriptor_state)
                 snapshot[relative] = _directory_entry(child_descriptor, descriptor_state)
-                _snapshot_directory(child_descriptor, relative, snapshot, metadata)
+                _snapshot_directory(child_descriptor, relative, snapshot, metadata, children)
             finally:
                 os.close(child_descriptor)
             continue
@@ -791,9 +788,11 @@ def _preflight_directory(
     limits: _TreeLimits,
     declared_bytes: list[int],
     remaining_entries: list[int],
+    children: _TreeChildren,
 ) -> None:
     names = _bounded_directory_names(directory_descriptor, remaining_entries[0])
     remaining_entries[0] -= len(names)
+    children[relative_parent] = tuple(names)
     for name in names:
         relative = name if not relative_parent else f"{relative_parent}/{name}"
         state = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
@@ -836,6 +835,7 @@ def _preflight_directory(
                     limits,
                     declared_bytes,
                     remaining_entries,
+                    children,
                 )
             finally:
                 os.close(child_descriptor)
