@@ -29,6 +29,10 @@ def _run_commands(workflow: dict[str, Any], job: str) -> str:
     return "\n".join(step.get("run", "") for step in _steps(workflow, job))
 
 
+def _step_command_sequence(workflow: dict[str, Any], job: str) -> list[tuple[str, str]]:
+    return [(str(step["name"]), str(step.get("run", ""))) for step in _steps(workflow, job)]
+
+
 def _assert_actions_are_sha_pinned(workflow: dict[str, Any]) -> None:
     for job in workflow["jobs"].values():
         for step in job.get("steps", []):
@@ -65,17 +69,15 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
     assert windows["continue-on-error"] == "true"
     assert windows["strategy"]["matrix"] == {"python-version": ["3.13", "3.14"]}
     assert windows["runs-on"] == "windows-2025"
-    windows_commands = _run_commands(workflow, "windows-experimental")
-    assert "uv run python -m benchmarks run" not in windows_commands
-    for command in (
-        "uv sync --locked",
-        "uv lock --check",
-        "uv run pytest -m 'not eval' -q",
-        "uv run ruff format --check .",
-        "uv run ruff check .",
-        "uv run pyright",
-    ):
-        assert command in windows_commands
+    supported_sequence = _step_command_sequence(workflow, "supported")
+    windows_sequence = _step_command_sequence(workflow, "windows-experimental")
+    smoke_steps = [
+        step for step in supported_sequence if step[0] == "Run benchmark correctness smoke"
+    ]
+    assert len(smoke_steps) == 1
+    assert windows_sequence == [
+        step for step in supported_sequence if step[0] != "Run benchmark correctness smoke"
+    ]
 
     required = workflow["jobs"]["required"]
     assert required["if"] == "always()"
