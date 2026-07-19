@@ -423,11 +423,53 @@ after accepting the result. Retain the original workspace until that decision.
 ## Complete CLI reference
 
 Live `--help` output is authoritative for command names, arguments, and options. The public CLI
-contains `init`, `ingest`, `ask`, `lint`, `review`, and `workspace`:
+contains `doctor`, `init`, `ingest`, `ask`, `lint`, `review`, and `workspace`:
 
 ```bash
 uv run bundlewalker --help
 ```
+
+### `doctor`
+
+```text
+bundlewalker doctor [PATH] [--report REPORT.json]
+```
+
+`doctor` discovers a workspace from the current directory or an optional `PATH`, and reports
+local health with fixed `PASS`, `WARN`, and `FAIL` lines followed by a summary. It is strictly
+offline and read-only: it neither repairs workspace state nor contacts a model provider. Its one
+explicit write is an opt-in support report requested with `--report`.
+
+The fourteen stable check codes are `runtime.bundlewalker`, `runtime.python`,
+`runtime.platform`, `workspace.discovery`, `workspace.configuration`,
+`workspace.compatibility`, `workspace.structure`, `workspace.permissions`,
+`configuration.model`, `configuration.credential`, `transactions.state`, `mcp.package`,
+`mcp.entrypoint`, and `storage.disk`. Warnings exit `0`; failures exit `1`; an invalid report
+target exits `2`.
+
+```bash
+bundlewalker doctor /path/to/workspace
+bundlewalker doctor /path/to/workspace --report bundlewalker-support.json
+```
+
+The JSON report has schema version `1`. Its target must be a new regular file: existing files,
+unsafe targets, and missing parents are rejected, and the command does not echo the destination.
+On POSIX systems BundleWalker creates the file with mode `0600`; filesystem behavior on Windows is
+experimental. If a write fails after creation, BundleWalker conservatively retains any partial
+file rather than deleting a path that could have changed ownership; inspect and remove that file
+yourself when appropriate.
+
+The report excludes credentials, model values, workspace content, filesystem paths, host identity,
+review and transaction identifiers, and exception or provider payloads. This is a bounded privacy
+boundary, not a guarantee of zero disclosure risk: review even a redacted report before sharing
+it. The OpenAI check maps only the presence of `OPENAI_API_KEY` for an `openai:` model; it does
+not authenticate, verify a model, or test network reachability. Other providers receive an
+unknown-provider warning. macOS and Linux are supported; Windows is experimental. The storage
+check warns below the advisory 1-GiB free-space threshold and does not guarantee capacity for any
+operation.
+
+For a pending review, use `bundlewalker review show`, then `bundlewalker review apply
+<REVIEW_ID>` or `bundlewalker review discard <REVIEW_ID>` after reviewing the result.
 
 ### `workspace`
 

@@ -27,6 +27,10 @@ the maintainer to establish private contact without disclosing vulnerability det
 Reports are handled on a best-effort basis. The maintainer will validate impact, coordinate a fix
 and disclosure when possible, and credit reporters who request attribution.
 
+Do not attach a doctor support report to a public issue when the report concerns a suspected
+security vulnerability. Use private vulnerability reporting and review every diagnostic artifact
+before sharing it.
+
 ## Security boundaries
 
 BundleWalker is a local application, but configured model-provider calls may send documented

@@ -4,6 +4,11 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Added the offline, read-only `bundlewalker doctor` health check with stable remediation,
+  automation-friendly exit behavior, and explicit redacted JSON support reports.
+
 ### Changed
 
 - Hardened TestPyPI post-upload verification with six bounded exponential installation attempts

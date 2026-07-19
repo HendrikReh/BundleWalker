@@ -69,6 +69,7 @@ Run the offline check, ingest the note, ask a read-only question, save a reviewe
 optional semantic advisories:
 
 ```bash
+uv run --project "$PROJECT_ROOT" bundlewalker doctor
 uv run --project "$PROJECT_ROOT" bundlewalker lint
 uv run --project "$PROJECT_ROOT" bundlewalker ingest ../example-notes.md
 uv run --project "$PROJECT_ROOT" bundlewalker ask \
@@ -77,6 +78,9 @@ uv run --project "$PROJECT_ROOT" bundlewalker ask --save \
   'Why does this workspace use a review gate?'
 uv run --project "$PROJECT_ROOT" bundlewalker lint --semantic
 ```
+
+`doctor` is an offline, read-only health check. It reports installation, workspace, configuration,
+transaction, MCP, and storage status without repairing state or contacting a model provider.
 
 `ingest` and `ask --save` show a complete prospective diff. Answer `y` to apply it; answer `n`,
 press Ctrl-C, or end input to discard it and exit successfully with live knowledge unchanged.
