@@ -1968,7 +1968,7 @@ def _load_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
         content = path.read_bytes()
     except OSError as exc:
         raise _IncompleteManifestError from exc
-    manifest = _parse_manifest_bytes(workspace, transaction_dir, content)
+    manifest = _parse_manifest_bytes(content)
     _manifest_paths(workspace, transaction_dir, manifest)
     return manifest
 
@@ -2008,11 +2008,12 @@ def _load_diagnostic_manifest(
     finally:
         if descriptor is not None:
             os.close(descriptor)
-    transaction_dir = workspace.root / ".bundlewalker" / "transactions" / transaction_name
     try:
-        manifest = _parse_manifest_bytes(workspace, transaction_dir, bytes(content))
+        manifest = _parse_manifest_bytes(bytes(content))
     except (RecursionError, ValueError) as exc:
         raise _IncompleteManifestError from exc
+    if manifest.base_wiki_digest is None or manifest.prospective_digest is None:
+        raise _IncompleteManifestError
     _validate_diagnostic_manifest_relationships(workspace, transaction_name, manifest)
     return manifest
 
@@ -2033,11 +2034,7 @@ def _validate_diagnostic_manifest_relationships(
         _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
 
 
-def _parse_manifest_bytes(
-    workspace: Workspace,
-    transaction_dir: Path,
-    content: bytes,
-) -> _Manifest:
+def _parse_manifest_bytes(content: bytes) -> _Manifest:
     try:
         parsed: object = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

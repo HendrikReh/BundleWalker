@@ -240,6 +240,44 @@ def test_transaction_diagnostics_classifies_interrupted_phases_without_mutation(
 
 @pytest.mark.parametrize(
     ("schema_version", "phase"),
+    [(1, "prepared"), (1, "raw-persisted"), (2, "prepared"), (2, "accepted")],
+)
+@pytest.mark.parametrize("field", ["base_wiki_digest", "prospective_digest"])
+@pytest.mark.parametrize("mutation", ["missing", "null"])
+def test_diagnostics_and_recovery_require_manifest_digest_identity(
+    tmp_path: Path,
+    schema_version: int,
+    phase: str,
+    field: str,
+    mutation: str,
+) -> None:
+    workspace = _workspace_with_review(tmp_path)
+    _set_phase(workspace, phase)
+    if schema_version == 1:
+        _convert_to_legacy(workspace)
+    transaction_dir = _transaction_dir(workspace)
+    manifest = _manifest_values(transaction_dir)
+    if mutation == "missing":
+        manifest.pop(field)
+    else:
+        manifest[field] = None
+    _write_manifest_values(transaction_dir, manifest)
+    before = _tree_snapshot(workspace.root)
+
+    assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
+    assert _tree_snapshot(workspace.root) == before
+
+    with pytest.raises(
+        transactions.TransactionError,
+        match=r"manifest identities do not match transaction(?: review)? identity",
+    ):
+        recover_transactions(workspace)
+
+    assert _tree_snapshot(workspace.root) == before
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "phase"),
     [
         (1, "prepared"),
         (1, "raw-persisted"),
@@ -1056,11 +1094,7 @@ def test_transaction_diagnostics_holds_shared_lock_while_reading_manifest(
     original_parse_manifest = transactions._parse_manifest_bytes  # pyright: ignore[reportPrivateUsage]
     writer_acquired = False
 
-    def competing_parse_manifest(
-        candidate: Workspace,
-        transaction_dir: Path,
-        content: bytes,
-    ) -> object:
+    def competing_parse_manifest(content: bytes) -> object:
         nonlocal writer_acquired
         descriptor = os.open(lock_path, os.O_RDONLY)
         try:
@@ -1073,7 +1107,7 @@ def test_transaction_diagnostics_holds_shared_lock_while_reading_manifest(
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
-        return original_parse_manifest(candidate, transaction_dir, content)
+        return original_parse_manifest(content)
 
     with monkeypatch.context() as guarded:
         guarded.setattr(transactions, "_parse_manifest_bytes", competing_parse_manifest)
