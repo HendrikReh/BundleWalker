@@ -189,6 +189,13 @@ class _RawPersistenceAmbiguityError(TransactionError):
 
 def inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticStatus:
     """Classify private transaction state without recovering or mutating it."""
+    try:
+        return _inspect_transaction_state(workspace)
+    except (OSError, TransactionError):
+        return TransactionDiagnosticStatus.MALFORMED
+
+
+def _inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticStatus:
     private_root = workspace.root / ".bundlewalker"
     if not private_root.exists() and not private_root.is_symlink():
         return TransactionDiagnosticStatus.CLEAN
@@ -199,13 +206,10 @@ def inspect_transaction_state(workspace: Workspace) -> TransactionDiagnosticStat
     if lock_path.exists() or lock_path.is_symlink():
         if lock_path.is_symlink() or not lock_path.is_file():
             return TransactionDiagnosticStatus.MALFORMED
-        try:
-            with _transaction_diagnostic_lock(lock_path) as busy:
-                if busy:
-                    return TransactionDiagnosticStatus.BUSY
-                return _inspect_transaction_entries(workspace, private_root)
-        except (OSError, TransactionError):
-            return TransactionDiagnosticStatus.MALFORMED
+        with _transaction_diagnostic_lock(lock_path) as busy:
+            if busy:
+                return TransactionDiagnosticStatus.BUSY
+            return _inspect_transaction_entries(workspace, private_root)
 
     return _inspect_transaction_entries(workspace, private_root)
 
@@ -234,20 +238,20 @@ def _inspect_transaction_entries(
     for transaction_dir in entries:
         if transaction_dir.is_symlink() or not transaction_dir.is_dir():
             return TransactionDiagnosticStatus.MALFORMED
-        manifest_path = transaction_dir / _MANIFEST_NAME
-        if manifest_path.is_symlink() or not manifest_path.is_file():
-            return TransactionDiagnosticStatus.MALFORMED
         try:
-            if manifest_path.stat().st_size > _MAX_DIAGNOSTIC_MANIFEST_BYTES:
-                return TransactionDiagnosticStatus.MALFORMED
-            manifest = _load_manifest(workspace, transaction_dir)
+            manifest = _load_diagnostic_manifest(workspace, transaction_dir)
         except (OSError, TransactionError, _IncompleteManifestError):
             return TransactionDiagnosticStatus.MALFORMED
-        if manifest.phase == "prepared":
-            if not _pending_diagnostic_topology_is_regular(transaction_dir):
+        if manifest.schema_version == _SCHEMA_VERSION:
+            if not _schema_v2_diagnostic_topology_is_valid(transaction_dir, manifest):
                 return TransactionDiagnosticStatus.MALFORMED
-            prepared += 1
+            if manifest.phase == "prepared":
+                prepared += 1
+            else:
+                interrupted += 1
         else:
+            if _diagnostic_node_kind(transaction_dir / _REVIEW_NAME) != "absent":
+                return TransactionDiagnosticStatus.MALFORMED
             interrupted += 1
 
     if prepared == 1 and interrupted == 0:
@@ -257,19 +261,57 @@ def _inspect_transaction_entries(
     return TransactionDiagnosticStatus.MALFORMED
 
 
-def _pending_diagnostic_topology_is_regular(transaction_dir: Path) -> bool:
-    for name in (_IDENTITY_NAME, _REVIEW_NAME):
-        path = transaction_dir / name
-        if path.is_symlink() or not path.is_file():
-            return False
-    prospective = transaction_dir / _PROSPECTIVE_NAME
-    backup = transaction_dir / _BACKUP_NAME
-    return (
-        not prospective.is_symlink()
-        and prospective.is_dir()
-        and not backup.exists()
-        and not backup.is_symlink()
-    )
+def _schema_v2_diagnostic_topology_is_valid(
+    transaction_dir: Path,
+    manifest: _Manifest,
+) -> bool:
+    if _REVIEW_ID.fullmatch(manifest.transaction_id) is None:
+        return False
+    if any(
+        _diagnostic_node_kind(transaction_dir / name) != "regular"
+        for name in (_IDENTITY_NAME, _REVIEW_NAME)
+    ):
+        return False
+
+    raw_kind = _diagnostic_node_kind(transaction_dir / _RAW_PAYLOAD_NAME)
+    if raw_kind != ("absent" if manifest.raw_sha256 is None else "regular"):
+        return False
+
+    prospective_kind = _diagnostic_node_kind(transaction_dir / _PROSPECTIVE_NAME)
+    backup_kind = _diagnostic_backup_kind(transaction_dir)
+    if manifest.phase in {"prepared", "accepted", "raw-persisted"}:
+        return prospective_kind == "directory" and backup_kind == "absent"
+    if manifest.phase == "swapping":
+        return (prospective_kind, backup_kind) in {
+            ("directory", "absent"),
+            ("directory", "directory"),
+            ("absent", "directory"),
+        }
+    return prospective_kind == "absent" and backup_kind == "directory"
+
+
+def _diagnostic_backup_kind(transaction_dir: Path) -> str:
+    backup_kind = _diagnostic_node_kind(transaction_dir / _BACKUP_NAME)
+    quarantines = [
+        path for path in transaction_dir.iterdir() if path.name.startswith(_QUARANTINE_PREFIX)
+    ]
+    if len(quarantines) > 1 or (quarantines and backup_kind != "absent"):
+        return "unsafe"
+    if quarantines:
+        return _diagnostic_node_kind(quarantines[0])
+    return backup_kind
+
+
+def _diagnostic_node_kind(path: Path) -> str:
+    try:
+        metadata = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    if stat.S_ISREG(metadata.st_mode):
+        return "regular"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    return "unsafe"
 
 
 @contextmanager
@@ -1818,8 +1860,49 @@ def _manifest_paths(
 def _load_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
     path = transaction_dir / _MANIFEST_NAME
     try:
-        parsed: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise _IncompleteManifestError from exc
+    return _parse_manifest_bytes(workspace, transaction_dir, content)
+
+
+def _load_diagnostic_manifest(workspace: Workspace, transaction_dir: Path) -> _Manifest:
+    path = transaction_dir / _MANIFEST_NAME
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise _IncompleteManifestError
+        if metadata.st_size > _MAX_DIAGNOSTIC_MANIFEST_BYTES:
+            raise _IncompleteManifestError
+
+        content = bytearray()
+        remaining = _MAX_DIAGNOSTIC_MANIFEST_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+            remaining -= len(chunk)
+        if len(content) > _MAX_DIAGNOSTIC_MANIFEST_BYTES:
+            raise _IncompleteManifestError
+    except OSError as exc:
+        raise _IncompleteManifestError from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    return _parse_manifest_bytes(workspace, transaction_dir, bytes(content))
+
+
+def _parse_manifest_bytes(
+    workspace: Workspace,
+    transaction_dir: Path,
+    content: bytes,
+) -> _Manifest:
+    try:
+        parsed: object = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise _IncompleteManifestError from exc
     if not isinstance(parsed, dict):
         raise _IncompleteManifestError
