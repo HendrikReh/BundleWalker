@@ -80,12 +80,19 @@ def doctor_command(
 ) -> None:
     """Diagnose local BundleWalker health without repairing workspace state."""
     application = DiagnosticsApplication()
-    result = application.run(path)
+    try:
+        result = application.run(path)
+    except ApplicationError as exc:
+        _exit_for_application_error(exc)
     for line in render_diagnostic_lines(result):
         typer.echo(line)
     if report is not None:
         try:
-            write_support_report(application.support_report(result), report)
+            support_report = application.support_report(result)
+        except ApplicationError as exc:
+            _exit_for_application_error(exc)
+        try:
+            write_support_report(support_report, report)
         except SupportReportTargetError:
             typer.echo(
                 "Error: support report target must be a new file",

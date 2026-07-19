@@ -6,6 +6,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,11 +15,16 @@ import pytest
 from click import unstyle
 from typer.testing import CliRunner
 
+import bundlewalker.interfaces.cli as cli_module
 from bundlewalker.application import (
     DIAGNOSTIC_CHECK_CATALOG,
+    ApplicationError,
+    ApplicationErrorCode,
     DiagnosticCheck,
     DiagnosticCounts,
     DiagnosticResult,
+    DiagnosticsApplication,
+    DiagnosticsDependencies,
     DiagnosticSeverity,
     SupportReport,
 )
@@ -125,6 +131,59 @@ def test_report_writer_creates_owner_only_json_and_refuses_existing_target(
     assert destination.read_bytes() == original
 
 
+def test_report_writer_completes_short_writes_with_exact_content_and_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "short-writes.json"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+    expected = (report.model_dump_json(indent=2) + "\n").encode()
+    original_write = os.write
+    write_calls = 0
+
+    def write_short(descriptor: int, content: bytes | memoryview) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        return original_write(descriptor, content[:17])
+
+    monkeypatch.setattr(os, "write", write_short)
+
+    write_support_report(report, destination)
+
+    assert write_calls > 1
+    assert destination.read_bytes() == expected
+    assert destination.read_bytes().endswith(b"\n")
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_report_writer_refuses_existing_fifo_without_blocking(tmp_path: Path) -> None:
+    destination = tmp_path / "report.fifo"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+    os.mkfifo(destination, 0o600)
+    outcome: list[type[BaseException] | None] = []
+
+    def write_fifo() -> None:
+        try:
+            write_support_report(report, destination)
+        except BaseException as error:
+            outcome.append(type(error))
+        else:
+            outcome.append(None)
+
+    writer = threading.Thread(target=write_fifo, daemon=True)
+    writer.start()
+    writer.join(timeout=1)
+    blocked = writer.is_alive()
+    if blocked:
+        reader = os.open(destination, os.O_RDONLY | os.O_NONBLOCK)
+        writer.join(timeout=1)
+        os.close(reader)
+
+    assert not blocked
+    assert outcome == [SupportReportTargetError]
+    assert stat.S_ISFIFO(destination.stat().st_mode)
+
+
 def test_report_writer_refuses_symlink_directory_and_missing_parent(tmp_path: Path) -> None:
     report = SupportReport(generated_at=NOW, result=_result({}))
     existing = tmp_path / "existing.json"
@@ -159,7 +218,7 @@ def test_report_writer_treats_no_follow_rejection_as_an_unsafe_target(
     assert not destination.exists()
 
 
-def test_report_writer_removes_only_its_partial_file_on_write_failure(
+def test_report_writer_leaves_its_partial_file_on_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -173,7 +232,107 @@ def test_report_writer_removes_only_its_partial_file_on_write_failure(
 
     with pytest.raises(SupportReportWriteError):
         write_support_report(report, destination)
-    assert not destination.exists()
+    assert destination.read_bytes() == b""
+
+
+def test_report_writer_treats_zero_write_as_failure_and_leaves_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "zero-write.json"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+
+    def write_nothing(_descriptor: int, _content: bytes | memoryview) -> int:
+        return 0
+
+    monkeypatch.setattr(os, "write", write_nothing)
+
+    with pytest.raises(SupportReportWriteError):
+        write_support_report(report, destination)
+    assert destination.read_bytes() == b""
+
+
+@pytest.mark.parametrize("operation", ["fchmod", "fsync"])
+def test_report_writer_leaves_partial_on_descriptor_operation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    destination = tmp_path / f"{operation}-failure.json"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+
+    def fail_operation(*_arguments: object) -> None:
+        raise OSError(f"private {operation} failure")
+
+    monkeypatch.setattr(os, operation, fail_operation)
+
+    with pytest.raises(SupportReportWriteError):
+        write_support_report(report, destination)
+    assert destination.exists()
+
+
+def test_report_writer_never_deletes_replacement_installed_during_failure_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "replacement.json"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+    replacement = b"unrelated replacement\n"
+    original_lstat = Path.lstat
+    original_unlink = Path.unlink
+    original_close = os.close
+    replacement_installed = False
+
+    def install_replacement() -> None:
+        nonlocal replacement_installed
+        original_unlink(destination)
+        destination.write_bytes(replacement)
+        replacement_installed = True
+
+    def replace_after_metadata_read(path: Path) -> os.stat_result:
+        metadata = original_lstat(path)
+        install_replacement()
+        return metadata
+
+    def replace_before_close(descriptor: int) -> None:
+        if not replacement_installed:
+            install_replacement()
+        original_close(descriptor)
+
+    def fail_write(_descriptor: int, _content: bytes | memoryview) -> int:
+        raise OSError("private write failure")
+
+    monkeypatch.setattr(Path, "lstat", replace_after_metadata_read)
+    monkeypatch.setattr(os, "close", replace_before_close)
+    monkeypatch.setattr(os, "write", fail_write)
+
+    with pytest.raises(SupportReportWriteError):
+        write_support_report(report, destination)
+    assert replacement_installed
+    assert destination.read_bytes() == replacement
+
+
+def test_report_writer_treats_ambiguous_close_failure_as_write_failure_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "close-failure.json"
+    report = SupportReport(generated_at=NOW, result=_result({}))
+    original_close = os.close
+    close_calls = 0
+
+    def close_then_fail(descriptor: int) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        original_close(descriptor)
+        raise OSError("private close failure")
+
+    monkeypatch.setattr(os, "close", close_then_fail)
+
+    with pytest.raises(SupportReportWriteError):
+        write_support_report(report, destination)
+    assert close_calls == 1
+    assert destination.exists()
 
 
 def test_doctor_runs_outside_workspace_and_returns_failure_without_traceback(
@@ -189,6 +348,58 @@ def test_doctor_runs_outside_workspace_and_returns_failure_without_traceback(
     assert "Doctor:" in result.stdout
     assert "Traceback" not in result.output
     assert not (tmp_path / ".bundlewalker").exists()
+
+
+def test_doctor_bounds_chained_application_failure_without_private_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_path = tmp_path / "private-diagnostic-source"
+
+    def fail_lookup(_name: str) -> bool:
+        try:
+            raise OSError(f"could not inspect {private_path}")
+        except OSError as cause:
+            raise ApplicationError(
+                ApplicationErrorCode.DIAGNOSTIC_FAILED,
+                "diagnostic operation failed",
+            ) from cause
+
+    application = DiagnosticsApplication(DiagnosticsDependencies(module_available=fail_lookup))
+    monkeypatch.setattr(cli_module, "DiagnosticsApplication", lambda: application)
+
+    result = runner.invoke(app, ["doctor"])
+
+    assert result.exit_code == 1
+    assert result.output == "Error: diagnostic operation failed\n"
+    assert str(private_path) not in result.output
+    assert "could not inspect" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_doctor_bounds_support_report_construction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "support.json"
+
+    def fail_clock() -> datetime:
+        raise ApplicationError(
+            ApplicationErrorCode.DIAGNOSTIC_FAILED,
+            "diagnostic operation failed",
+        )
+
+    application = DiagnosticsApplication(DiagnosticsDependencies(clock=fail_clock))
+    monkeypatch.setattr(cli_module, "DiagnosticsApplication", lambda: application)
+
+    result = runner.invoke(app, ["doctor", "--report", str(report)])
+
+    assert result.exit_code == 1
+    assert "Error: diagnostic operation failed" in result.output
+    assert "Support report written." not in result.output
+    assert str(report) not in result.output
+    assert "Traceback" not in result.output
+    assert not report.exists()
 
 
 def test_doctor_warning_only_workspace_exits_zero_and_does_not_mutate(
@@ -275,7 +486,48 @@ def test_doctor_report_write_failure_is_safe_and_returns_one(
     assert "private write failure" not in result.output
     assert str(report) not in result.output
     assert "Traceback" not in result.output
-    assert not report.exists()
+    assert "Support report written." not in result.output
+    assert report.read_bytes() == b""
+
+
+def test_doctor_report_close_failure_is_safe_and_returns_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    report = tmp_path / "support.json"
+    original_close = os.close
+    close_failed = False
+
+    def fail_report_close(descriptor: int) -> None:
+        nonlocal close_failed
+        descriptor_metadata = os.fstat(descriptor)
+        is_report = False
+        if report.exists():
+            report_metadata = report.stat()
+            is_report = (descriptor_metadata.st_dev, descriptor_metadata.st_ino) == (
+                report_metadata.st_dev,
+                report_metadata.st_ino,
+            )
+        original_close(descriptor)
+        if is_report and not close_failed:
+            close_failed = True
+            raise OSError("private close failure")
+
+    monkeypatch.setattr(os, "close", fail_report_close)
+
+    result = runner.invoke(
+        app,
+        ["doctor", str(workspace.root), "--report", str(report)],
+    )
+
+    assert result.exit_code == 1
+    assert "Error: support report could not be written" in result.output
+    assert "Support report written." not in result.output
+    assert "private close failure" not in result.output
+    assert str(report) not in result.output
+    assert "Traceback" not in result.output
+    assert report.exists()
 
 
 def test_doctor_help_shows_path_and_report_option() -> None:

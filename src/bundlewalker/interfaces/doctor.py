@@ -65,10 +65,8 @@ def write_support_report(report: SupportReport, destination: Path) -> None:
             raise SupportReportTargetError from None
         raise SupportReportWriteError from None
 
-    identity: tuple[int, int] | None = None
     try:
         metadata = os.fstat(descriptor)
-        identity = (metadata.st_dev, metadata.st_ino)
         if not stat.S_ISREG(metadata.st_mode):
             raise SupportReportTargetError
         os.fchmod(descriptor, 0o600)
@@ -80,20 +78,17 @@ def write_support_report(report: SupportReport, destination: Path) -> None:
             view = view[written:]
         os.fsync(descriptor)
     except SupportReportTargetError:
-        if identity is not None:
-            _unlink_created_file(destination, identity)
+        _close_after_failure(descriptor)
         raise
     except OSError:
-        if identity is not None:
-            _unlink_created_file(destination, identity)
+        _close_after_failure(descriptor)
         raise SupportReportWriteError from None
-    finally:
-        with suppress(OSError):
-            os.close(descriptor)
+    try:
+        os.close(descriptor)
+    except OSError:
+        raise SupportReportWriteError from None
 
 
-def _unlink_created_file(destination: Path, identity: tuple[int, int]) -> None:
+def _close_after_failure(descriptor: int) -> None:
     with suppress(OSError):
-        metadata = destination.lstat()
-        if stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == identity:
-            destination.unlink()
+        os.close(descriptor)
