@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import Literal
 
 from benchmarks.contracts import (
     EvidenceRecord,
@@ -12,6 +13,8 @@ from benchmarks.contracts import (
     ScenarioEvidence,
     ScenarioName,
 )
+from benchmarks.profiles import PROFILES, target_ns
+from benchmarks.scenarios import SCENARIOS
 
 _PROFILE_ORDER = {
     name: index for index, name in enumerate(("smoke", "small", "medium", "large", "probe"))
@@ -26,7 +29,8 @@ _REQUIRED_MATRIX = frozenset(
 )
 _VERSION_PREFIX = re.compile(r"^(\d+)\.(\d+)(?:\.|$)")
 _NUMERIC_VERSION_PREFIX = re.compile(r"^\d+(?:\.\d+)*")
-_PROFILE_SCENARIOS = frozenset(ScenarioName) - {ScenarioName.INITIALIZE}
+_PROFILE_SCENARIOS = tuple(SCENARIOS)
+_PROFILE_SCENARIO_SET = frozenset(_PROFILE_SCENARIOS)
 _MUTATION_SCENARIOS = frozenset(
     {
         ScenarioName.PREPARE_INGESTION,
@@ -197,10 +201,11 @@ def render_report(
         for profile in ordered[0].profiles
         if profile.name in {"small", "medium", "large"}
     )
+    candidate_statuses = {name: _candidate_status(ordered, name) for name in candidate_names}
     measured_candidates = [
         name
         for name in candidate_names
-        if all(_profile_has_complete_success(record, name) for record in ordered)
+        if candidate_statuses[name] == "complete successful candidate measurement"
     ]
     candidates = ", ".join(_label(name) for name in measured_candidates) or "none in this record"
     lines.extend(
@@ -215,18 +220,7 @@ def render_report(
         ]
     )
     for name in candidate_names:
-        stops = tuple(
-            record.capacity_stop
-            for record in ordered
-            if record.capacity_stop is not None and record.capacity_stop.profile == name
-        )
-        if stops:
-            status = f"stopped at `{stops[0].scenario.value}`; incomplete"
-        elif name in measured_candidates:
-            status = "complete successful candidate measurement"
-        else:
-            status = "incomplete"
-        lines.append(f"| {_label(name)} | {status} |")
+        lines.append(f"| {_label(name)} | {candidate_statuses[name]} |")
     lines.extend(
         [
             "",
@@ -279,6 +273,8 @@ def _validate_records(records: Sequence[EvidenceRecord], *, require_matrix: bool
         )
         if candidate != relationship:
             raise ValueError("evidence records must describe one suite, commit, and fixture set")
+    for record in records:
+        _validate_capacity_stop_prefix(record)
 
     keys = tuple(
         (_markdown(record.environment.os_name), _python_minor(record)) for record in records
@@ -296,12 +292,12 @@ def _validate_full_policy_record(record: EvidenceRecord) -> None:
         or record.warmup_count != 1
         or record.read_only_repetitions != 7
         or record.mutation_repetitions != 5
-        or record.capacity_stop is not None
+        or record.profiles != tuple(PROFILES.values())
     ):
-        raise ValueError("matrix evidence requires complete full-policy records")
+        raise ValueError("matrix evidence requires the frozen full-policy profile catalog")
 
     actual_keys = tuple((scenario.profile, scenario.scenario) for scenario in record.scenarios)
-    expected_keys = (
+    catalog_keys = (
         (None, ScenarioName.INITIALIZE),
         *(
             (profile.name, scenario)
@@ -309,10 +305,23 @@ def _validate_full_policy_record(record: EvidenceRecord) -> None:
             for scenario in _PROFILE_SCENARIOS
         ),
     )
-    if len(actual_keys) != len(set(actual_keys)) or set(actual_keys) != set(expected_keys):
-        raise ValueError("matrix evidence requires complete full-policy scenario coverage")
+    expected_keys = catalog_keys
+    if record.capacity_stop is not None:
+        stop_key = (record.capacity_stop.profile, record.capacity_stop.scenario)
+        try:
+            stop_index = catalog_keys.index(stop_key)
+        except ValueError as error:
+            raise ValueError("matrix evidence has an invalid capacity-stop position") from error
+        expected_keys = catalog_keys[:stop_index]
+        expected_deadline = max(30_000_000_000, 3 * target_ns(record.capacity_stop.scenario))
+        if record.capacity_stop.deadline_ns != expected_deadline:
+            raise ValueError("matrix evidence has an invalid capacity-stop deadline")
+    if actual_keys != expected_keys or len(actual_keys) != len(set(actual_keys)):
+        raise ValueError("matrix evidence requires exact full-policy scenario-prefix coverage")
 
     for scenario in record.scenarios:
+        if scenario.target_ns != target_ns(scenario.scenario):
+            raise ValueError("matrix evidence must use the frozen scenario targets")
         expected_samples = 5 if scenario.scenario in _MUTATION_SCENARIOS else 7
         if len(scenario.samples_ns) != expected_samples:
             raise ValueError("matrix evidence requires complete full-policy sample counts")
@@ -321,13 +330,73 @@ def _validate_full_policy_record(record: EvidenceRecord) -> None:
             raise ValueError("matrix evidence requires complete full-policy checkpoints")
 
 
-def _profile_has_complete_success(record: EvidenceRecord, profile: str) -> bool:
-    scenarios = tuple(item for item in record.scenarios if item.profile == profile)
-    return (
-        len(scenarios) == len(_PROFILE_SCENARIOS)
-        and frozenset(item.scenario for item in scenarios) == _PROFILE_SCENARIOS
-        and all(item.disposition is ScenarioDisposition.PASS for item in scenarios)
+def _validate_capacity_stop_prefix(record: EvidenceRecord) -> None:
+    if record.capacity_stop is None:
+        return
+    catalog_keys = (
+        (None, ScenarioName.INITIALIZE),
+        *(
+            (profile.name, scenario)
+            for profile in record.profiles
+            for scenario in _PROFILE_SCENARIOS
+        ),
     )
+    stop_key = (record.capacity_stop.profile, record.capacity_stop.scenario)
+    try:
+        stop_index = catalog_keys.index(stop_key)
+    except ValueError as error:
+        raise ValueError("capacity stop has an invalid scenario-prefix position") from error
+    actual_keys = tuple((scenario.profile, scenario.scenario) for scenario in record.scenarios)
+    if actual_keys != catalog_keys[:stop_index] or len(actual_keys) != len(set(actual_keys)):
+        raise ValueError("capacity stop requires exact scenario-prefix coverage")
+
+
+def _candidate_status(
+    records: Sequence[EvidenceRecord], profile: str
+) -> (
+    Literal[
+        "complete successful candidate measurement",
+        "measured but target missed",
+        "incomplete",
+    ]
+    | str
+):
+    stops = tuple(
+        record.capacity_stop
+        for record in records
+        if record.capacity_stop is not None and record.capacity_stop.profile == profile
+    )
+    if stops:
+        return f"stopped at `{stops[0].scenario.value}`; incomplete"
+
+    all_complete = True
+    all_successful = True
+    for record in records:
+        initialization = tuple(
+            item
+            for item in record.scenarios
+            if item.profile is None and item.scenario is ScenarioName.INITIALIZE
+        )
+        scenarios = tuple(item for item in record.scenarios if item.profile == profile)
+        complete = (
+            len(initialization) == 1
+            and len(scenarios) == len(_PROFILE_SCENARIOS)
+            and frozenset(item.scenario for item in scenarios) == _PROFILE_SCENARIO_SET
+        )
+        all_complete = all_complete and complete
+        all_successful = (
+            all_successful
+            and complete
+            and all(
+                item.disposition is ScenarioDisposition.PASS
+                for item in (*initialization, *scenarios)
+            )
+        )
+    if not all_complete:
+        return "incomplete"
+    if not all_successful:
+        return "measured but target missed"
+    return "complete successful candidate measurement"
 
 
 def _overall_disposition(records: Sequence[EvidenceRecord]) -> ScenarioDisposition:

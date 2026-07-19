@@ -15,7 +15,7 @@ from benchmarks.contracts import WorkspaceProfile
 from benchmarks.evidence import load_evidence, write_new_text
 from benchmarks.profiles import PROFILES
 from benchmarks.report import render_report
-from benchmarks.runner import BenchmarkRunError, RunConfig, run_benchmarks
+from benchmarks.runner import AnchoredPublication, BenchmarkRunError, RunConfig, run_benchmarks
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -103,7 +103,9 @@ def _report_command(parser: argparse.ArgumentParser, arguments: argparse.Namespa
     _reject_workspace_output(parser, resolved_output)
     _ensure_output_parent(parser, output)
 
+    publication: AnchoredPublication | None = None
     try:
+        publication = AnchoredPublication.open(output)
         evidence_directory = _require_unaliased_directory(evidence_directory)
         if _has_symlink_file(evidence_directory):
             raise ValueError("evidence directory contains a nonregular JSON entry")
@@ -116,10 +118,13 @@ def _report_command(parser: argparse.ArgumentParser, arguments: argparse.Namespa
             provisional=arguments.provisional,
             require_matrix=arguments.require_matrix,
         )
-        write_new_text(output, report)
+        publication.publish(lambda anchored: write_new_text(anchored, report))
     except (OSError, ValueError) as error:
         _bounded_error("Benchmark report failed", error)
         return 1
+    finally:
+        if publication is not None:
+            publication.close()
     print(os.path.relpath(output, Path.cwd()))
     return 0
 
@@ -158,7 +163,7 @@ def _validate_work_root(parser: argparse.ArgumentParser, work_root: Path, output
 
 
 def _reject_workspace_output(parser: argparse.ArgumentParser, output: Path) -> None:
-    for ancestor in output.parents:
+    for ancestor in (output, *output.parents):
         configuration = ancestor / "bundlewalker.toml"
         if configuration.is_file() and not configuration.is_symlink():
             parser.error("output is inside a workspace")

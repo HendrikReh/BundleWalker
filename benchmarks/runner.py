@@ -15,7 +15,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +82,70 @@ type _TreeSnapshot = dict[str, _TreeEntry]
 
 
 @dataclass(frozen=True, slots=True)
+class _TreeLimits:
+    max_entries: int
+    max_total_declared_bytes: int
+    max_file_bytes: int
+
+
+type _TreeMetadata = tuple[Literal["directory", "file"], int, int, int, int, int, int]
+
+
+@dataclass(slots=True)
+class AnchoredPublication:
+    descriptor: int
+    identity: tuple[int, int]
+    leaf: str
+
+    @classmethod
+    def open(cls, output: Path) -> AnchoredPublication:
+        if os.name != "posix":
+            raise OSError("descriptor-anchored publication is unavailable")
+        if output.name in {"", ".", ".."}:
+            raise OSError("invalid publication leaf")
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(output.parent, flags)
+        try:
+            state = os.fstat(descriptor)
+            if not stat.S_ISDIR(state.st_mode):
+                raise OSError("publication parent is not a directory")
+            return cls(descriptor, (state.st_dev, state.st_ino), output.name)
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def publish(self, writer: Callable[[Path], None]) -> None:
+        self._validate_identity()
+        if sys.platform == "darwin":
+            self._publish_from_directory(writer)
+        else:
+            writer(Path(f"/dev/fd/{self.descriptor}") / self.leaf)
+        self._validate_identity()
+        os.fsync(self.descriptor)
+        self._validate_identity()
+
+    def close(self) -> None:
+        descriptor = self.descriptor
+        self.descriptor = -1
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    def _publish_from_directory(self, writer: Callable[[Path], None]) -> None:
+        previous = os.open(".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fchdir(self.descriptor)
+            writer(Path(self.leaf))
+        finally:
+            os.fchdir(previous)
+            os.close(previous)
+
+    def _validate_identity(self) -> None:
+        state = os.fstat(self.descriptor)
+        if not stat.S_ISDIR(state.st_mode) or (state.st_dev, state.st_ino) != self.identity:
+            raise OSError("publication parent identity changed")
+
+
+@dataclass(frozen=True, slots=True)
 class RunConfig:
     profiles: tuple[WorkspaceProfile, ...]
     output: Path
@@ -132,12 +196,18 @@ class _RunWorkspace:
 
 def run_benchmarks(config: RunConfig) -> EvidenceRecord:
     started_at = datetime.now(UTC)
+    publication: AnchoredPublication | None = None
     try:
         _validate_run_paths(config)
+        publication = AnchoredPublication.open(config.output)
         workspace = _RunWorkspace.create(config.work_root)
         fixtures = _generate_fixtures(workspace.root, config.profiles)
         workspace.fixture_snapshots.update(
-            (fixture.profile.name, _snapshot_tree(fixture.workspace.root)) for fixture in fixtures
+            (
+                fixture.profile.name,
+                _snapshot_tree(fixture.workspace.root, limits=_fixture_tree_limits(fixture)),
+            )
+            for fixture in fixtures
         )
         scenarios: list[ScenarioEvidence] = []
         initialization = _measure_scenario(
@@ -201,13 +271,16 @@ def run_benchmarks(config: RunConfig) -> EvidenceRecord:
             capacity_stop=capacity_stop,
             disposition=disposition,
         )
-        write_evidence(config.output, evidence_record)
+        publication.publish(lambda output: write_evidence(output, evidence_record))
     except _WorkerTimedOut:
         raise BenchmarkRunError("environment benchmark worker exceeded a hard deadline") from None
     except BenchmarkRunError:
         raise
     except Exception as error:
         raise BenchmarkRunError(f"benchmark harness failed: {type(error).__name__}") from error
+    finally:
+        if publication is not None:
+            publication.close()
     return evidence_record
 
 
@@ -321,13 +394,25 @@ def _run_worker_sample(
     expected_snapshot: _TreeSnapshot | None = None
     if fixture is not None:
         expected_snapshot = workspace.fixture_snapshots[fixture.profile.name]
-        if _snapshot_tree(fixture.workspace.root) != expected_snapshot:
+        if (
+            _snapshot_tree(
+                fixture.workspace.root,
+                limits=_limits_for_snapshot(expected_snapshot),
+                expected=expected_snapshot,
+            )
+            != expected_snapshot
+        ):
             raise BenchmarkRunError("generated fixture topology changed before worker launch")
     measured_workspace = _sample_workspace(workspace, token, scenario, fixture)
     if (
         fixture is not None
         and scenario in MUTATION_SCENARIOS
-        and _snapshot_tree(measured_workspace) != expected_snapshot
+        and _snapshot_tree(
+            measured_workspace,
+            limits=_limits_for_snapshot(expected_snapshot),
+            expected=expected_snapshot,
+        )
+        != expected_snapshot
     ):
         raise BenchmarkRunError("mutation fixture copy topology changed before worker launch")
     observation_directory = workspace.observations / token
@@ -352,6 +437,18 @@ def _run_worker_sample(
         observation_directory=observation_directory,
         observation_path=observation_path,
         measured_workspace=measured_workspace,
+        expected_workspace=(
+            expected_snapshot
+            if fixture is not None and scenario not in MUTATION_SCENARIOS
+            else None
+        ),
+        workspace_limits=(
+            _initialization_tree_limits()
+            if fixture is None
+            else _mutation_tree_limits(fixture)
+            if scenario in MUTATION_SCENARIOS
+            else _limits_for_snapshot(expected_snapshot)
+        ),
     )
 
     if result.returncode != 0:
@@ -362,7 +459,12 @@ def _run_worker_sample(
     if (
         fixture is not None
         and scenario not in MUTATION_SCENARIOS
-        and _snapshot_tree(measured_workspace) != expected_snapshot
+        and _snapshot_tree(
+            measured_workspace,
+            limits=_limits_for_snapshot(expected_snapshot),
+            expected=expected_snapshot,
+        )
+        != expected_snapshot
     ):
         raise BenchmarkRunError("read-only worker changed the full filesystem topology")
     return observation
@@ -375,6 +477,8 @@ def _run_bounded_worker(
     observation_directory: Path,
     observation_path: Path,
     measured_workspace: Path,
+    expected_workspace: _TreeSnapshot | None,
+    workspace_limits: _TreeLimits,
 ) -> _WorkerResult:
     try:
         process = subprocess.Popen(
@@ -400,6 +504,8 @@ def _run_bounded_worker(
                 observation_directory,
                 observation_path,
                 measured_workspace,
+                expected_workspace,
+                workspace_limits,
             )
             raise BenchmarkRunError("benchmark worker exceeded the bounded stdio limit") from error
         except _WorkerTimedOut:
@@ -411,6 +517,8 @@ def _run_bounded_worker(
                 observation_directory,
                 observation_path,
                 measured_workspace,
+                expected_workspace,
+                workspace_limits,
             )
             raise
 
@@ -421,6 +529,8 @@ def _run_bounded_worker(
                 observation_directory,
                 observation_path,
                 measured_workspace,
+                expected_workspace,
+                workspace_limits,
             )
             raise BenchmarkRunError("benchmark worker left a descendant process")
         return _WorkerResult(process.returncode, stdout, stderr)
@@ -523,16 +633,30 @@ def _validate_failed_worker_residue(
     observation_directory: Path,
     observation_path: Path,
     measured_workspace: Path,
+    expected_workspace: _TreeSnapshot | None,
+    workspace_limits: _TreeLimits,
 ) -> None:
-    observation_snapshot = _snapshot_tree(observation_directory)
-    if sum(entry.size for entry in observation_snapshot.values()) > 4 * _MAX_OBSERVATION_BYTES:
-        raise BenchmarkRunError("failed worker left unbounded observation residue")
+    _snapshot_tree(
+        observation_directory,
+        limits=_TreeLimits(
+            max_entries=8,
+            max_total_declared_bytes=4 * _MAX_OBSERVATION_BYTES,
+            max_file_bytes=_MAX_OBSERVATION_BYTES,
+        ),
+    )
     if os.path.lexists(observation_path):
         state = observation_path.lstat()
         if not stat.S_ISREG(state.st_mode) or state.st_size > _MAX_OBSERVATION_BYTES:
             raise BenchmarkRunError("failed worker left an invalid observation output")
-    if os.path.lexists(measured_workspace):
-        _snapshot_tree(measured_workspace)
+    if not os.path.lexists(measured_workspace):
+        if expected_workspace is not None:
+            raise BenchmarkRunError("generated fixture topology changed")
+        return
+    _snapshot_tree(
+        measured_workspace,
+        limits=workspace_limits,
+        expected=expected_workspace,
+    )
 
 
 def _sample_workspace(
@@ -554,7 +678,12 @@ def _sample_workspace(
     return destination
 
 
-def _snapshot_tree(root: Path) -> _TreeSnapshot:
+def _snapshot_tree(
+    root: Path,
+    *,
+    limits: _TreeLimits,
+    expected: _TreeSnapshot | None = None,
+) -> _TreeSnapshot:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         root_descriptor = os.open(root, flags)
@@ -564,8 +693,17 @@ def _snapshot_tree(root: Path) -> _TreeSnapshot:
         root_state = os.fstat(root_descriptor)
         if not stat.S_ISDIR(root_state.st_mode):
             raise BenchmarkRunError("generated fixture topology root must be a directory")
+        metadata: dict[str, _TreeMetadata] = {".": _tree_metadata(root_state)}
+        declared_bytes = [0]
+        _preflight_directory(root_descriptor, "", metadata, limits, declared_bytes)
+        if expected is not None and metadata != {
+            relative: _entry_metadata(entry) for relative, entry in expected.items()
+        }:
+            raise BenchmarkRunError("generated fixture topology changed")
         snapshot = {".": _directory_entry(root_descriptor, root_state)}
-        _snapshot_directory(root_descriptor, "", snapshot)
+        _snapshot_directory(root_descriptor, "", snapshot, metadata)
+        if expected is not None and snapshot != expected:
+            raise BenchmarkRunError("generated fixture topology changed")
         return snapshot
     finally:
         os.close(root_descriptor)
@@ -575,12 +713,15 @@ def _snapshot_directory(
     directory_descriptor: int,
     relative_parent: str,
     snapshot: _TreeSnapshot,
+    metadata: dict[str, _TreeMetadata],
 ) -> None:
     with os.scandir(directory_descriptor) as iterator:
         names = sorted(entry.name for entry in iterator)
     for name in names:
         relative = name if not relative_parent else f"{relative_parent}/{name}"
         state = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+        if _tree_metadata(state) != metadata[relative]:
+            raise BenchmarkRunError("generated fixture topology changed during validation")
         if stat.S_ISLNK(state.st_mode):
             raise BenchmarkRunError("generated fixture topology contains a symlink")
         if stat.S_ISDIR(state.st_mode):
@@ -590,7 +731,7 @@ def _snapshot_directory(
                 descriptor_state = os.fstat(child_descriptor)
                 _require_same_inode(state, descriptor_state)
                 snapshot[relative] = _directory_entry(child_descriptor, descriptor_state)
-                _snapshot_directory(child_descriptor, relative, snapshot)
+                _snapshot_directory(child_descriptor, relative, snapshot, metadata)
             finally:
                 os.close(child_descriptor)
             continue
@@ -608,6 +749,122 @@ def _snapshot_directory(
                 os.close(file_descriptor)
             continue
         raise BenchmarkRunError("generated fixture topology contains a special filesystem entry")
+
+
+def _preflight_directory(
+    directory_descriptor: int,
+    relative_parent: str,
+    metadata: dict[str, _TreeMetadata],
+    limits: _TreeLimits,
+    declared_bytes: list[int],
+) -> None:
+    with os.scandir(directory_descriptor) as iterator:
+        names = sorted(entry.name for entry in iterator)
+    for name in names:
+        relative = name if not relative_parent else f"{relative_parent}/{name}"
+        state = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+        if stat.S_ISLNK(state.st_mode):
+            raise BenchmarkRunError("generated fixture topology contains a symlink")
+        if stat.S_ISDIR(state.st_mode):
+            kind: Literal["directory", "file"] = "directory"
+        elif stat.S_ISREG(state.st_mode):
+            kind = "file"
+            if state.st_size > limits.max_file_bytes:
+                raise BenchmarkRunError(
+                    "generated fixture topology file exceeds the validation bound"
+                )
+            declared_bytes[0] += state.st_size
+            if declared_bytes[0] > limits.max_total_declared_bytes:
+                raise BenchmarkRunError(
+                    "generated fixture topology bytes exceed the validation bound"
+                )
+        else:
+            raise BenchmarkRunError(
+                "generated fixture topology contains a special filesystem entry"
+            )
+        metadata[relative] = _tree_metadata(state, kind=kind)
+        if len(metadata) > limits.max_entries:
+            raise BenchmarkRunError(
+                "generated fixture topology entries exceed the validation bound"
+            )
+        if kind == "directory":
+            child_descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_descriptor,
+            )
+            try:
+                _require_same_inode(state, os.fstat(child_descriptor))
+                _preflight_directory(child_descriptor, relative, metadata, limits, declared_bytes)
+            finally:
+                os.close(child_descriptor)
+
+
+def _tree_metadata(
+    state: os.stat_result,
+    *,
+    kind: Literal["directory", "file"] | None = None,
+) -> _TreeMetadata:
+    if kind is None:
+        kind = "directory" if stat.S_ISDIR(state.st_mode) else "file"
+    return (
+        kind,
+        stat.S_IMODE(state.st_mode),
+        0 if kind == "directory" else state.st_size,
+        state.st_mtime_ns,
+        state.st_uid,
+        state.st_gid,
+        state.st_nlink,
+    )
+
+
+def _entry_metadata(entry: _TreeEntry) -> _TreeMetadata:
+    return (
+        entry.kind,
+        entry.mode,
+        entry.size,
+        entry.mtime_ns,
+        entry.user_id,
+        entry.group_id,
+        entry.link_count,
+    )
+
+
+def _limits_for_snapshot(snapshot: _TreeSnapshot | None) -> _TreeLimits:
+    if snapshot is None:
+        raise BenchmarkRunError("generated fixture baseline is unavailable")
+    sizes = tuple(entry.size for entry in snapshot.values() if entry.kind == "file")
+    return _TreeLimits(
+        max_entries=len(snapshot),
+        max_total_declared_bytes=sum(sizes),
+        max_file_bytes=max(sizes, default=0),
+    )
+
+
+def _fixture_tree_limits(fixture: GeneratedFixture) -> _TreeLimits:
+    profile = fixture.profile
+    return _TreeLimits(
+        max_entries=4 * profile.document_count + 256,
+        max_total_declared_bytes=2 * fixture.exact_workspace_bytes,
+        max_file_bytes=max(profile.target_wiki_bytes, 4 * profile.source_characters, 1024 * 1024),
+    )
+
+
+def _mutation_tree_limits(fixture: GeneratedFixture) -> _TreeLimits:
+    profile = fixture.profile
+    return _TreeLimits(
+        max_entries=8 * profile.document_count + 512,
+        max_total_declared_bytes=4 * fixture.exact_workspace_bytes + 4 * profile.source_characters,
+        max_file_bytes=max(profile.target_wiki_bytes, 4 * profile.source_characters, 1024 * 1024),
+    )
+
+
+def _initialization_tree_limits() -> _TreeLimits:
+    return _TreeLimits(
+        max_entries=256,
+        max_total_declared_bytes=4 * 1024 * 1024,
+        max_file_bytes=1024 * 1024,
+    )
 
 
 def _directory_entry(descriptor: int, state: os.stat_result) -> _TreeEntry:

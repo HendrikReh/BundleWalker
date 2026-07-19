@@ -1,5 +1,6 @@
 # Copyright (C) 2026 Hendrik Reh
 # SPDX-License-Identifier: GPL-3.0-or-later
+# pyright: reportPrivateUsage=false
 
 import os
 import subprocess
@@ -361,4 +362,165 @@ def test_cli_rejects_work_root_beneath_intended_output_before_creation(
         )
 
     assert error.value.code == 2
+    assert not output.exists()
+
+
+def test_cli_rejects_generated_workspace_root_as_exact_work_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = generate_fixture(tmp_path / "fixture", PROFILES["smoke"])
+    output = tmp_path / "evidence.json"
+
+    def unexpected_run(_config: RunConfig) -> None:
+        raise AssertionError("workspace exclusion must fail before running")
+
+    monkeypatch.setattr(benchmark_cli, "run_benchmarks", unexpected_run)
+
+    with pytest.raises(SystemExit) as error:
+        benchmark_cli.main(
+            [
+                "run",
+                "--profiles",
+                "smoke",
+                "--correctness-only",
+                "--output",
+                str(output),
+                "--work-root",
+                str(fixture.workspace.root),
+            ]
+        )
+
+    assert error.value.code == 2
+    assert not output.exists()
+
+
+def test_failed_read_only_worker_residue_must_equal_frozen_baseline(tmp_path: Path) -> None:
+    measured = tmp_path / "measured"
+    measured.mkdir()
+    content = measured / "content.md"
+    content.write_text("frozen", encoding="ascii")
+    limits = runner_module._TreeLimits(8, 1024, 1024)
+    baseline = runner_module._snapshot_tree(measured, limits=limits)
+    content.unlink()
+    observations = tmp_path / "observations"
+    observations.mkdir()
+
+    with pytest.raises(BenchmarkRunError, match="topology"):
+        runner_module._validate_failed_worker_residue(
+            observations,
+            observations / "observation.json",
+            measured,
+            baseline,
+            limits,
+        )
+
+
+def test_snapshot_rejects_huge_sparse_file_before_content_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    with (root / "huge.bin").open("wb") as stream:
+        stream.truncate(1024 * 1024 * 1024)
+
+    def unexpected_hash(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("content hashing must not begin before bound validation")
+
+    monkeypatch.setattr(runner_module, "_snapshot_directory", unexpected_hash)
+
+    with pytest.raises(BenchmarkRunError, match="validation bound"):
+        runner_module._snapshot_tree(
+            root,
+            limits=runner_module._TreeLimits(8, 1024, 1024),
+        )
+
+
+def test_snapshot_rejects_excessive_entries_before_content_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(4):
+        (root / f"{index}.txt").write_text("x", encoding="ascii")
+
+    def unexpected_hash(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("content hashing must not begin before bound validation")
+
+    monkeypatch.setattr(runner_module, "_snapshot_directory", unexpected_hash)
+
+    with pytest.raises(BenchmarkRunError, match="validation bound"):
+        runner_module._snapshot_tree(
+            root,
+            limits=runner_module._TreeLimits(4, 1024, 1024),
+        )
+
+
+def test_run_publication_stays_anchored_when_parent_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication_parent = tmp_path / "publication"
+    publication_parent.mkdir()
+    original_parent = tmp_path / "original-publication"
+    output = publication_parent / "evidence.json"
+    generate = runner_module._generate_fixtures
+
+    def swap_then_generate(
+        work_root: Path, profiles: tuple[runner_module.WorkspaceProfile, ...]
+    ) -> tuple[runner_module.GeneratedFixture, ...]:
+        publication_parent.rename(original_parent)
+        publication_parent.mkdir()
+        return generate(work_root, profiles)
+
+    monkeypatch.setattr(runner_module, "_generate_fixtures", swap_then_generate)
+
+    evidence = run_benchmarks(
+        RunConfig(
+            profiles=(PROFILES["smoke"],),
+            output=output,
+            work_root=tmp_path / "work",
+            run_id="anchored-run",
+            correctness_only=True,
+        )
+    )
+
+    assert load_evidence(original_parent / "evidence.json") == evidence
+    assert not output.exists()
+
+
+def test_report_publication_stays_anchored_when_parent_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_directory = tmp_path / "records"
+    evidence_directory.mkdir()
+    write_evidence(evidence_directory / "evidence.json", evidence_record())
+    publication_parent = tmp_path / "publication"
+    publication_parent.mkdir()
+    original_parent = tmp_path / "original-publication"
+    output = publication_parent / "report.md"
+
+    def swap_then_render(*_args: object, **_kwargs: object) -> str:
+        publication_parent.rename(original_parent)
+        publication_parent.mkdir()
+        return "anchored report\n"
+
+    monkeypatch.setattr(benchmark_cli, "render_report", swap_then_render)
+
+    result = benchmark_cli.main(
+        [
+            "report",
+            "--evidence",
+            str(evidence_directory),
+            "--output",
+            str(output),
+            "--provisional",
+        ]
+    )
+
+    assert result == 0
+    assert (original_parent / "report.md").read_text(encoding="utf-8") == "anchored report\n"
     assert not output.exists()
