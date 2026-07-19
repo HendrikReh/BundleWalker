@@ -12,11 +12,37 @@ boundary.
 ## What will be measured
 
 The benchmark harness generates deterministic synthetic workspaces from fixed profiles and seeds.
-It measures the local BundleWalker boundary: workspace initialization; status, first-page listing,
-end-of-order reading, and lexical search; deterministic lint; ingestion preparation with a
-deterministic runner; review commit; MCP startup and discovery; and recovery of both a prepared
-review and an interrupted commit at the swapping boundary. Correctness, cleanup, and durable
-transaction state are checked for every scenario.
+It measures these twelve local scenarios:
+
+### Scenario inventory
+
+1. Workspace initialization (`initialize`).
+2. Workspace status (`status`).
+3. First-page concept listing (`list_concepts`).
+4. End-of-order concept reading (`read_concept`).
+5. Lexical present-result search (`search_present`).
+6. Lexical absent-result search (`search_absent`).
+7. Deterministic lint (`lint`).
+8. MCP startup and discovery (`mcp_startup`).
+9. Ingestion preparation (`prepare_ingestion`).
+10. Review commit (`commit`).
+11. Prepared-review recovery (`recover_prepared`).
+12. Swapping-boundary recovery (`recover_swapping`).
+
+Correctness, cleanup, and durable transaction state are checked for every scenario. Ingestion
+preparation uses a deterministic runner, and the recovery scenarios cover both a prepared review
+and an interrupted commit at the swapping boundary.
+
+### Timing boundary
+
+For ordinary scenarios, fixture generation and preparation are excluded from timing; controller
+workspace copying is excluded from timing; and ordinary Python worker startup is excluded from
+timing. The ordinary scenario timers bracket only the specified production call. Setup and
+correctness checks happen outside those timers.
+
+MCP startup is exceptional: its timer includes process launch and protocol initialization through
+sorted tool discovery. The clean shutdown happens after the timer stops and is outside the
+measurement.
 
 These measurements deliberately exercise local production behavior. They do not measure a model
 call, a network connection, or a provider service.
