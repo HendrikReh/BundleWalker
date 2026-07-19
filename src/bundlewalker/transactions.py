@@ -58,6 +58,10 @@ _Phase = Literal["prepared", "accepted", "raw-persisted", "swapping", "new-live"
 _SCHEMA_V1_PHASES = frozenset({"prepared", "raw-persisted", "swapping", "new-live"})
 _SCHEMA_V2_PHASES = frozenset({"prepared", "accepted", "raw-persisted", "swapping", "new-live"})
 _MAX_DIAGNOSTIC_MANIFEST_BYTES = 1_048_576
+# identity.json contains only three SHA-256 values; 4 KiB leaves ample format headroom.
+_MAX_DIAGNOSTIC_IDENTITY_BYTES = 4_096
+_MAX_DIAGNOSTIC_TRANSACTION_ENTRIES = 64
+_MAX_DIAGNOSTIC_QUARANTINE_NAME_ENTRIES = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +305,10 @@ def _inspect_transaction_entries(
     try:
         if not stat.S_ISDIR(os.fstat(transactions_descriptor).st_mode):
             return TransactionDiagnosticStatus.MALFORMED
-        entries = sorted(os.listdir(transactions_descriptor))
+        entries = _bounded_diagnostic_names(
+            transactions_descriptor,
+            _MAX_DIAGNOSTIC_TRANSACTION_ENTRIES,
+        )
         if not entries:
             return TransactionDiagnosticStatus.CLEAN
 
@@ -321,6 +328,7 @@ def _inspect_transaction_entries(
                     transaction_name,
                     transaction_descriptor,
                 )
+                _load_diagnostic_identity(transaction_descriptor, manifest)
                 live_kind = _diagnostic_workspace_node_kind(
                     root_descriptor,
                     PurePosixPath(workspace.config.wiki_dir).parts,
@@ -418,13 +426,28 @@ def _diagnostic_workspace_node_kind(
 def _diagnostic_backup_kind(transaction_descriptor: int) -> str:
     backup_kind = _diagnostic_node_kind(transaction_descriptor, _BACKUP_NAME)
     quarantines = [
-        name for name in os.listdir(transaction_descriptor) if name.startswith(_QUARANTINE_PREFIX)
+        name
+        for name in _bounded_diagnostic_names(
+            transaction_descriptor,
+            _MAX_DIAGNOSTIC_QUARANTINE_NAME_ENTRIES,
+        )
+        if name.startswith(_QUARANTINE_PREFIX)
     ]
     if len(quarantines) > 1 or (quarantines and backup_kind != "absent"):
         return "unsafe"
     if quarantines:
         return _diagnostic_node_kind(transaction_descriptor, quarantines[0])
     return backup_kind
+
+
+def _bounded_diagnostic_names(descriptor: int, limit: int) -> tuple[str, ...]:
+    names: list[str] = []
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            if len(names) == limit:
+                raise _IncompleteManifestError
+            names.append(entry.name)
+    return tuple(sorted(names))
 
 
 def _diagnostic_node_kind(parent_descriptor: int, name: str) -> str:
@@ -2024,6 +2047,72 @@ def _validate_diagnostic_manifest_relationships(
         raise TransactionError("backup path is not a safe workspace-relative path")
     if manifest.raw_path is not None:
         _validated_raw_manifest_relative(workspace, Path(manifest.raw_path))
+
+
+def _load_diagnostic_identity(
+    transaction_descriptor: int,
+    manifest: _Manifest,
+) -> _Identity:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            _IDENTITY_NAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=transaction_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_DIAGNOSTIC_IDENTITY_BYTES:
+            raise _IncompleteManifestError
+        content = bytearray()
+        remaining = _MAX_DIAGNOSTIC_IDENTITY_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(4_096, remaining))
+            if not chunk:
+                break
+            content.extend(chunk)
+            remaining -= len(chunk)
+        if len(content) > _MAX_DIAGNOSTIC_IDENTITY_BYTES:
+            raise _IncompleteManifestError
+    except OSError as exc:
+        raise _IncompleteManifestError from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    try:
+        parsed: object = json.loads(bytes(content).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise _IncompleteManifestError from exc
+    if not isinstance(parsed, dict):
+        raise _IncompleteManifestError
+    untyped_values = cast(dict[object, object], parsed)
+    if not all(isinstance(key, str) for key in untyped_values):
+        raise _IncompleteManifestError
+    values = cast(dict[str, object], untyped_values)
+    required_keys = {"base_wiki_digest", "prospective_digest"}
+    if manifest.schema_version == _SCHEMA_VERSION:
+        required_keys.add("review_digest")
+    if set(values) != required_keys:
+        raise _IncompleteManifestError
+    base = values.get("base_wiki_digest")
+    prospective = values.get("prospective_digest")
+    review = values.get("review_digest")
+    if (
+        not isinstance(base, str)
+        or _SHA256.fullmatch(base) is None
+        or not isinstance(prospective, str)
+        or _SHA256.fullmatch(prospective) is None
+        or (review is not None and not isinstance(review, str))
+        or (isinstance(review, str) and _SHA256.fullmatch(review) is None)
+    ):
+        raise _IncompleteManifestError
+    if base != manifest.base_wiki_digest or prospective != manifest.prospective_digest:
+        raise TransactionError("manifest identities do not match transaction identity")
+    return _Identity(
+        base_wiki_digest=base,
+        prospective_digest=prospective,
+        review_digest=review,
+    )
 
 
 def _parse_manifest_bytes(content: bytes) -> _Manifest:
