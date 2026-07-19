@@ -13,9 +13,14 @@ class ScenarioCallable(Protocol):
     def __call__(self, fixture: GeneratedFixture) -> SampleObservation: ...
 
 
+from benchmarks.scenarios.mcp_startup import run_mcp_startup  # noqa: E402
 from benchmarks.scenarios.mutation import MUTATION_SCENARIOS  # noqa: E402
 from benchmarks.scenarios.read_only import READ_ONLY_SCENARIOS  # noqa: E402
 
 SCENARIOS: Mapping[ScenarioName, ScenarioCallable] = MappingProxyType(
-    {**READ_ONLY_SCENARIOS, **MUTATION_SCENARIOS}
+    {
+        **READ_ONLY_SCENARIOS,
+        **MUTATION_SCENARIOS,
+        ScenarioName.MCP_STARTUP: run_mcp_startup,
+    }
 )
