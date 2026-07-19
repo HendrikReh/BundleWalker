@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import secrets
 import selectors
 import stat
@@ -44,6 +45,7 @@ _READ_ONLY_SCENARIOS = frozenset(
 _STAT_TIMEOUT_SECONDS = 5
 _MAX_FILESYSTEM_TYPE_CHARACTERS = 64
 _TEMPORARY_CREATION_ATTEMPTS = 32
+_RUNNER_IMAGE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 def nearest_rank_p95(samples: Sequence[int]) -> int:
@@ -109,7 +111,7 @@ def collect_environment(root: Path) -> EnvironmentRecord:
         architecture=platform.machine(),
         logical_cpu_count=os.cpu_count(),
         total_memory_bytes=_portable_total_memory(),
-        runner_image=os.environ.get("ImageOS"),  # noqa: SIM112 - GitHub's documented key
+        runner_image=_safe_runner_image(root),
         filesystem_type=_portable_filesystem_type(root),
     )
 
@@ -156,6 +158,15 @@ def _portable_total_memory() -> int | None:
         return None
     total = page_size * page_count
     return total if total > 0 else None
+
+
+def _safe_runner_image(root: Path) -> str | None:
+    value = os.environ.get("ImageOS")  # noqa: SIM112 - GitHub's documented key
+    if value is None or _RUNNER_IMAGE_TOKEN.fullmatch(value) is None:
+        return None
+    if os.fspath(root) in value:
+        return None
+    return value
 
 
 def _portable_filesystem_type(root: Path) -> str | None:
@@ -259,10 +270,8 @@ def _preserve_temporary(path: Path, identity: tuple[int, int]) -> bool:
     quarantine = Path(tempfile.mkdtemp(prefix=f".{path.name}.cleanup-", dir=path.parent))
     candidate = quarantine / "candidate"
     try:
-        os.rename(path, candidate)
-    except FileNotFoundError:
-        with suppress(OSError):
-            quarantine.rmdir()
+        os.link(path, candidate)
+    except OSError:
         return False
     return _quarantined_path_is_owned(quarantine, identity)
 

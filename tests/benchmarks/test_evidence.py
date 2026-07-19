@@ -7,6 +7,7 @@ import os
 import platform
 import stat
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -60,6 +61,50 @@ def test_environment_record_contains_no_identity_or_paths(tmp_path: Path) -> Non
     assert "environment" not in serialized.casefold()
 
 
+@pytest.mark.parametrize(
+    "runner_image",
+    [
+        "ubuntu/24",
+        r"C:\runner\image",
+        "ubuntu\nprivate",
+        "ubuntu\tprivate",
+        "x" * 65,
+        "ubuntu 24",
+        "",
+    ],
+)
+def test_environment_rejects_unsafe_runner_image_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_image: str,
+) -> None:
+    monkeypatch.setenv("ImageOS", runner_image)
+
+    assert collect_environment(tmp_path).runner_image is None
+
+
+def test_environment_rejects_runner_image_containing_the_benchmark_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ImageOS", f"image-{tmp_path}")
+
+    environment = collect_environment(tmp_path)
+
+    assert environment.runner_image is None
+    assert str(tmp_path) not in environment.model_dump_json()
+
+
+@pytest.mark.parametrize("runner_image", ["ubuntu24", "macos-15", "runner_image.v1"])
+def test_environment_accepts_bounded_runner_image_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_image: str,
+) -> None:
+    monkeypatch.setenv("ImageOS", runner_image)
+
+    assert collect_environment(tmp_path).runner_image == runner_image
+
+
 def test_evidence_writer_refuses_an_existing_destination(tmp_path: Path) -> None:
     destination = tmp_path / "evidence.json"
     destination.write_text("existing\n", encoding="utf-8")
@@ -70,7 +115,7 @@ def test_evidence_writer_refuses_an_existing_destination(tmp_path: Path) -> None
     assert destination.read_text(encoding="utf-8") == "existing\n"
 
 
-def test_atomic_write_cleans_owned_temporary_file_after_link_failure(
+def test_atomic_write_retains_owner_only_temporary_after_link_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "evidence.json"
@@ -84,7 +129,7 @@ def test_atomic_write_cleans_owned_temporary_file_after_link_failure(
         write_evidence(destination, evidence_record())
 
     assert not destination.exists()
-    assert not list(tmp_path.glob("*.partial"))
+    _assert_owner_only_partials(tmp_path, expected_count=1)
 
 
 def test_materialized_bytes_counts_a_hard_linked_inode_once(tmp_path: Path) -> None:
@@ -246,7 +291,7 @@ def test_atomic_writer_completes_short_writes(
     assert destination.read_text(encoding="utf-8") == "abcdefghij"
 
 
-def test_atomic_writer_cleans_owned_temporary_after_write_failure(
+def test_atomic_writer_retains_owner_only_temporary_after_write_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "preview.md"
@@ -260,7 +305,7 @@ def test_atomic_writer_cleans_owned_temporary_after_write_failure(
         write_new_text(destination, "content")
 
     assert not destination.exists()
-    assert not list(tmp_path.glob("*.partial"))
+    _assert_owner_only_partials(tmp_path, expected_count=1)
 
 
 def test_atomic_writer_preserves_competing_destination(
@@ -279,7 +324,7 @@ def test_atomic_writer_preserves_competing_destination(
         write_new_text(destination, "ours\n")
 
     assert destination.read_text(encoding="utf-8") == "competitor\n"
-    assert not list(tmp_path.glob("*.partial"))
+    _assert_owner_only_partials(tmp_path, expected_count=1)
 
 
 def test_atomic_writer_never_deletes_an_unowned_temporary_replacement(
@@ -322,7 +367,7 @@ def test_atomic_writer_rejects_an_unowned_inode_published_during_link(
     assert destination.read_text(encoding="utf-8") == actor_content
 
 
-def test_atomic_writer_preserves_replacement_installed_during_owned_cleanup(
+def test_atomic_writer_never_uses_overwriting_rename_during_preservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "preview.md"
@@ -346,10 +391,11 @@ def test_atomic_writer_preserves_replacement_installed_during_owned_cleanup(
     with pytest.raises(OSError, match="injected publication failure"):
         write_new_text(destination, "ours\n")
 
-    assert replacement_installed
-    assert actor_content in {
+    assert not replacement_installed
+    assert actor_content not in {
         item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()
     }
+    _assert_owner_only_partials(tmp_path, expected_count=1)
 
 
 def test_owned_cleanup_conservatively_preserves_the_quarantined_inode(
@@ -376,9 +422,80 @@ def test_owned_cleanup_conservatively_preserves_the_quarantined_inode(
 
     assert preserved_owned
     assert not swapped
-    assert [item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()] == [
-        "ours"
-    ]
+    retained = [item for item in tmp_path.rglob("*") if item.is_file()]
+    assert len(retained) == 2
+    assert {item.read_text(encoding="utf-8") for item in retained} == {"ours"}
+    assert len({(item.stat().st_dev, item.stat().st_ino) for item in retained}) == 1
+
+
+def test_quarantine_transition_never_overwrites_an_actor_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary = tmp_path / ".evidence.partial"
+    temporary.write_text("ours", encoding="utf-8")
+    metadata = temporary.stat()
+    identity = metadata.st_dev, metadata.st_ino
+    original_mkdtemp = tempfile.mkdtemp
+
+    def plant_candidate(
+        suffix: str | None = None,
+        prefix: str | None = None,
+        dir: str | os.PathLike[str] | None = None,
+    ) -> str:
+        quarantine = Path(original_mkdtemp(suffix=suffix, prefix=prefix, dir=dir))
+        (quarantine / "candidate").write_text("actor-owned", encoding="utf-8")
+        return str(quarantine)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", plant_candidate)
+
+    preserved_owned = _preserve_temporary(temporary, identity)
+
+    assert not preserved_owned
+    assert temporary.read_text(encoding="utf-8") == "ours"
+    assert "actor-owned" in {
+        item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()
+    }
+
+
+def test_failed_quarantine_transition_never_removes_an_actor_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    temporary = tmp_path / ".evidence.partial"
+    temporary.write_text("ours", encoding="utf-8")
+    metadata = temporary.stat()
+    identity = metadata.st_dev, metadata.st_ino
+    original_mkdtemp = tempfile.mkdtemp
+    original_rename = os.rename
+    quarantines: list[Path] = []
+    actor_identities: list[tuple[int, int]] = []
+
+    def record_quarantine(
+        suffix: str | None = None,
+        prefix: str | None = None,
+        dir: str | os.PathLike[str] | None = None,
+    ) -> str:
+        quarantine = Path(original_mkdtemp(suffix=suffix, prefix=prefix, dir=dir))
+        original_rename(quarantine, quarantine.with_name(f"{quarantine.name}.parked"))
+        quarantine.mkdir(mode=0o700)
+        quarantines.append(quarantine)
+        metadata = quarantine.stat()
+        actor_identities.append((metadata.st_dev, metadata.st_ino))
+        return str(quarantine)
+
+    def fail_transition(*_args: Any, **_kwargs: Any) -> None:
+        raise FileNotFoundError("injected transition failure")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", record_quarantine)
+    monkeypatch.setattr(os, "rename", fail_transition)
+    monkeypatch.setattr(os, "link", fail_transition)
+
+    preserved_owned = _preserve_temporary(temporary, identity)
+
+    assert not preserved_owned
+    assert quarantines[0].is_dir()
+    metadata = quarantines[0].stat()
+    assert (metadata.st_dev, metadata.st_ino) == actor_identities[0]
+    assert temporary.read_text(encoding="utf-8") == "ours"
 
 
 def test_owned_cleanup_preserves_replacement_after_anchored_open(
@@ -456,12 +573,13 @@ def test_owned_cleanup_never_deletes_at_the_final_unlinkat_boundary(
 
     assert preserved_owned
     assert not swapped
-    assert [item.read_text(encoding="utf-8") for item in tmp_path.rglob("*") if item.is_file()] == [
-        "ours"
-    ]
+    retained = [item for item in tmp_path.rglob("*") if item.is_file()]
+    assert len(retained) == 2
+    assert {item.read_text(encoding="utf-8") for item in retained} == {"ours"}
+    assert len({(item.stat().st_dev, item.stat().st_ino) for item in retained}) == 1
 
 
-def test_atomic_writer_cleans_up_after_initial_fstat_failure(
+def test_atomic_writer_retains_temporary_after_initial_fstat_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     destination = tmp_path / "preview.md"
@@ -481,7 +599,7 @@ def test_atomic_writer_cleans_up_after_initial_fstat_failure(
         write_new_text(destination, "ours\n")
 
     assert not destination.exists()
-    assert not list(tmp_path.glob("*.partial"))
+    _assert_owner_only_partials(tmp_path, expected_count=1)
 
 
 def test_atomic_writer_does_not_retry_an_ambiguous_close(
@@ -590,3 +708,9 @@ class _CompletedStat:
 
     def kill(self) -> None:
         self.returncode = -9
+
+
+def _assert_owner_only_partials(root: Path, *, expected_count: int) -> None:
+    partials = list(root.glob("*.partial"))
+    assert len(partials) == expected_count
+    assert all(stat.S_IMODE(partial.stat().st_mode) == 0o600 for partial in partials)
