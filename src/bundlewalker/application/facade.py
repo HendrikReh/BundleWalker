@@ -40,7 +40,7 @@ from bundlewalker.application.errors import (
 )
 from bundlewalker.domain import MAX_CONCEPT_ID_CHARACTERS, OkfDocument
 from bundlewalker.errors import BundleWalkerError, TransactionError
-from bundlewalker.okf.repository import OkfRepository
+from bundlewalker.okf.repository import ConceptSummary, OkfRepository
 from bundlewalker.retrieval import LexicalRetriever
 from bundlewalker.transactions import (
     TransactionReview,
@@ -172,9 +172,8 @@ class WorkspaceApplication:
             recover_transactions(self.workspace)
             repository = OkfRepository(self.workspace.wiki_dir)
             matches = LexicalRetriever(repository).search(query, concept_type, limit)
-            documents = repository.scan()
             return ConceptSearchResult(
-                items=tuple(_concept_summary(documents[item.concept_id]) for item in matches)
+                items=tuple(_concept_summary_result(item) for item in matches)
             )
         except BundleWalkerError as exc:
             raise translate_error(exc) from exc
@@ -363,13 +362,17 @@ class WorkspaceApplication:
 
 
 def _concept_summary(document: OkfDocument) -> ConceptSummaryResult:
+    return _concept_summary_result(ConceptSummary.from_document(document))
+
+
+def _concept_summary_result(summary: ConceptSummary) -> ConceptSummaryResult:
     return ConceptSummaryResult(
-        concept_id=document.concept_id,
-        type=document.metadata.type,
-        title=document.metadata.title or PurePosixPath(document.concept_id).name,
-        description=document.metadata.description or "",
-        tags=tuple(document.metadata.tags),
-        resource_uri=f"bundlewalker://concept/{quote(document.concept_id, safe='/')}",
+        concept_id=summary.concept_id,
+        type=summary.type,
+        title=summary.title or PurePosixPath(summary.concept_id).name,
+        description=summary.description or "",
+        tags=summary.tags,
+        resource_uri=f"bundlewalker://concept/{quote(summary.concept_id, safe='/')}",
     )
 
 

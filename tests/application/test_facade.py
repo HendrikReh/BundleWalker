@@ -32,6 +32,7 @@ from bundlewalker.domain import (
 )
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
+from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import get_pending_review
 from bundlewalker.workflows.ask import AnsweredQuestion, prepare_synthesis
 from bundlewalker.workspace import RawSource, Workspace, initialize_workspace, load_inline_source
@@ -297,11 +298,73 @@ async def test_read_concept_rejects_unsafe_concept_identifier(
     assert raised.value.code is ApplicationErrorCode.INVALID_INPUT
 
 
-async def test_search_concepts_returns_lexical_matches(application: WorkspaceApplication) -> None:
-    result = await application.search_concepts("agents", concept_type="Topic", limit=1)
+async def test_search_concepts_scans_once_and_preserves_summary_contract(
+    application: WorkspaceApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (application.workspace.wiki_dir / "entities" / "tool guide.md").write_text(
+        render_document(
+            OkfMetadata(type="Entity", tags=["tools"], timestamp=NOW),
+            "# Tool Guide\n\nA guide for agent tools.\n",
+        ),
+        encoding="utf-8",
+    )
+    original_scan = OkfRepository.scan
+    scan_calls = 0
 
-    assert [item.concept_id for item in result.items] == ["topics/agents"]
-    assert result.items[0].resource_uri == "bundlewalker://concept/topics/agents"
+    def counted_scan(repository: OkfRepository) -> dict[str, OkfDocument]:
+        nonlocal scan_calls
+        scan_calls += 1
+        return original_scan(repository)
+
+    monkeypatch.setattr(OkfRepository, "scan", counted_scan)
+
+    result = await application.search_concepts("guide", concept_type="Entity", limit=1)
+
+    assert scan_calls == 1
+    assert [item.model_dump() for item in result.items] == [
+        {
+            "concept_id": "entities/tool guide",
+            "type": "Entity",
+            "title": "tool guide",
+            "description": "",
+            "tags": ("tools",),
+            "resource_uri": "bundlewalker://concept/entities/tool%20guide",
+        }
+    ]
+
+
+async def test_search_concepts_returns_empty_result_for_no_match(
+    application: WorkspaceApplication,
+) -> None:
+    result = await application.search_concepts("term-that-does-not-exist")
+
+    assert result.items == ()
+
+
+async def test_search_concepts_translates_invalid_limit(
+    application: WorkspaceApplication,
+) -> None:
+    with pytest.raises(ApplicationError) as raised:
+        await application.search_concepts("agents", limit=0)
+
+    assert raised.value.code is ApplicationErrorCode.INVALID_INPUT
+    assert raised.value.safe_message == "search limit must be between 1 and 10"
+
+
+async def test_search_concepts_translates_repository_failure(
+    application: WorkspaceApplication,
+) -> None:
+    (application.workspace.wiki_dir / "topics" / "broken.md").write_text(
+        "not frontmatter\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ApplicationError) as raised:
+        await application.search_concepts("agents")
+
+    assert raised.value.code is ApplicationErrorCode.OKF_ERROR
+    assert raised.value.safe_message == "knowledge bundle operation failed"
 
 
 async def test_ask_uses_injected_offline_runner(application: WorkspaceApplication) -> None:
