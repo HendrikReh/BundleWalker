@@ -271,6 +271,38 @@ def _process_exists(process_id: int) -> bool:
     return True
 
 
+def test_worker_group_permission_denial_is_conservatively_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def deny_probe(_process_id: int, requested_signal: int) -> None:
+        assert requested_signal == 0
+        raise PermissionError
+
+    monkeypatch.setattr(os, "killpg", deny_probe)
+
+    assert runner_module._worker_group_exists(1234)
+
+
+def test_worker_tree_signal_permission_denial_is_a_bounded_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_signals: list[int] = []
+
+    def deny_signal(_process_id: int, requested_signal: int) -> None:
+        requested_signals.append(requested_signal)
+        raise PermissionError
+
+    def tree_still_exists(_process: subprocess.Popen[bytes], _timeout_seconds: int) -> bool:
+        return False
+
+    process = cast(subprocess.Popen[bytes], type("Process", (), {"pid": 1234})())
+    monkeypatch.setattr(os, "killpg", deny_signal)
+    monkeypatch.setattr(runner_module, "_wait_for_worker_tree_exit", tree_still_exists)
+
+    assert not runner_module._terminate_worker_tree(process)
+    assert requested_signals == [runner_module.signal.SIGTERM, runner_module.signal.SIGKILL]
+
+
 @pytest.mark.parametrize("evidence_kind", ["missing", "symlink", "file"])
 def test_report_invalid_evidence_directory_is_a_bounded_validation_failure(
     tmp_path: Path,

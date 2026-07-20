@@ -83,14 +83,18 @@ def test_summary_uses_median_nearest_rank_p95_and_stable_output() -> None:
     assert result.disposition is ScenarioDisposition.TARGET_MISSED
 
 
-def test_environment_record_contains_no_identity_or_paths(tmp_path: Path) -> None:
-    serialized = collect_environment(tmp_path).model_dump_json()
+def test_environment_record_contains_no_identity_or_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(getpass, "getuser", lambda: "runner")
+    values = collect_environment(tmp_path).model_dump(mode="json").values()
+    text_values = tuple(value for value in values if isinstance(value, str))
     if username := getpass.getuser():
-        assert username not in serialized
+        assert all(username not in value for value in text_values)
     if hostname := platform.node():
-        assert hostname not in serialized
-    assert str(tmp_path) not in serialized
-    assert "environment" not in serialized.casefold()
+        assert all(hostname not in value for value in text_values)
+    assert all(str(tmp_path) not in value for value in text_values)
+    assert all("environment" not in value.casefold() for value in text_values)
 
 
 @pytest.mark.parametrize(

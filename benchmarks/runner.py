@@ -611,6 +611,10 @@ def _signal_worker_tree(process: subprocess.Popen[bytes], requested_signal: sign
             process.kill()
     except ProcessLookupError:
         return
+    except PermissionError:
+        # Darwin may deny a group signal when any group member is unsignalable.
+        # The bounded liveness wait determines whether cleanup actually finished.
+        return
 
 
 def _wait_for_worker_tree_exit(process: subprocess.Popen[bytes], timeout_seconds: int) -> bool:
@@ -637,6 +641,9 @@ def _worker_group_exists(process_id: int) -> bool:
         os.killpg(process_id, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # A denied group probe cannot prove that the worker tree is gone.
+        return True
     return True
 
 
