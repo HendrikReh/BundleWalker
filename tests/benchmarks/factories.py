@@ -10,6 +10,7 @@ from benchmarks.contracts import (
     ScenarioDisposition,
     ScenarioEvidence,
     ScenarioName,
+    profile_sha256,
 )
 from benchmarks.profiles import PROFILES
 
@@ -41,7 +42,7 @@ def evidence_record(*, os_name: str = "Linux", python_version: str = "3.13.0") -
                 exact_wiki_bytes=512 * 1024,
                 exact_workspace_bytes=600_000,
                 source_characters=10_000,
-                profile_sha256="d" * 64,
+                profile_sha256=profile_sha256(profile),
                 tree_sha256="b" * 64,
             ),
         ),

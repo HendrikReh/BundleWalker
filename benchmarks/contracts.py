@@ -1,6 +1,8 @@
 # Copyright (C) 2026 Hendrik Reh
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import hashlib
+import json
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
@@ -36,6 +38,16 @@ class WorkspaceProfile(BaseModel):
     target_wiki_bytes: int = Field(ge=1, le=104_857_600)
     source_characters: int = Field(ge=1, le=100_000)
     seed: Literal[20260719]
+
+
+def profile_sha256(profile: WorkspaceProfile) -> str:
+    canonical = json.dumps(
+        profile.model_dump(mode="json"),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 CheckpointName = Literal["initialized_workspace", "prepared", "interrupted", "committed", "cleaned"]
@@ -196,8 +208,12 @@ class EvidenceRecord(BaseModel):
             profile = profiles_by_name[fixture.profile]
             if fixture.document_count != profile.document_count:
                 raise ValueError("fixture document count must match its profile")
+            if fixture.exact_wiki_bytes != profile.target_wiki_bytes:
+                raise ValueError("fixture exact wiki bytes must match its profile")
             if fixture.source_characters != profile.source_characters:
                 raise ValueError("fixture source characters must match its profile")
+            if fixture.profile_sha256 != profile_sha256(profile):
+                raise ValueError("fixture profile digest must match its profile")
 
         profile_name_set = set(profile_names)
         for scenario in self.scenarios:

@@ -36,18 +36,17 @@ _TYPE_CATEGORIES = (
 )
 _PRESENT_QUERY = "benchmark-needle"
 _ABSENT_QUERY = "benchmark-absent-needle"
-_READ_DOCUMENT_INDEX = 42
 _TYPE_RATIOS = (1, 4, 3, 2)
 
 # Frozen suite-v1 identities, derived once from the deterministic official profile generator.
 # Any generator change that alters these complete-tree digests requires a new suite version.
 SUITE_V1_TREE_SHA256: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "smoke": "9b9a039500fde21786f3f467023f68d43d4446059b21a3f68dfbc67b1c1ba52d",
-        "small": "8ccea12ff08df9cfc02141658f577674727c6f63b15aadbfe762092fe836fb45",
-        "medium": "2e8849035a796bb8dd95d7aa5144e6d326bf08bed39c308101dbd5e1ecc3b7cb",
-        "large": "669d667ae88ecbe628e3cce5703a3ded4aef2e4323c698ca5478bfeb4ba7f97d",
-        "probe": "d0801c0dbd41b424bfd57fbed33ec5a28e294d37d1303c9b6d189438d2675f9e",
+        "smoke": "2056081991941f2b9aab5a32ff1fa22058d959cb86f122caab1aea29e8ed5676",
+        "small": "9727173321acf3c9193865d0f31df12a1a0221b4e05d25d6cfda2092409057df",
+        "medium": "3f5a4083bcbab9a69169eaca55c122e2cfde01852a988d315822074b12d65cf5",
+        "large": "9f99b5a5c5c7bdac10981e8889bb9ef69c25b63fc1cd424ea1030535bd869072",
+        "probe": "fa6f7de49a3d3ebd2e032e5a421f4946465ec606d5d19c14523cc3257029d644",
     }
 )
 
@@ -154,7 +153,7 @@ def _reconstruct_fixture(workspace_path: Path, profile: WorkspaceProfile) -> Gen
         concept_ids=expected_ids,
         present_query=_PRESENT_QUERY,
         absent_query=_ABSENT_QUERY,
-        read_concept_id=expected_ids[_READ_DOCUMENT_INDEX],
+        read_concept_id=expected_ids[-1],
         ingestion_content=_ingestion_content(profile.source_characters),
         type_ratios=_TYPE_RATIOS,
     )

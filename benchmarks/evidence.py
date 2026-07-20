@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import platform
+import re
 import secrets
 import selectors
 import stat
@@ -45,6 +47,32 @@ _STAT_TIMEOUT_SECONDS = 5
 _MAX_FILESYSTEM_TYPE_CHARACTERS = 64
 _TEMPORARY_CREATION_ATTEMPTS = 32
 _OFFICIAL_RUNNER_IMAGES = frozenset({"macos15", "ubuntu24"})
+_FILESYSTEM_TYPE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}")
+
+
+class _DarwinFsid(ctypes.Structure):
+    _fields_ = [("val", ctypes.c_int32 * 2)]
+
+
+class _DarwinStatfs(ctypes.Structure):
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", _DarwinFsid),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_reserved", ctypes.c_uint32 * 8),
+    ]
 
 
 def nearest_rank_p95(samples: Sequence[int]) -> int:
@@ -167,12 +195,11 @@ def _safe_runner_image() -> str | None:
 def _portable_filesystem_type(root: Path) -> str | None:
     system = platform.system()
     if system == "Darwin":
-        command = ["stat", "-f", "%T", root]
-    elif system == "Linux":
-        command = ["stat", "-f", "-c", "%T", "--", root]
-    else:
+        return _darwin_filesystem_type(root)
+    if system != "Linux":
         return None
 
+    command = ["stat", "-f", "-c", "%T", "--", root]
     output = _bounded_stat_output(command)
     if output is None:
         return None
@@ -180,11 +207,34 @@ def _portable_filesystem_type(root: Path) -> str | None:
     if len(lines) != 1:
         return None
     filesystem_type = lines[0]
-    if not 1 <= len(filesystem_type) <= _MAX_FILESYSTEM_TYPE_CHARACTERS:
+    return _validated_filesystem_type(filesystem_type, root=root)
+
+
+def _darwin_filesystem_type(root: Path) -> str | None:
+    path = os.fsencode(root)
+    if b"\0" in path:
         return None
-    if os.fspath(root) in filesystem_type:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        statfs = libc.statfs
+        statfs.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DarwinStatfs)]
+        statfs.restype = ctypes.c_int
+        state = _DarwinStatfs()
+        if statfs(path, ctypes.byref(state)) != 0:
+            return None
+        raw_name = bytes(state.f_fstypename)
+        filesystem_type = raw_name.split(b"\0", 1)[0].decode("ascii")
+    except (AttributeError, OSError, TypeError, UnicodeDecodeError, ValueError):
         return None
-    return filesystem_type
+    return _validated_filesystem_type(filesystem_type, root=root)
+
+
+def _validated_filesystem_type(value: str, *, root: Path) -> str | None:
+    if _FILESYSTEM_TYPE_TOKEN.fullmatch(value) is None:
+        return None
+    if os.fspath(root) in value:
+        return None
+    return value.casefold()
 
 
 def _write_new_bytes(path: Path, content: bytes) -> None:

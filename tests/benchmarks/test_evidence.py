@@ -1,6 +1,7 @@
 # Copyright (C) 2026 Hendrik Reh
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import ctypes
 import getpass
 import json
 import os
@@ -10,13 +11,18 @@ import subprocess
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 from pydantic import ValidationError
 
 import benchmarks.evidence as evidence_module
-from benchmarks.contracts import SampleObservation, ScenarioDisposition, ScenarioName
+from benchmarks.contracts import (
+    SampleObservation,
+    ScenarioDisposition,
+    ScenarioName,
+    profile_sha256,
+)
 from benchmarks.evidence import (
     collect_environment,
     load_evidence,
@@ -26,11 +32,37 @@ from benchmarks.evidence import (
     write_evidence,
     write_new_text,
 )
+from benchmarks.profiles import PROFILES
 from tests.benchmarks.factories import evidence_record
 
 _preserve_temporary = cast(
     Callable[[Path, tuple[int, int]], bool], vars(evidence_module)["_preserve_temporary"]
 )
+
+
+def test_profile_digest_uses_canonical_ascii_json() -> None:
+    assert (
+        profile_sha256(PROFILES["smoke"])
+        == "b1723d2a96337355d40c61c87a68e613adc8a141449105e0dc91b43f75fc30e8"
+    )
+
+
+@pytest.mark.parametrize(
+    ("fixture_update", "message"),
+    [
+        ({"profile_sha256": "0" * 64}, "profile digest"),
+        ({"exact_wiki_bytes": 512 * 1024 - 1}, "wiki bytes"),
+    ],
+)
+def test_evidence_rejects_fixture_identity_that_disagrees_with_profile(
+    fixture_update: dict[str, object], message: str
+) -> None:
+    record = evidence_record()
+    values = record.model_dump(mode="python")
+    values["fixtures"] = (record.fixtures[0].model_copy(update=fixture_update),)
+
+    with pytest.raises(ValidationError, match=message):
+        type(record).model_validate(values)
 
 
 def test_summary_uses_median_nearest_rank_p95_and_stable_output() -> None:
@@ -201,27 +233,52 @@ def test_summary_accepts_one_correctness_sample_and_maximizes_checkpoints() -> N
     assert measured.checkpoint_bytes == {"prepared": 50, "cleaned": 5}
 
 
-def test_environment_probe_uses_bounded_explicit_darwin_stat_command(
+def test_environment_probe_uses_bounded_darwin_statfs_structure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[list[str | Path], dict[str, Any]]] = []
+    calls: list[bytes] = []
 
-    def open_stat(command: list[str | Path], **options: Any) -> _CompletedStat:
-        calls.append((command, options))
-        return _CompletedStat(b"apfs\n")
+    class Statfs:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, path: bytes, buffer: Any) -> int:
+            calls.append(path)
+            buffer._obj.f_fstypename = b"APFS"
+            return 0
+
+    class Libc:
+        statfs = Statfs()
+
+    def open_libc(name: None, *, use_errno: bool) -> Libc:
+        assert name is None
+        assert use_errno is True
+        return Libc()
+
+    def reject_subprocess(*_arguments: Any, **_options: Any) -> None:
+        raise AssertionError("Darwin filesystem type must not use stat stdout")
 
     monkeypatch.setattr(platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(subprocess, "Popen", open_stat)
+    monkeypatch.setattr(ctypes, "CDLL", open_libc)
+    monkeypatch.setattr(subprocess, "Popen", reject_subprocess)
 
     environment = collect_environment(tmp_path)
 
     assert environment.filesystem_type == "apfs"
-    assert calls == [
-        (
-            ["stat", "-f", "%T", tmp_path],
-            {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL},
-        )
-    ]
+    assert calls == [os.fsencode(tmp_path)]
+
+
+def test_environment_probe_bounds_darwin_statfs_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_libc(_name: None, *, use_errno: bool) -> NoReturn:
+        del use_errno
+        raise OSError("statfs unavailable")
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(ctypes, "CDLL", fail_libc)
+
+    assert collect_environment(tmp_path).filesystem_type is None
 
 
 @pytest.mark.parametrize("stdout", ["", "one\ntwo\n", "x" * 65 + "\n"])
@@ -641,7 +698,7 @@ def test_environment_probe_uses_a_bounded_pipe_instead_of_buffered_capture(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     read_descriptor, write_descriptor = os.pipe()
-    os.write(write_descriptor, b"apfs\n")
+    os.write(write_descriptor, b"ext2/ext3\n")
     os.close(write_descriptor)
 
     class CompletedStat:
@@ -671,11 +728,11 @@ def test_environment_probe_uses_a_bounded_pipe_instead_of_buffered_capture(
     def reject_buffered_capture(*_arguments: Any, **_options: Any) -> None:
         raise AssertionError("subprocess.run must not buffer stat output")
 
-    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(subprocess, "Popen", open_stat)
     monkeypatch.setattr(subprocess, "run", reject_buffered_capture)
 
-    assert collect_environment(tmp_path).filesystem_type == "apfs"
+    assert collect_environment(tmp_path).filesystem_type == "ext2/ext3"
     assert process.stdout.closed
 
 

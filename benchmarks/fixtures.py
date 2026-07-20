@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from benchmarks.contracts import FixtureIdentity, WorkspaceProfile
+from benchmarks.contracts import FixtureIdentity, WorkspaceProfile, profile_sha256
 from bundlewalker.domain import ConceptType, OkfMetadata
 from bundlewalker.okf.derived import regenerate_indexes
 from bundlewalker.okf.documents import render_document
@@ -39,7 +38,6 @@ _NOW = datetime(2026, 7, 19, 12, tzinfo=UTC)
 _TYPE_RATIOS = (1, 4, 3, 2)
 _PRESENT_QUERY = "benchmark-needle"
 _ABSENT_QUERY = "benchmark-absent-needle"
-_READ_DOCUMENT_INDEX = 42
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,15 +61,12 @@ class GeneratedFixture:
             exact_wiki_bytes=self.exact_wiki_bytes,
             exact_workspace_bytes=self.exact_workspace_bytes,
             source_characters=len(self.ingestion_content),
-            profile_sha256=_profile_sha256(self.profile),
+            profile_sha256=profile_sha256(self.profile),
             tree_sha256=self.tree_sha256,
         )
 
 
 def generate_fixture(destination: Path, profile: WorkspaceProfile) -> GeneratedFixture:
-    if profile.document_count <= _READ_DOCUMENT_INDEX:
-        raise ValueError("fixture profile must include concept 000042")
-
     workspace = initialize_workspace(destination, occurred_at=_NOW)
     concept_ids = tuple(_concept_id(index) for index in range(profile.document_count))
     document_paths: list[Path] = []
@@ -126,7 +121,7 @@ def generate_fixture(destination: Path, profile: WorkspaceProfile) -> GeneratedF
         concept_ids=concept_ids,
         present_query=_PRESENT_QUERY,
         absent_query=_ABSENT_QUERY,
-        read_concept_id=concept_ids[_READ_DOCUMENT_INDEX],
+        read_concept_id=concept_ids[-1],
         ingestion_content=ingestion_content,
         type_ratios=_TYPE_RATIOS,
     )
@@ -176,7 +171,7 @@ def _document_body(
     latest_source_id: str,
 ) -> str:
     next_id = concept_ids[(index + 1) % len(concept_ids)]
-    content = _PRESENT_QUERY if index == _READ_DOCUMENT_INDEX else f"benchmark content {index:06d}"
+    content = _PRESENT_QUERY if index == len(concept_ids) - 1 else f"benchmark content {index:06d}"
     citation_marker = " [1]" if index % 3 == 0 else ""
     body = (
         f"# Benchmark Concept {index:06d}\n\n"
@@ -206,16 +201,6 @@ def _ingestion_content(character_count: int) -> str:
     unit = "benchmark source line\n"
     repetitions = (character_count // len(unit)) + 1
     return (unit * repetitions)[:character_count]
-
-
-def _profile_sha256(profile: WorkspaceProfile) -> str:
-    canonical = json.dumps(
-        profile.model_dump(mode="json"),
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    return hashlib.sha256(canonical).hexdigest()
 
 
 def _regular_files(root: Path) -> list[Path]:

@@ -249,8 +249,6 @@ def run_benchmarks(config: RunConfig) -> EvidenceRecord:
         git_commit = _git_commit()
         bundlewalker_version = importlib.metadata.version("bundlewalker")
         environment = collect_environment(workspace.root)
-        if environment.filesystem_type == "/":
-            environment = environment.model_copy(update={"filesystem_type": None})
         completed_at = datetime.now(UTC)
         evidence_record = EvidenceRecord(
             run_id=config.run_id,

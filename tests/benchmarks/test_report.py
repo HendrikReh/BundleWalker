@@ -12,6 +12,7 @@ from benchmarks.contracts import (
     ScenarioDisposition,
     ScenarioEvidence,
     ScenarioName,
+    profile_sha256,
 )
 from benchmarks.profiles import PROFILES, target_ns
 from benchmarks.report import is_material_regression, render_report
@@ -41,7 +42,7 @@ def _matrix_record(*, os_name: str = "Linux", python_version: str = "3.13.0") ->
             exact_wiki_bytes=profile.target_wiki_bytes,
             exact_workspace_bytes=profile.target_wiki_bytes + 1,
             source_characters=profile.source_characters,
-            profile_sha256=(str(index) * 64),
+            profile_sha256=profile_sha256(profile),
             tree_sha256=(format(index + 10, "x") * 64)[:64],
         )
         for index, profile in enumerate(PROFILES.values(), start=1)
@@ -108,7 +109,7 @@ def _capacity_stopped_record() -> EvidenceRecord:
             exact_wiki_bytes=50 * 1024 * 1024,
             exact_workspace_bytes=50 * 1024 * 1024 + 1,
             source_characters=100_000,
-            profile_sha256="f" * 64,
+            profile_sha256=profile_sha256(PROFILES["large"]),
             tree_sha256="a" * 64,
         ),
     )

@@ -13,7 +13,7 @@ import pytest
 
 import benchmarks.worker as worker
 from benchmarks.contracts import SampleObservation, ScenarioName
-from benchmarks.fixtures import generate_fixture
+from benchmarks.fixtures import generate_fixture, tree_sha256
 from benchmarks.profiles import PROFILES
 from benchmarks.scenarios import SCENARIOS
 from benchmarks.scenarios.mcp_startup import EXPECTED_TOOL_NAMES, run_mcp_startup
@@ -121,6 +121,23 @@ def test_worker_writes_one_valid_observation_atomically(tmp_path: Path) -> None:
     assert json.loads(output.read_text(encoding="utf-8")) == observation.model_dump(mode="json")
 
 
+def test_worker_independently_reads_the_final_canonical_concept(tmp_path: Path) -> None:
+    fixture = generate_fixture(tmp_path / "fixture", PROFILES["smoke"])
+    output = tmp_path / "observation.json"
+
+    result = _run_worker(
+        scenario="read_concept",
+        workspace=fixture.workspace.root,
+        profile="smoke",
+        output=output,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    observation = SampleObservation.model_validate_json(output.read_text(encoding="utf-8"))
+    assert observation.scenario is ScenarioName.READ_CONCEPT
+
+
 def test_worker_initializes_only_a_nonexistent_profileless_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "new-workspace"
     output = tmp_path / "initialize.json"
@@ -222,15 +239,40 @@ def test_worker_rejects_same_size_lint_valid_fixture_mutation(tmp_path: Path) ->
     _assert_bounded_failure(result, output, "ValueError")
 
 
+def test_worker_rejects_the_previous_concept_42_fixture_identity(tmp_path: Path) -> None:
+    fixture = generate_fixture(tmp_path / "fixture", PROFILES["smoke"])
+    old_target = fixture.workspace.wiki_dir / "topics" / "concept-000042.md"
+    new_target = fixture.workspace.wiki_dir / "syntheses" / "concept-000049.md"
+    old_target.write_bytes(
+        old_target.read_bytes().replace(b"benchmark content 000042", b"benchmark-needle", 1)
+    )
+    new_target.write_bytes(
+        new_target.read_bytes().replace(b"benchmark-needle", b"benchmark content 000049", 1)
+    )
+    assert tree_sha256(fixture.workspace.root) == (
+        "9b9a039500fde21786f3f467023f68d43d4446059b21a3f68dfbc67b1c1ba52d"
+    )
+    output = tmp_path / "old-fixture.json"
+
+    result = _run_worker(
+        scenario="status",
+        workspace=fixture.workspace.root,
+        profile="smoke",
+        output=output,
+    )
+
+    _assert_bounded_failure(result, output, "ValueError")
+
+
 def test_suite_v1_tree_digest_catalog_is_closed_and_matches_generated_smoke(
     tmp_path: Path,
 ) -> None:
     assert dict(worker.SUITE_V1_TREE_SHA256) == {
-        "smoke": "9b9a039500fde21786f3f467023f68d43d4446059b21a3f68dfbc67b1c1ba52d",
-        "small": "8ccea12ff08df9cfc02141658f577674727c6f63b15aadbfe762092fe836fb45",
-        "medium": "2e8849035a796bb8dd95d7aa5144e6d326bf08bed39c308101dbd5e1ecc3b7cb",
-        "large": "669d667ae88ecbe628e3cce5703a3ded4aef2e4323c698ca5478bfeb4ba7f97d",
-        "probe": "d0801c0dbd41b424bfd57fbed33ec5a28e294d37d1303c9b6d189438d2675f9e",
+        "smoke": "2056081991941f2b9aab5a32ff1fa22058d959cb86f122caab1aea29e8ed5676",
+        "small": "9727173321acf3c9193865d0f31df12a1a0221b4e05d25d6cfda2092409057df",
+        "medium": "3f5a4083bcbab9a69169eaca55c122e2cfde01852a988d315822074b12d65cf5",
+        "large": "9f99b5a5c5c7bdac10981e8889bb9ef69c25b63fc1cd424ea1030535bd869072",
+        "probe": "fa6f7de49a3d3ebd2e032e5a421f4946465ec606d5d19c14523cc3257029d644",
     }
     fixture = generate_fixture(tmp_path / "fixture", PROFILES["smoke"])
     assert worker.SUITE_V1_TREE_SHA256["smoke"] == fixture.tree_sha256

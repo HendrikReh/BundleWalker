@@ -15,7 +15,7 @@ import pytest
 
 import benchmarks.__main__ as benchmark_cli
 import benchmarks.runner as runner_module
-from benchmarks.contracts import ScenarioDisposition, ScenarioName
+from benchmarks.contracts import EnvironmentRecord, ScenarioDisposition, ScenarioName
 from benchmarks.evidence import load_evidence, write_evidence
 from benchmarks.fixtures import generate_fixture
 from benchmarks.profiles import PROFILES
@@ -25,7 +25,15 @@ from tests.benchmarks.factories import evidence_record
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def test_correctness_only_runner_writes_one_sample_per_scenario(tmp_path: Path) -> None:
+def test_correctness_only_runner_writes_one_sample_per_scenario(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    collect_environment = runner_module.collect_environment
+
+    def collect_slash_filesystem(root: Path) -> EnvironmentRecord:
+        return collect_environment(root).model_copy(update={"filesystem_type": "/"})
+
+    monkeypatch.setattr(runner_module, "collect_environment", collect_slash_filesystem)
     evidence = run_benchmarks(
         RunConfig(
             profiles=(PROFILES["smoke"],),
@@ -37,6 +45,7 @@ def test_correctness_only_runner_writes_one_sample_per_scenario(tmp_path: Path) 
     )
 
     assert evidence.disposition is ScenarioDisposition.PASS
+    assert evidence.environment.filesystem_type == "/"
     assert {len(item.samples_ns) for item in evidence.scenarios} == {1}
     assert load_evidence(tmp_path / "evidence.json") == evidence
 
