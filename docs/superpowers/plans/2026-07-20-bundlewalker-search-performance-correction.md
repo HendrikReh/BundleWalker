@@ -32,19 +32,26 @@
 
 ---
 
-### Task 1: Lock down the one-scan search contract
+### Task 1: Implement the one-scan search contract
 
 **Files:**
 
 - Modify: `tests/application/test_facade.py:9-31`
 - Modify: `tests/application/test_facade.py:300-306`
+- Modify: `src/bundlewalker/application/facade.py:39-45`
+- Modify: `src/bundlewalker/application/facade.py:159-179`
+- Modify: `src/bundlewalker/application/facade.py:365-374`
 - Test: `tests/application/test_facade.py`
+- Test: `tests/test_retrieval.py`
 
 **Interfaces:**
 
 - Consumes: `WorkspaceApplication.search_concepts(query: str, *, concept_type: str | None = None, limit: int = 10) -> ConceptSearchResult`.
 - Consumes: `OkfRepository.scan() -> dict[str, OkfDocument]` for structural observation only.
 - Produces: regression coverage requiring one scan and preserving `ConceptSummaryResult` serialization and error behavior.
+- Consumes: `ConceptSummary` with `concept_id`, `type`, optional `title`, optional `description`, and tuple `tags`.
+- Produces: `_concept_summary_result(summary: ConceptSummary) -> ConceptSummaryResult`.
+- Preserves: `_concept_summary(document: OkfDocument) -> ConceptSummaryResult` for list/read callers by delegating through `ConceptSummary.from_document(document)`.
 
 - [ ] **Step 1: Import the repository type used by the structural spy**
 
@@ -161,25 +168,7 @@ uv run pytest \
 
 Expected: PASS. These tests capture existing behavior before the performance correction.
 
----
-
-### Task 2: Convert ranked repository summaries directly
-
-**Files:**
-
-- Modify: `src/bundlewalker/application/facade.py:39-45`
-- Modify: `src/bundlewalker/application/facade.py:159-179`
-- Modify: `src/bundlewalker/application/facade.py:365-374`
-- Test: `tests/application/test_facade.py`
-- Test: `tests/test_retrieval.py`
-
-**Interfaces:**
-
-- Consumes: `ConceptSummary` with `concept_id`, `type`, optional `title`, optional `description`, and tuple `tags`.
-- Produces: `_concept_summary_result(summary: ConceptSummary) -> ConceptSummaryResult`.
-- Preserves: `_concept_summary(document: OkfDocument) -> ConceptSummaryResult` for list/read callers by delegating through `ConceptSummary.from_document(document)`.
-
-- [ ] **Step 1: Import `ConceptSummary` into the application facade**
+- [ ] **Step 6: Import `ConceptSummary` into the application facade**
 
 Change:
 
@@ -193,7 +182,7 @@ to:
 from bundlewalker.okf.repository import ConceptSummary, OkfRepository
 ```
 
-- [ ] **Step 2: Remove the second repository scan from search**
+- [ ] **Step 7: Remove the second repository scan from search**
 
 Replace the search result construction:
 
@@ -212,7 +201,7 @@ matches = LexicalRetriever(repository).search(query, concept_type, limit)
 return ConceptSearchResult(items=tuple(_concept_summary_result(item) for item in matches))
 ```
 
-- [ ] **Step 3: Centralize public summary field mapping**
+- [ ] **Step 8: Centralize public summary field mapping**
 
 Replace the existing `_concept_summary` implementation with:
 
@@ -235,7 +224,7 @@ def _concept_summary_result(summary: ConceptSummary) -> ConceptSummaryResult:
 This avoids duplicating fallback and URI rules between list/read and search while keeping the
 application contract out of the repository layer.
 
-- [ ] **Step 4: Run the structural regression and verify it turns green**
+- [ ] **Step 9: Run the structural regression and verify it turns green**
 
 Run:
 
@@ -245,7 +234,7 @@ uv run pytest tests/application/test_facade.py::test_search_concepts_scans_once_
 
 Expected: PASS with exactly one `OkfRepository.scan()` call.
 
-- [ ] **Step 5: Run all facade and retrieval tests**
+- [ ] **Step 10: Run all facade and retrieval tests**
 
 Run:
 
@@ -256,7 +245,7 @@ uv run pytest tests/application/test_facade.py tests/test_retrieval.py -q
 Expected: PASS. Existing ranking, filtering, normalization, tie-breaking, list, and read behavior
 must remain green.
 
-- [ ] **Step 6: Format and inspect the focused diff**
+- [ ] **Step 11: Format and inspect the focused diff**
 
 Run:
 
@@ -269,7 +258,7 @@ git diff -- tests/application/test_facade.py src/bundlewalker/application/facade
 Expected: formatting succeeds, `git diff --check` emits no output, and the diff contains only the
 planned tests, import, direct conversion, and mapping helper.
 
-- [ ] **Step 7: Commit the test-driven correction**
+- [ ] **Step 12: Commit the test-driven correction**
 
 Run:
 
@@ -282,7 +271,7 @@ Expected: one commit containing both the failing-first regression and its minima
 
 ---
 
-### Task 3: Verify the complete branch before review
+### Task 2: Verify the complete branch before review
 
 **Files:**
 
@@ -291,7 +280,7 @@ Expected: one commit containing both the failing-first regression and its minima
 
 **Interfaces:**
 
-- Consumes: the Task 2 commit.
+- Consumes: the Task 1 commit.
 - Produces: a clean branch that satisfies the same supported-platform checks enforced by CI.
 
 - [ ] **Step 1: Verify the lockfile and all offline tests**
@@ -361,7 +350,12 @@ the facade tests, and the facade implementation. The worktree is otherwise clean
 
 ---
 
-### Task 4: Run the authoritative post-merge acceptance matrix
+## Post-Merge Acceptance Runbook
+
+Run this section only after the reviewed correction is merged to `master`. It is not an
+implementation task and does not enter the subagent task-review loop.
+
+### Run the authoritative acceptance matrix
 
 **Files:**
 
