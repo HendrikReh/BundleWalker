@@ -305,7 +305,7 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
     (application.workspace.wiki_dir / "entities" / "tool guide.md").write_text(
         render_document(
             OkfMetadata(type="Entity", tags=["tools"], timestamp=NOW),
-            "# Tool Guide\n\nA guide for agent tools.\n",
+            "# Tool Guide\n\nA guide for agent tools\n",
         ),
         encoding="utf-8",
     )
@@ -319,7 +319,7 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
 
     monkeypatch.setattr(OkfRepository, "scan", counted_scan)
 
-    result = await application.search_concepts("guide", concept_type="Entity", limit=1)
+    result = await application.search_concepts("tools", concept_type="Entity", limit=2)
 
     assert scan_calls == 1
     assert [item.model_dump() for item in result.items] == [
@@ -330,7 +330,15 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
             "description": "",
             "tags": ("tools",),
             "resource_uri": "bundlewalker://concept/entities/tool%20guide",
-        }
+        },
+        {
+            "concept_id": "entities/tools",
+            "type": "Entity",
+            "title": "tools",
+            "description": "",
+            "tags": ("tools",),
+            "resource_uri": "bundlewalker://concept/entities/tools",
+        },
     ]
 
 

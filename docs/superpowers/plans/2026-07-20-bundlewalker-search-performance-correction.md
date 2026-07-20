@@ -73,7 +73,7 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
     (application.workspace.wiki_dir / "entities" / "tool guide.md").write_text(
         render_document(
             OkfMetadata(type="Entity", tags=["tools"], timestamp=NOW),
-            "# Tool Guide\n\nA guide for agent tools.\n",
+            "# Tool Guide\n\nA guide for agent tools\n",
         ),
         encoding="utf-8",
     )
@@ -87,7 +87,7 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
 
     monkeypatch.setattr(OkfRepository, "scan", counted_scan)
 
-    result = await application.search_concepts("guide", concept_type="Entity", limit=1)
+    result = await application.search_concepts("tools", concept_type="Entity", limit=2)
 
     assert scan_calls == 1
     assert [item.model_dump() for item in result.items] == [
@@ -98,6 +98,14 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
             "description": "",
             "tags": ("tools",),
             "resource_uri": "bundlewalker://concept/entities/tool%20guide",
+        },
+        {
+            "concept_id": "entities/tools",
+            "type": "Entity",
+            "title": "tools",
+            "description": "",
+            "tags": ("tools",),
+            "resource_uri": "bundlewalker://concept/entities/tools",
         }
     ]
 ```
@@ -375,6 +383,7 @@ Run from a clean, synchronized `master` checkout:
 
 ```bash
 git fetch origin master
+expected_sha="$(git rev-parse origin/master)"
 gh workflow run benchmarks.yml --ref master
 matrix_run_id="$(gh run list \
   --workflow benchmarks.yml \
@@ -394,8 +403,7 @@ means evidence was produced; it does not by itself mean every timing target pass
 Run:
 
 ```bash
-test "$(gh run view "$matrix_run_id" --json headSha --jq .headSha)" = \
-  "$(git rev-parse origin/master)"
+test "$(gh run view "$matrix_run_id" --json headSha --jq .headSha)" = "$expected_sha"
 ```
 
 Expected: exit zero. Reject evidence from any other source commit.
@@ -405,7 +413,8 @@ Expected: exit zero. Reject evidence from any other source commit.
 Run:
 
 ```bash
-matrix_evidence_dir="$(mktemp -d /tmp/bundlewalker-b3-search.XXXXXX)"
+matrix_temp_root="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+matrix_evidence_dir="$(mktemp -d "$matrix_temp_root/bundlewalker-b3-search.XXXXXX")"
 gh run download "$matrix_run_id" --name benchmark-evidence-Linux-py3.13 --dir "$matrix_evidence_dir"
 gh run download "$matrix_run_id" --name benchmark-evidence-Linux-py3.14 --dir "$matrix_evidence_dir"
 gh run download "$matrix_run_id" --name benchmark-evidence-macOS-py3.13 --dir "$matrix_evidence_dir"
@@ -421,9 +430,9 @@ Run:
 
 ```bash
 for evidence_file in "$matrix_evidence_dir"/*.json; do
-  jq -e '
+  jq -e --arg expected_sha "$expected_sha" '
     .correctness_only == false and
-    .git_commit != "" and
+    .git_commit == $expected_sha and
     ([.scenarios[] | select(.profile == "medium")] | length == 11) and
     ([.scenarios[] | select(.profile == "medium")] | all(.disposition == "pass"))
   ' "$evidence_file"
