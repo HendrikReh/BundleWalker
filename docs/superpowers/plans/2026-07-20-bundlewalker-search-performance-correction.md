@@ -299,7 +299,8 @@ Expected: lockfile check and complete offline test suite PASS.
 Run:
 
 ```bash
-benchmark_check_dir="$(mktemp -d /tmp/bundlewalker-search-smoke.XXXXXX)"
+benchmark_temp_root="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+benchmark_check_dir="$(mktemp -d "$benchmark_temp_root/bundlewalker-search-smoke.XXXXXX")"
 uv run python -m benchmarks run \
   --profiles smoke \
   --correctness-only \
