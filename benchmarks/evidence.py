@@ -1,0 +1,410 @@
+# Copyright (C) 2026 Hendrik Reh
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import platform
+import re
+import secrets
+import selectors
+import stat
+import subprocess
+import tempfile
+import time
+from collections.abc import Sequence
+from contextlib import suppress
+from pathlib import Path
+
+from pydantic import BaseModel
+
+from benchmarks.contracts import (
+    CheckpointBytes,
+    CheckpointName,
+    EnvironmentRecord,
+    EvidenceRecord,
+    SampleObservation,
+    ScenarioDisposition,
+    ScenarioEvidence,
+    ScenarioName,
+)
+
+_READ_ONLY_SCENARIOS = frozenset(
+    {
+        ScenarioName.INITIALIZE,
+        ScenarioName.STATUS,
+        ScenarioName.LIST_CONCEPTS,
+        ScenarioName.READ_CONCEPT,
+        ScenarioName.SEARCH_PRESENT,
+        ScenarioName.SEARCH_ABSENT,
+        ScenarioName.LINT,
+        ScenarioName.MCP_STARTUP,
+    }
+)
+_STAT_TIMEOUT_SECONDS = 5
+_MAX_FILESYSTEM_TYPE_CHARACTERS = 64
+_TEMPORARY_CREATION_ATTEMPTS = 32
+_OFFICIAL_RUNNER_IMAGES = frozenset({"macos15", "ubuntu24"})
+_FILESYSTEM_TYPE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+/-]{0,63}")
+
+
+class _DarwinFsid(ctypes.Structure):
+    _fields_ = [("val", ctypes.c_int32 * 2)]
+
+
+class _DarwinStatfs(ctypes.Structure):
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", _DarwinFsid),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_reserved", ctypes.c_uint32 * 8),
+    ]
+
+
+def nearest_rank_p95(samples: Sequence[int]) -> int:
+    if not samples:
+        raise ValueError("p95 requires at least one sample")
+    sorted_samples = sorted(samples)
+    return sorted_samples[(95 * len(sorted_samples) + 99) // 100 - 1]
+
+
+def summarize_samples(
+    observations: Sequence[SampleObservation],
+    target: int,
+    *,
+    correctness_only: bool = False,
+) -> ScenarioEvidence:
+    if not observations:
+        raise ValueError("sample summary requires observations")
+
+    scenarios = {observation.scenario for observation in observations}
+    profiles = {observation.profile for observation in observations}
+    output_digests = {observation.output_sha256 for observation in observations}
+    if len(scenarios) != 1:
+        raise ValueError("sample group must contain exactly one scenario")
+    if len(profiles) != 1:
+        raise ValueError("sample group must contain exactly one profile")
+    if len(output_digests) != 1:
+        raise ValueError("sample group must contain exactly one output digest")
+
+    scenario = next(iter(scenarios))
+    expected_count = 1 if correctness_only else 7 if scenario in _READ_ONLY_SCENARIOS else 5
+    if len(observations) != expected_count:
+        raise ValueError(f"sample group requires exactly {expected_count} observations")
+
+    samples = tuple(observation.duration_ns for observation in observations)
+    sorted_samples = sorted(samples)
+    median = sorted_samples[len(sorted_samples) // 2]
+    checkpoints: dict[CheckpointName, CheckpointBytes] = {}
+    for observation in observations:
+        for checkpoint, byte_count in observation.checkpoint_bytes.items():
+            checkpoints[checkpoint] = max(checkpoints.get(checkpoint, 0), byte_count)
+
+    return ScenarioEvidence(
+        scenario=scenario,
+        profile=next(iter(profiles)),
+        target_ns=target,
+        samples_ns=samples,
+        median_ns=median,
+        p95_ns=nearest_rank_p95(samples),
+        output_sha256=next(iter(output_digests)),
+        checkpoint_bytes=checkpoints,
+        disposition=(
+            ScenarioDisposition.TARGET_MISSED if median > target else ScenarioDisposition.PASS
+        ),
+    )
+
+
+def collect_environment(root: Path) -> EnvironmentRecord:
+    return EnvironmentRecord(
+        python_version=platform.python_version(),
+        python_implementation=platform.python_implementation(),
+        os_name=platform.system(),
+        os_release=platform.release(),
+        architecture=platform.machine(),
+        logical_cpu_count=os.cpu_count(),
+        total_memory_bytes=_portable_total_memory(),
+        runner_image=_safe_runner_image(),
+        filesystem_type=_portable_filesystem_type(root),
+    )
+
+
+def write_new_json(path: Path, model: BaseModel) -> None:
+    content = json.dumps(model.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+    write_new_text(path, content)
+
+
+def write_new_text(path: Path, content: str) -> None:
+    _write_new_bytes(path, content.encode("utf-8"))
+
+
+def write_evidence(path: Path, evidence: EvidenceRecord) -> None:
+    write_new_json(path, evidence)
+
+
+def load_evidence(path: Path) -> EvidenceRecord:
+    return EvidenceRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def materialized_bytes(root: Path) -> int:
+    paths = (root, *root.rglob("*"))
+    total = 0
+    counted_inodes: set[tuple[int, int]] = set()
+    for path in paths:
+        metadata = path.lstat()
+        identity = metadata.st_dev, metadata.st_ino
+        if identity in counted_inodes:
+            continue
+        counted_inodes.add(identity)
+        blocks = getattr(metadata, "st_blocks", None)
+        total += blocks * 512 if isinstance(blocks, int) else metadata.st_size
+    return total
+
+
+def _portable_total_memory() -> int | None:
+    if platform.system() not in {"Darwin", "Linux"}:
+        return None
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        return None
+    total = page_size * page_count
+    return total if total > 0 else None
+
+
+def _safe_runner_image() -> str | None:
+    value = os.environ.get("ImageOS")  # noqa: SIM112 - GitHub's documented key
+    return value if value in _OFFICIAL_RUNNER_IMAGES else None
+
+
+def _portable_filesystem_type(root: Path) -> str | None:
+    system = platform.system()
+    if system == "Darwin":
+        return _darwin_filesystem_type(root)
+    if system != "Linux":
+        return None
+
+    command = ["stat", "-f", "-c", "%T", "--", root]
+    output = _bounded_stat_output(command)
+    if output is None:
+        return None
+    lines = output.splitlines()
+    if len(lines) != 1:
+        return None
+    filesystem_type = lines[0]
+    return _validated_filesystem_type(filesystem_type, root=root)
+
+
+def _darwin_filesystem_type(root: Path) -> str | None:
+    path = os.fsencode(root)
+    if b"\0" in path:
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        statfs = libc.statfs
+        statfs.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DarwinStatfs)]
+        statfs.restype = ctypes.c_int
+        state = _DarwinStatfs()
+        if statfs(path, ctypes.byref(state)) != 0:
+            return None
+        raw_name = bytes(state.f_fstypename)
+        filesystem_type = raw_name.split(b"\0", 1)[0].decode("ascii")
+    except (AttributeError, OSError, TypeError, UnicodeDecodeError, ValueError):
+        return None
+    return _validated_filesystem_type(filesystem_type, root=root)
+
+
+def _validated_filesystem_type(value: str, *, root: Path) -> str | None:
+    if _FILESYSTEM_TYPE_TOKEN.fullmatch(value) is None:
+        return None
+    if os.fspath(root) in value:
+        return None
+    return value.casefold()
+
+
+def _write_new_bytes(path: Path, content: bytes) -> None:
+    if os.path.lexists(path):
+        raise FileExistsError(path)
+
+    temporary, descriptor = _create_temporary_sibling(path)
+    identity: tuple[int, int] | None = None
+    try:
+        metadata = os.fstat(descriptor)
+        identity = metadata.st_dev, metadata.st_ino
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("temporary evidence output is not a regular file")
+        os.fchmod(descriptor, 0o600)
+        _write_all(descriptor, content)
+        os.fsync(descriptor)
+        descriptor_to_close = descriptor
+        descriptor = -1
+        os.close(descriptor_to_close)
+        _require_owned_path(temporary, identity)
+        os.link(temporary, path)
+        _require_owned_path(path, identity, message="evidence output changed during publication")
+    except BaseException:
+        if identity is None and descriptor >= 0:
+            with suppress(OSError):
+                metadata = os.fstat(descriptor)
+                identity = metadata.st_dev, metadata.st_ino
+        if descriptor >= 0:
+            descriptor_to_close = descriptor
+            descriptor = -1
+            with suppress(OSError):
+                os.close(descriptor_to_close)
+        if identity is not None:
+            _preserve_temporary(temporary, identity)
+            with suppress(OSError):
+                _fsync_parent(path)
+        raise
+
+    assert identity is not None
+    preserved_owned = _preserve_temporary(temporary, identity)
+    if not preserved_owned:
+        raise OSError("temporary evidence output changed during publication")
+    _fsync_parent(path)
+
+
+def _create_temporary_sibling(path: Path) -> tuple[Path, int]:
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    for _attempt in range(_TEMPORARY_CREATION_ATTEMPTS):
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(16)}.partial")
+        try:
+            return temporary, os.open(temporary, flags, 0o600)
+        except FileExistsError:
+            continue
+    raise FileExistsError("could not reserve a temporary evidence output")
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written == 0:
+            raise OSError("evidence write made no progress")
+        remaining = remaining[written:]
+
+
+def _require_owned_path(
+    path: Path,
+    identity: tuple[int, int],
+    *,
+    message: str = "temporary evidence output changed during creation",
+) -> None:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != identity:
+        raise OSError(message)
+
+
+def _preserve_temporary(path: Path, identity: tuple[int, int]) -> bool:
+    quarantine = Path(tempfile.mkdtemp(prefix=f".{path.name}.cleanup-", dir=path.parent))
+    candidate = quarantine / "candidate"
+    try:
+        os.link(path, candidate)
+    except OSError:
+        return False
+    return _quarantined_path_is_owned(quarantine, identity)
+
+
+def _quarantined_path_is_owned(quarantine: Path, identity: tuple[int, int]) -> bool:
+    directory_descriptor = os.open(
+        quarantine,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    candidate_descriptor = -1
+    try:
+        candidate_descriptor = os.open(
+            "candidate",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_descriptor,
+        )
+        descriptor_state = os.fstat(candidate_descriptor)
+        path_state = os.stat("candidate", dir_fd=directory_descriptor, follow_symlinks=False)
+        return (
+            stat.S_ISREG(descriptor_state.st_mode)
+            and (descriptor_state.st_dev, descriptor_state.st_ino) == identity
+            and (path_state.st_dev, path_state.st_ino) == identity
+        )
+    finally:
+        try:
+            if candidate_descriptor >= 0:
+                descriptor_to_close = candidate_descriptor
+                candidate_descriptor = -1
+                os.close(descriptor_to_close)
+        finally:
+            os.close(directory_descriptor)
+
+
+def _fsync_parent(path: Path) -> None:
+    descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _bounded_stat_output(command: list[str | Path]) -> str | None:
+    process: subprocess.Popen[bytes] | None = None
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + _STAT_TIMEOUT_SECONDS
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if process.stdout is None:
+            return None
+        selector.register(process.stdout, selectors.EVENT_READ)
+        captured = bytearray()
+        while len(captured) <= _MAX_FILESYSTEM_TYPE_CHARACTERS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                raise subprocess.TimeoutExpired(command, _STAT_TIMEOUT_SECONDS)
+            chunk = os.read(process.stdout.fileno(), 66 - len(captured))
+            if not chunk:
+                break
+            captured.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(command, _STAT_TIMEOUT_SECONDS)
+        return_code = process.wait(timeout=remaining)
+        if return_code != 0 or len(captured) > 65:
+            return None
+        try:
+            return captured.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        selector.close()
+        if process is not None:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    with suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=1)

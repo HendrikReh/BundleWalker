@@ -9,3 +9,10 @@ __pycache__/
 .env*
 !.env.example
 *.py[cod]
+/benchmark-results/
+/benchmark-work/
+/dist/
+/.benchmark-*.json
+/.benchmark-*.md
+*.partial
+/...benchmark-*.json.*.partial.cleanup-*/

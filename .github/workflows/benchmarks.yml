@@ -1,0 +1,89 @@
+name: Performance evidence
+
+on:
+  schedule:
+    - cron: "17 3 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.28"
+
+jobs:
+  measure:
+    name: Measure (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python-version: ["3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-suffix: benchmark-${{ matrix.os }}-py${{ matrix.python-version }}
+      - name: Synchronize locked environment
+        run: uv sync --locked
+      - name: Run complete benchmark sequence
+        run: >-
+          uv run python -m benchmarks run
+          --profiles smoke,small,medium,large,probe
+          --run-id "github-${{ github.run_id }}"
+          --work-root "${{ runner.temp }}/benchmark-work"
+          --output "benchmark-results/suite-1-${{ github.sha }}-${{ runner.os }}-py${{ matrix.python-version }}-${{ github.run_id }}.json"
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: benchmark-evidence-${{ runner.os }}-py${{ matrix.python-version }}
+          path: benchmark-results/*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  summarize:
+    name: Summarize matrix
+    if: always()
+    needs: [measure]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.13"
+      - name: Synchronize locked environment
+        run: uv sync --locked
+      - name: Download matrix evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: benchmark-evidence-*
+          path: benchmark-results
+          merge-multiple: true
+      - name: Render provisional summary
+        run: >-
+          uv run python -m benchmarks report
+          --evidence benchmark-results
+          --output benchmark-results/summary.md
+          --provisional
+          --require-matrix
+      - name: Upload matrix summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: benchmark-matrix-summary
+          path: benchmark-results/summary.md
+          if-no-files-found: error
+          retention-days: 30

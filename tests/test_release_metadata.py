@@ -4,15 +4,18 @@
 import hashlib
 import importlib.metadata
 import importlib.util
+import re
+import shlex
 import shutil
 import subprocess
 import tarfile
 import tomllib
 from dataclasses import replace
 from importlib.metadata import version as distribution_version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
+from markdown_it import MarkdownIt
 
 import bundlewalker
 from bundlewalker.application import (
@@ -37,6 +40,44 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/software-agent.md",
 }
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
+ALLOWED_SUPPORTED_CAPACITY_SENTENCES = frozenset(
+    {
+        "Supported capacity is not yet published.",
+        (
+            "Local runs are useful for development, but they do not themselves establish a "
+            "supported capacity."
+        ),
+    }
+)
+
+
+def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
+    text_parts: list[str] = []
+    for token in MarkdownIt("commonmark").parse(markdown):
+        if token.type != "inline":
+            continue
+        inline_parts: list[str] = []
+        for child in token.children or ():
+            if child.type in {"text", "code_inline"}:
+                inline_parts.append(child.content)
+            elif child.type in {"softbreak", "hardbreak"}:
+                inline_parts.append(" ")
+        text_parts.append("".join(inline_parts))
+
+    normalized_text = re.sub(r"\s+", " ", " ".join(text_parts)).strip()
+    sentences = {
+        match.group(0).strip() for match in re.finditer(r"[^.!?]+[.!?](?=\s|$)", normalized_text)
+    }
+    return frozenset(
+        sentence
+        for sentence in sentences
+        if re.search(r"\bsupported\b", sentence, re.IGNORECASE)
+        and re.search(r"\bcapacity\b", sentence, re.IGNORECASE)
+    )
+
+
+def _assert_provisional_capacity_claims(markdown: str) -> None:
+    assert _supported_capacity_sentences(markdown) == ALLOWED_SUPPORTED_CAPACITY_SENTENCES
 
 
 def test_release_versions_are_consistent() -> None:
@@ -52,6 +93,141 @@ def test_release_versions_are_consistent() -> None:
     assert bundlewalker.__version__ == expected
     assert distribution_version("bundlewalker") == expected
     assert editable_package["version"] == expected
+
+
+def test_performance_document_is_provisional_and_linked() -> None:
+    performance_path = PROJECT_ROOT / "docs/performance-and-capacity.md"
+    performance = performance_path.read_text(encoding="utf-8")
+    markdown = MarkdownIt("commonmark")
+
+    assert performance.count("Supported capacity is not yet published.") == 1
+    assert "candidate only" in performance
+    assert "100,000 Unicode characters" in performance
+    assert "remote model-provider latency is excluded" in performance
+    assert "Windows remains experimental" in performance
+
+    _assert_provisional_capacity_claims(performance)
+    assert "BundleWalker supports up to" not in performance
+    assert re.search(r"\bbeta\s+(?:is\s+)?complete\b", performance, re.IGNORECASE) is None
+    assert re.search(r"\b(?:release|version)\s+(?:is|:|\d)", performance, re.IGNORECASE) is None
+
+    profile_section = performance.partition("## Profiles\n")[2].partition("\n## ")[0]
+    profile_names = {"Smoke", "Small", "Medium", "Large", "Probe"}
+    profile_rows = tuple(
+        cells
+        for line in profile_section.splitlines()
+        if line.startswith("|")
+        and (cells := tuple(cell.strip() for cell in line.strip("|").split("|")))[0]
+        in profile_names
+    )
+    assert profile_rows == (
+        ("Smoke", "50", "0.5 MiB", "10,000 Unicode characters"),
+        ("Small", "250", "2.5 MiB", "25,000 Unicode characters"),
+        ("Medium", "1,000", "10 MiB", "50,000 Unicode characters"),
+        ("Large", "5,000", "50 MiB", "100,000 Unicode characters"),
+        ("Probe", "10,000", "100 MiB", "100,000 Unicode characters"),
+    )
+
+    scenario_section = performance.partition("### Scenario inventory\n")[2].partition(
+        "\n### Timing boundary"
+    )[0]
+    scenario_lines = tuple(
+        line for line in scenario_section.splitlines() if re.fullmatch(r"\d+\. .+", line)
+    )
+    assert scenario_lines == (
+        "1. Workspace initialization (`initialize`).",
+        "2. Workspace status (`status`).",
+        "3. First-page concept listing (`list_concepts`).",
+        "4. End-of-order concept reading (`read_concept`).",
+        "5. Lexical present-result search (`search_present`).",
+        "6. Lexical absent-result search (`search_absent`).",
+        "7. Deterministic lint (`lint`).",
+        "8. MCP startup and discovery (`mcp_startup`).",
+        "9. Ingestion preparation (`prepare_ingestion`).",
+        "10. Review commit (`commit`).",
+        "11. Prepared-review recovery (`recover_prepared`).",
+        "12. Swapping-boundary recovery (`recover_swapping`).",
+    )
+
+    normalized_whitespace = " ".join(performance.split())
+    for timing_contract in (
+        "fixture generation and preparation are excluded from timing",
+        "controller workspace copying is excluded from timing",
+        "ordinary Python worker startup is excluded from timing",
+        "ordinary scenario timers bracket only the specified production call",
+        "process launch and protocol initialization through sorted tool discovery",
+        "clean shutdown happens after the timer stops",
+    ):
+        assert timing_contract in normalized_whitespace
+
+    benchmark_commands = {
+        tuple(shlex.split(token.content.replace("\\\n", " ")))
+        for token in markdown.parse(performance)
+        if token.type == "fence"
+        and token.info.strip() == "text"
+        and token.content.startswith("uv run python -m benchmarks run")
+    }
+    assert benchmark_commands == {
+        (
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "benchmarks",
+            "run",
+            "--profiles",
+            "smoke",
+            "--correctness-only",
+            "--output",
+            "benchmark-results/smoke.json",
+        ),
+        (
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "benchmarks",
+            "run",
+            "--profiles",
+            "smoke,small,medium,large,probe",
+            "--output",
+            "benchmark-results/local.json",
+        ),
+    }
+    assert "available from a repository checkout" in performance
+    assert "intentionally absent from installed wheels and source distributions" in performance
+
+    for relative in ("README.md", "SUPPORT.md", "docs/user-guide.md"):
+        source = PROJECT_ROOT / relative
+        targets: set[Path] = set()
+        for token in markdown.parse(source.read_text(encoding="utf-8")):
+            for child in token.children or ():
+                if child.type != "link_open":
+                    continue
+                href = child.attrGet("href")
+                if not isinstance(href, str):
+                    continue
+                target = href.partition("#")[0]
+                if target:
+                    targets.add((source.parent / target).resolve())
+        assert performance_path.resolve() in targets
+
+
+@pytest.mark.parametrize(
+    "affirmative_claim",
+    [
+        "BundleWalker has a supported workspace capacity of 50 MiB.",
+        "A capacity of 50 MiB is supported.",
+        "A CAPACITY of 50 MiB is SUPPORTED.",
+    ],
+)
+def test_performance_contract_rejects_affirmative_supported_capacity_claims(
+    affirmative_claim: str,
+) -> None:
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_provisional_capacity_claims(f"{performance}\n\n{affirmative_claim}\n")
 
 
 @pytest.mark.parametrize(
@@ -199,6 +375,7 @@ def test_cc0_scope_matches_the_packaged_convention_presets() -> None:
 def test_all_python_files_have_gpl_spdx_headers() -> None:
     python_files = sorted((PROJECT_ROOT / "src").rglob("*.py"))
     python_files.extend(sorted((PROJECT_ROOT / "tests").rglob("*.py")))
+    python_files.extend(sorted((PROJECT_ROOT / "benchmarks").rglob("*.py")))
     missing = [
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in python_files
@@ -207,6 +384,26 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
 
     assert python_files
     assert not missing, "missing GPL SPDX header:\n" + "\n".join(missing)
+
+
+def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["uv", "build", "--clear", "--no-sources", "--out-dir", str(tmp_path)],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    wheel = next(tmp_path.glob("*.whl"))
+    unpacked = tmp_path / "wheel"
+    shutil.unpack_archive(wheel, unpacked, "zip")
+    assert not (unpacked / "benchmarks").exists()
+    sdist = next(tmp_path.glob("*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        assert not any(
+            PurePosixPath(name).parts[1:2] == ("benchmarks",) for name in archive.getnames()
+        )
 
 
 def test_public_policy_documents_exist_and_are_linked() -> None:

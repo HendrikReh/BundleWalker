@@ -157,6 +157,9 @@ Version 3 ingests one regular UTF-8 `.md` or `.txt` file per command, with a def
 Synthesis. Model proposals, answers, paths, metadata, and citations are bounded; see the
 [detailed producer limits](docs/user-guide.md#v3-producer-limits-and-permissive-reading).
 
+This proof of concept has no published supported workspace capacity. See the provisional
+[performance and capacity methodology](docs/performance-and-capacity.md).
+
 V3 does not ingest URLs, PDFs, images, audio, video, or OCR; batch or watch directories; chunk
 book-sized sources; use embeddings, vector databases, or background indexes; provide a web UI,
 plugin, hosted or remote service; let agents delete, rename, edit conventions, or resolve

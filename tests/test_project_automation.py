@@ -29,6 +29,10 @@ def _run_commands(workflow: dict[str, Any], job: str) -> str:
     return "\n".join(step.get("run", "") for step in _steps(workflow, job))
 
 
+def _step_command_sequence(workflow: dict[str, Any], job: str) -> list[tuple[str, str]]:
+    return [(str(step["name"]), str(step.get("run", ""))) for step in _steps(workflow, job)]
+
+
 def _assert_actions_are_sha_pinned(workflow: dict[str, Any]) -> None:
     for job in workflow["jobs"].values():
         for step in job.get("steps", []):
@@ -65,7 +69,15 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
     assert windows["continue-on-error"] == "true"
     assert windows["strategy"]["matrix"] == {"python-version": ["3.13", "3.14"]}
     assert windows["runs-on"] == "windows-2025"
-    assert _run_commands(workflow, "windows-experimental") == supported_commands
+    supported_sequence = _step_command_sequence(workflow, "supported")
+    windows_sequence = _step_command_sequence(workflow, "windows-experimental")
+    smoke_steps = [
+        step for step in supported_sequence if step[0] == "Run benchmark correctness smoke"
+    ]
+    assert len(smoke_steps) == 1
+    assert windows_sequence == [
+        step for step in supported_sequence if step[0] != "Run benchmark correctness smoke"
+    ]
 
     required = workflow["jobs"]["required"]
     assert required["if"] == "always()"
@@ -77,6 +89,38 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
         "dependency-audit",
     ]
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_benchmark_workflow_is_scheduled_manual_and_nonblocking() -> None:
+    workflow = _yaml(".github/workflows/benchmarks.yml")
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["on"]["schedule"] == [{"cron": "17 3 * * 2"}]
+    assert "workflow_dispatch" in workflow["on"]
+    assert "pull_request" not in workflow["on"]
+    measure = workflow["jobs"]["measure"]
+    assert measure["strategy"]["fail-fast"] == "false"
+    assert measure["strategy"]["matrix"] == {
+        "os": ["ubuntu-24.04", "macos-15"],
+        "python-version": ["3.13", "3.14"],
+    }
+    commands = _run_commands(workflow, "measure")
+    assert "uv sync --locked" in commands
+    assert "uv run python -m benchmarks run" in commands
+    assert "smoke,small,medium,large,probe" in commands
+    assert "suite-1-${{ github.sha }}" in commands
+    assert "${{ github.run_id }}.json" in commands
+    assert workflow["jobs"]["summarize"]["needs"] == ["measure"]
+    _assert_actions_are_sha_pinned(workflow)
+
+
+def test_normal_ci_runs_benchmark_correctness_without_timing_assertions() -> None:
+    workflow = _yaml(".github/workflows/ci.yml")
+    commands = _run_commands(workflow, "supported")
+    assert (
+        "uv run python -m benchmarks run --profiles smoke --correctness-only "
+        '--output "$RUNNER_TEMP/benchmark-smoke.json"' in commands
+    )
+    assert "benchmark baseline" not in commands.casefold()
 
 
 def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
