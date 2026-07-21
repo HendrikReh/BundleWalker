@@ -651,8 +651,7 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
     assert (
-        "bundlewalker-0.4.0rc1/docs/superpowers/plans/"
-        "2026-07-19-bundlewalker-0.4.0a2-release.md"
+        "bundlewalker-0.4.0rc1/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
 
 
@@ -666,8 +665,7 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
     assert "proof of concept" in readme
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
     assert (
-        "[v0.4.0rc1]: "
-        "https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1"
+        "[v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1"
     ) in changelog
     for phrase in (
         "publish-pypi.yml",
