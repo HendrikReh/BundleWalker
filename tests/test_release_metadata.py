@@ -674,7 +674,7 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
         "GitHub environment `pypi`",
         "pending trusted publisher",
         "v0.4.0rc1",
-        "never move or reuse",
+        "Never move or reuse",
         "rerun only",
     ):
         assert phrase in releases

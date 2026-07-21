@@ -111,8 +111,7 @@ tag push, fix through review and advance to `0.4.0rc2`. If upload succeeds but p
 verification exhausts its bounded retry, confirm the immutable PyPI files and rerun only the
 failed verification job and downstream release job. If only GitHub release creation fails, rerun
 only that downstream job; it reuses the retained workflow artifact and verifies any existing
-same-named asset byte-for-byte. A maintainer must never move or reuse a pushed tag or package
-version.
+same-named asset byte-for-byte.
 
 Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc1` certifies the
 production clean-install candidate, not final beta readiness. The next gate is a
