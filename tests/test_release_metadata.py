@@ -685,4 +685,8 @@ def test_second_release_candidate_documents_rc1_recovery_without_final_beta_clai
         "Never rerun a failed publish job",
     ):
         assert phrase in releases
+    assert "advance to `0.4.0rc2`" not in releases
+    assert "advance through review to `0.4.0rc2`" not in releases
+    assert releases.count("advance to `0.4.0rc3`") == 1
+    assert releases.count("advance through review to `0.4.0rc3`") == 2
     assert "Production `0.4.0` is forbidden" in releases

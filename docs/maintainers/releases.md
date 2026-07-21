@@ -122,13 +122,13 @@ annotated tag `v0.4.0rc2` at that exact merge commit, verify it, and push it onc
 build evidence before approving only the exact `pypi` deployment for that tag and commit.
 
 Never move, delete, or reuse a pushed tag or package version. If build or pre-upload validation
-fails after tag push, fix through review and advance to `0.4.0rc2`. The read-only verification job
+fails after tag push, fix through review and advance to `0.4.0rc3`. The read-only verification job
 runs after either ordinary success or ordinary failure of the upload action and treats production
 PyPI as authoritative:
 
-- If PyPI exposes neither file, verification fails; advance through review to `0.4.0rc2`.
+- If PyPI exposes neither file, verification fails; advance through review to `0.4.0rc3`.
 - If PyPI exposes one file or any filename or digest differs, treat the release as unsafe, yank
-  the partial version through PyPI, and advance through review to `0.4.0rc2`.
+  the partial version through PyPI, and advance through review to `0.4.0rc3`.
 - If PyPI exposes both exact filenames and digests, verification continues even when the upload
   action reported failure. A successful exact-version install then permits the downstream GitHub
   release job to attach the retained workflow artifacts without rebuilding or republishing.
