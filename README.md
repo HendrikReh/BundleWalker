@@ -1,5 +1,9 @@
 # BundleWalker
 
+[![CI](https://github.com/HendrikReh/BundleWalker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/HendrikReh/BundleWalker/actions/workflows/ci.yml)
+[![PyPI prerelease](https://img.shields.io/pypi/v/bundlewalker?include_prereleases&label=PyPI)](https://pypi.org/project/bundlewalker/)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later%20%2B%20CC0--1.0-blue)](LICENSE-SCOPE.md)
+
 BundleWalker is a local-first tool that turns a source bundle into a navigable knowledge workspace for people and AI agents.
 It proposes review-first writes to cited, interlinked OKF Markdown while preserving the exact bytes
 of every accepted source as immutable evidence.
