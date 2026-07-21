@@ -680,10 +680,17 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
         "- [ ] **Step 7: Independently verify production PyPI", rerun
     )
     recovery_audit = plan[rerun + len(rerun_command) : independent_verification]
-    assert 'gh run watch "$RUN_ID"' in recovery_audit
+    watch_command = 'gh run watch "$RUN_ID"'
+    run_json_command = (
+        'RUN_JSON="$(gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs)"'
+    )
+    watch = recovery_audit.index(watch_command)
+    refreshed_run_json = recovery_audit.index(run_json_command, watch + len(watch_command))
+    post_watch_audit = recovery_audit[watch + len(watch_command) :]
+    assert watch < refreshed_run_json
     assert 'gh run watch "$RUN_ID" --exit-status' not in recovery_audit
     for assertion in (
-        'RUN_JSON="$(gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs)"',
+        run_json_command,
         'BUILD_CONCLUSION="$(job_conclusion "Build and verify exact distributions")"',
         'PUBLISH_CONCLUSION="$(job_conclusion "Publish exact distributions")"',
         'VERIFY_CONCLUSION="$(job_conclusion "Verify production PyPI installation and checksums")"',
@@ -694,4 +701,4 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
         'case "$PUBLISH_CONCLUSION" in',
         "recovered publication warning",
     ):
-        assert assertion in recovery_audit
+        assert assertion in post_watch_audit
