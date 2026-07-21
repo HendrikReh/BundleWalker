@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tarfile
 import tomllib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from importlib.metadata import version as distribution_version
 from pathlib import Path, PurePosixPath
 
@@ -18,6 +18,7 @@ import pytest
 from markdown_it import MarkdownIt
 
 import bundlewalker
+from benchmarks.contracts import EvidenceRecord
 from benchmarks.evidence import load_evidence
 from benchmarks.report import render_report
 from bundlewalker.application import (
@@ -58,26 +59,98 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/software-agent.md",
 }
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
-PUBLISHED_SUPPORTED_CAPACITY_SENTENCE = (
-    "Supported capacity is 1,000 knowledge documents, approximately 10 MiB of wiki content, "
-    "and a 50,000-character ingestion source."
-)
-PUBLISHED_EVIDENCE_LINKS = frozenset(
-    {
-        "https://github.com/HendrikReh/BundleWalker/commit/"
-        "dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c",
-        "https://github.com/HendrikReh/BundleWalker/actions/runs/29789436063",
-        "../benchmarks/evidence/"
-        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.13-29789436063.json",
-        "../benchmarks/evidence/"
-        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.14-29789436063.json",
-        "../benchmarks/evidence/"
-        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.13-29789436063.json",
-        "../benchmarks/evidence/"
-        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.14-29789436063.json",
-        "../benchmarks/evidence/report.md",
-    }
-)
+
+
+@dataclass(frozen=True)
+class PublishedCapacity:
+    profile_name: str
+    document_count: int
+    wiki_bytes: int
+    source_characters: int
+
+
+def _reviewed_evidence() -> tuple[tuple[Path, EvidenceRecord], ...]:
+    return tuple((path, load_evidence(path)) for path in sorted(EVIDENCE_ROOT.glob("*.json")))
+
+
+def _published_capacity(records: tuple[EvidenceRecord, ...]) -> PublishedCapacity:
+    report = render_report(records, provisional=False, require_matrix=True)
+    match = re.search(
+        r"^Supported capacity: (?P<profile>[A-Z][A-Za-z]+) "
+        r"\((?P<documents>\d+) documents, (?P<wiki_bytes>\d+) profile wiki bytes, "
+        r"(?P<source_characters>\d+) ingestion source characters\)$",
+        report,
+        re.MULTILINE,
+    )
+    assert match is not None
+    capacity = PublishedCapacity(
+        profile_name=match.group("profile").casefold(),
+        document_count=int(match.group("documents")),
+        wiki_bytes=int(match.group("wiki_bytes")),
+        source_characters=int(match.group("source_characters")),
+    )
+    profiles = [profile for profile in records[0].profiles if profile.name == capacity.profile_name]
+    assert len(profiles) == 1
+    assert (
+        profiles[0].document_count,
+        profiles[0].target_wiki_bytes,
+        profiles[0].source_characters,
+    ) == (
+        capacity.document_count,
+        capacity.wiki_bytes,
+        capacity.source_characters,
+    )
+    return capacity
+
+
+def _published_capacity_sentence(capacity: PublishedCapacity) -> str:
+    return (
+        f"Supported capacity is {capacity.document_count:,} knowledge documents, approximately "
+        f"{capacity.wiki_bytes / (1024**2):g} MiB of wiki content, and a "
+        f"{capacity.source_characters:,}-character ingestion source."
+    )
+
+
+def _published_evidence_links(
+    evidence: tuple[tuple[Path, EvidenceRecord], ...],
+) -> frozenset[str]:
+    records = tuple(record for _, record in evidence)
+    commits = {record.git_commit for record in records}
+    run_ids = {record.run_id for record in records}
+    assert len(commits) == len(run_ids) == 1
+    commit = commits.pop()
+    run_id = run_ids.pop()
+    github_run_id = run_id.removeprefix("github-")
+    return frozenset(
+        {
+            f"https://github.com/HendrikReh/BundleWalker/commit/{commit}",
+            f"https://github.com/HendrikReh/BundleWalker/actions/runs/{github_run_id}",
+            *(f"../benchmarks/evidence/{path.name}" for path, _ in evidence),
+            "../benchmarks/evidence/report.md",
+        }
+    )
+
+
+def _reference_environment(record: EvidenceRecord) -> str:
+    environment = record.environment
+    assert environment.filesystem_type is not None
+    assert environment.runner_image is not None
+    return (
+        f"{environment.os_name} {environment.os_release}, "
+        f"{environment.python_implementation} {environment.python_version}, "
+        f"{environment.architecture}, {environment.filesystem_type} "
+        f"(runner {environment.runner_image})"
+    )
+
+
+def _checkpoint_maximum(records: tuple[EvidenceRecord, ...], capacity: PublishedCapacity) -> int:
+    return max(
+        byte_count
+        for record in records
+        for scenario in record.scenarios
+        if scenario.profile == capacity.profile_name
+        for byte_count in scenario.checkpoint_bytes.values()
+    )
 
 
 def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
@@ -105,8 +178,8 @@ def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
     )
 
 
-def _assert_published_capacity_claim(markdown: str) -> None:
-    assert _supported_capacity_sentences(markdown) == {PUBLISHED_SUPPORTED_CAPACITY_SENTENCE}
+def _assert_published_capacity_claim(markdown: str, capacity: PublishedCapacity) -> None:
+    assert _supported_capacity_sentences(markdown) == {_published_capacity_sentence(capacity)}
 
 
 def test_release_versions_are_consistent() -> None:
@@ -124,20 +197,25 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
-def test_performance_document_publishes_reviewed_medium_capacity_and_is_linked() -> None:
+def test_performance_document_publishes_reviewed_capacity_derived_from_evidence_and_is_linked() -> (
+    None
+):
     performance_path = PROJECT_ROOT / "docs/performance-and-capacity.md"
     performance = performance_path.read_text(encoding="utf-8")
     markdown = MarkdownIt("commonmark")
+    evidence = _reviewed_evidence()
+    records = tuple(record for _, record in evidence)
+    capacity = _published_capacity(records)
 
-    assert performance.count(PUBLISHED_SUPPORTED_CAPACITY_SENTENCE) == 1
+    assert performance.count(_published_capacity_sentence(capacity)) == 1
     assert "Status: reviewed evidence" in performance
-    assert "12,951,552 bytes" in performance
+    assert f"{_checkpoint_maximum(records, capacity):,} bytes" in performance
     assert "1-GiB free-space advisory" in performance
     assert "remote model-provider latency is excluded" in performance
     assert "Windows remains experimental" in performance
     assert "proof of concept" in performance
 
-    _assert_published_capacity_claim(performance)
+    _assert_published_capacity_claim(performance, capacity)
     assert "Supported capacity is not yet published." not in performance
     assert "candidate only" not in performance
     assert re.search(r"\bbeta\s+(?:is\s+)?complete\b", performance, re.IGNORECASE) is None
@@ -149,14 +227,9 @@ def test_performance_document_publishes_reviewed_medium_capacity_and_is_linked()
         for child in token.children or ()
         if child.type == "link_open" and isinstance(child.attrGet("href"), str)
     }
-    assert linked_hrefs >= PUBLISHED_EVIDENCE_LINKS
+    assert linked_hrefs >= _published_evidence_links(evidence)
 
-    for environment in (
-        "macOS 15 (Darwin 24.6.0), CPython 3.13.14, arm64, APFS",
-        "macOS 15 (Darwin 24.6.0), CPython 3.14.6, arm64, APFS",
-        "Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.13.14, x86_64, ext2/ext3",
-        "Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.14.6, x86_64, ext2/ext3",
-    ):
+    for environment in (_reference_environment(record) for record in records):
         assert environment in performance
 
     profile_section = performance.partition("## Profiles\n")[2].partition("\n## ")[0]
@@ -168,12 +241,14 @@ def test_performance_document_publishes_reviewed_medium_capacity_and_is_linked()
         and (cells := tuple(cell.strip() for cell in line.strip("|").split("|")))[0]
         in profile_names
     )
-    assert profile_rows == (
-        ("Smoke", "50", "0.5 MiB", "10,000 Unicode characters"),
-        ("Small", "250", "2.5 MiB", "25,000 Unicode characters"),
-        ("Medium", "1,000", "10 MiB", "50,000 Unicode characters"),
-        ("Large", "5,000", "50 MiB", "100,000 Unicode characters"),
-        ("Probe", "10,000", "100 MiB", "100,000 Unicode characters"),
+    assert profile_rows == tuple(
+        (
+            profile.name.capitalize(),
+            f"{profile.document_count:,}",
+            f"{profile.target_wiki_bytes / (1024**2):g} MiB",
+            f"{profile.source_characters:,} Unicode characters",
+        )
+        for profile in records[0].profiles
     )
 
     scenario_section = performance.partition("### Scenario inventory\n")[2].partition(
@@ -261,6 +336,23 @@ def test_performance_document_publishes_reviewed_medium_capacity_and_is_linked()
         assert performance_path.resolve() in targets
 
 
+def test_performance_document_marks_reported_large_and_probe_boundaries_unsupported() -> None:
+    records = tuple(record for _, record in _reviewed_evidence())
+    report = render_report(records, provisional=False, require_matrix=True)
+    boundary_labels = tuple(
+        match.group("profile")
+        for line in report.splitlines()
+        if (
+            match := re.fullmatch(
+                r"Unsupported boundary evidence: (?P<profile>[A-Z][A-Za-z]+) \(.+\)\.", line
+            )
+        )
+    )
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+
+    assert f"{' and '.join(boundary_labels)} are unsupported boundary evidence." in performance
+
+
 @pytest.mark.parametrize(
     "affirmative_claim",
     [
@@ -273,9 +365,10 @@ def test_performance_contract_rejects_another_supported_capacity_claim(
     affirmative_claim: str,
 ) -> None:
     performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+    capacity = _published_capacity(tuple(record for _, record in _reviewed_evidence()))
 
     with pytest.raises(AssertionError):
-        _assert_published_capacity_claim(f"{performance}\n\n{affirmative_claim}\n")
+        _assert_published_capacity_claim(f"{performance}\n\n{affirmative_claim}\n", capacity)
 
 
 @pytest.mark.parametrize(

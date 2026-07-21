@@ -28,16 +28,16 @@ committed with this repository:
 
 The four reference environments were:
 
-- macOS 15 (Darwin 24.6.0), CPython 3.13.14, arm64, APFS
-- macOS 15 (Darwin 24.6.0), CPython 3.14.6, arm64, APFS
-- Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.13.14, x86_64, ext2/ext3
-- Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.14.6, x86_64, ext2/ext3
+- Darwin 24.6.0, CPython 3.13.14, arm64, apfs (runner macos15)
+- Darwin 24.6.0, CPython 3.14.6, arm64, apfs (runner macos15)
+- Linux 6.17.0-1020-azure, CPython 3.13.14, x86_64, ext2/ext3 (runner ubuntu24)
+- Linux 6.17.0-1020-azure, CPython 3.14.6, x86_64, ext2/ext3 (runner ubuntu24)
 
 Each record also retains the runner CPU and memory inventory, generated tree digest, complete
 samples, and checkpoint observations. The complete matrix meets the Medium targets. The overall
 report disposition is `capacity_exceeded` because the larger profiles miss targets or reach their
 deadline; that result is the measured boundary above Medium, not a failure of its completed,
-passing lower profile.
+passing lower profile. Large and Probe are unsupported boundary evidence.
 
 ## Observed disk behavior
 
