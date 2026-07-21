@@ -1,7 +1,7 @@
 # BundleWalker 0.4.0rc1 Production Release Design
 
 **Date:** 2026-07-21
-**Status:** Awaiting written-spec review
+**Status:** Approved
 **Target:** First production-PyPI release candidate for the BundleWalker public beta
 
 ## Context
@@ -44,7 +44,8 @@ by itself, remove BundleWalker's proof-of-concept status.
 - Do not call the public-beta milestone complete solely because `0.4.0rc1` is installable.
 - Do not add a local web UI, hosted service, remote MCP transport, multi-user behavior, new
   ingestion formats, or another application feature.
-- Do not replace the current GPL-2.0-only license or rewrite historical release artifacts.
+- Do not replace the current GPL-3.0-or-later/CC0-1.0 license split or rewrite historical release
+  artifacts.
 - Do not delete, move, replace, or reuse any existing tag, release, or package version.
 - Do not promote files downloaded from TestPyPI. The TestPyPI alphas already exercised the
   packaging and OIDC path; production `0.4.0rc1` is built from its own reviewed tag.
