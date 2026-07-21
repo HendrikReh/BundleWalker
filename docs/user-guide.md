@@ -1,32 +1,36 @@
 # BundleWalker User Guide
 
-BundleWalker turns Markdown and plain-text sources into a local, persistent knowledge wiki. This
-guide is the authority for operating every supported workflow, understanding review and recovery,
-and resolving common failures.
+BundleWalker is a local-first tool that turns a source bundle into a navigable knowledge workspace for people and AI agents.
+This guide is the canonical operational reference for every supported CLI and MCP workflow,
+including review, recovery, lifecycle management, and troubleshooting.
 
 ## Choose your path
 
-- Follow the [personal-workbook tutorial](tutorial.md) for a guided, copy-pasteable first journey.
-- Read the [project overview](../README.md) for the shortest route from checkout to a reviewed
-  proposal.
-- Use this guide when you need complete operating semantics, command options, or recovery help.
-- See the [contributor guide](../CONTRIBUTING.md) when changing BundleWalker itself.
+- **First-time users:** follow the [personal-workbook tutorial](tutorial.md) for a guided,
+  copy-pasteable journey through the complete reviewed workflow.
+- **CLI users:** go to the [CLI reference](#cli-reference) for authoritative signatures, then use
+  the task sections for intent, safety, and recovery behavior.
+- **MCP-host users:** start with the [host-neutral local MCP guide](#use-bundlewalker-through-a-local-mcp-host).
+- **Hermes users:** use the separate [Hermes MCP setup guide](hermes-mcp-setup.md) for
+  Hermes-specific registration and configuration.
+- **Maintainers:** use the [release procedure](maintainers/releases.md) for TestPyPI, production
+  PyPI, versioning, and immutable release recovery.
 
-## Contents
+## Core concepts and safety model
 
-- [Start here: the BundleWalker model](#start-here-the-bundlewalker-model)
-- [Install and configure a provider](#install-and-configure-a-provider)
-- [Create a workspace](#create-a-workspace)
-- [Ingest and review a source](#ingest-and-review-a-source)
-- [Ask, save, and refresh](#ask-save-and-refresh)
-- [Maintain and recover the bundle](#maintain-and-recover-the-bundle)
-- [Back up, restore, upgrade, and roll back](#back-up-restore-upgrade-and-roll-back)
-- [Complete CLI reference](#complete-cli-reference)
-- [Use BundleWalker through a local MCP host](#use-bundlewalker-through-a-local-mcp-host)
-- [Workspace and process reference](#workspace-and-process-reference)
-- [Troubleshooting and safety](#troubleshooting-and-safety)
-
-## Start here: the BundleWalker model
+- A **source bundle** is the set of Markdown or plain-text evidence accepted into a BundleWalker
+  workspace; accepted source bytes remain immutable.
+- A **workspace** is the local directory containing configuration, conventions, raw evidence,
+  compiled knowledge, and temporary coordination state.
+- **Indexing** is BundleWalker's deterministic generation of OKF navigation pages from live
+  concepts; it does not create a background or vector index.
+- **Exploration** means listing, searching, reading, and asking cited questions over live concepts
+  without changing knowledge.
+- **Reviewed writes** separate model preparation from deterministic validation, a complete diff,
+  an explicit decision, and recoverable persistence.
+- The **MCP server** is the existing local `stdio` interface that binds one workspace at startup;
+  it is not a hosted or remote service.
+- The **local web UI** is planned, not implemented. Use the CLI or local MCP server today.
 
 A BundleWalker workspace separates original evidence from maintained knowledge:
 
@@ -54,7 +58,7 @@ through BundleWalker. Deterministic application code owns path handling, proposa
 rendering, prospective lint, the complete diff, confirmation, persistence, and recovery. Semantic
 lint may suggest maintenance, but it never authorizes or starts a write.
 
-## Install and configure a provider
+## Install and configure BundleWalker
 
 BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/). From a
 BundleWalker checkout, install the locked environment and inspect the CLI:
@@ -84,7 +88,6 @@ installed PydanticAI version, then export that provider's credential separately:
 
 ```bash
 export BUNDLEWALKER_MODEL='<pydantic-ai-model-string>'
-# Export the provider-specific credential required by that model.
 ```
 
 See the current [PydanticAI model documentation](https://ai.pydantic.dev/models/) for provider
@@ -117,9 +120,12 @@ Prefer a shell session, operating-system keychain, or secret manager appropriate
 environment. If a model-backed command reports that no model is configured, pass `--model` or
 set `BUNDLEWALKER_MODEL` before retrying.
 
-## Create a workspace
+## Create and understand a workspace
 
-Initialize a new or empty directory, record the checkout path, and enter the workspace:
+### Create a workspace
+
+Use the [`init` signature](#init) for the authoritative argument and preset option. Initialize a
+new or empty directory, record the checkout path, and enter the workspace:
 
 ```bash
 PROJECT_ROOT="$(pwd)"
@@ -166,9 +172,12 @@ If initialization refuses the target, use a path that does not exist or an exist
 directory. BundleWalker does not initialize over a non-empty directory or existing workspace; if
 scaffold creation fails, it rolls back only paths that command created.
 
-## Ingest and review a source
+## Ingest and review sources
 
-From the workspace, ingest one source and optionally override the configured model:
+### Ingest and review a source
+
+Use the [`ingest` signature](#ingest) for the authoritative argument and model override. From the
+workspace, ingest one source and optionally override the configured model:
 
 ```bash
 uv run --project "$PROJECT_ROOT" bundlewalker ingest ../meeting-notes.md
@@ -207,7 +216,10 @@ and fits the configured character limit. If proposal validation fails, no propos
 persisted. Check the source, editable conventions, selected model, and concise error, then run a
 fresh ingestion; never repair transaction staging by hand.
 
-## Ask, save, and refresh
+## Explore, ask, save, and refresh
+
+The [`ask` signature](#ask) is authoritative for read-only questions, `--save`, `--refresh`, and
+the optional model override. The sections below explain the distinct state and review effects.
 
 ### Ask a cited question
 
@@ -296,7 +308,12 @@ That no-op creates no transaction state, timestamp-only change, mutation, or log
 `SEM-STALE` finding can motivate an explicit refresh, but remains advisory; lint does not start,
 approve, or apply a refresh.
 
-## Maintain and recover the bundle
+## Maintain, diagnose, and recover
+
+### Maintain and recover the bundle
+
+Use the [`lint`](#lint), [`doctor`](#doctor), and [`review`](#review) references for authoritative
+signatures. This section explains health checks, diagnostic boundaries, and transaction recovery.
 
 Run offline deterministic checks after accepted edits or manual wiki maintenance. Add a
 model-backed semantic pass when you want advisory content review:
@@ -312,12 +329,6 @@ Deterministic lint checks UTF-8 and OKF parsing, safe paths, internal links, gen
 log structure, raw-source identity, citation structure, source line ranges, and orphan concepts.
 Broken internal links and orphans are warnings. Deterministic errors set process status `1`; a
 clean run or warnings-only run exits `0`.
-
-The reviewed [performance and capacity evidence](performance-and-capacity.md) establishes a local
-workspace envelope of 1,000 knowledge documents, approximately 10 MiB of wiki content, and a
-50,000-character ingestion source on four named macOS/Linux reference environments. Model-provider
-latency is not controlled by BundleWalker and is excluded; the envelope is not a promise for every
-machine, filesystem, workspace, or provider.
 
 `--semantic` runs one additional read-only model-backed pass for contradictions, staleness,
 unsupported claims, missing concepts, and knowledge gaps. Semantic findings may use `ERROR`,
@@ -339,7 +350,8 @@ for diagnosis rather than editing its manifests or staged trees.
 
 The [workspace compatibility and portable-backup policy](workspace-compatibility.md) is the one
 authority for supported formats, compatibility statuses, exact archive scope, exit behavior, and
-the portability boundary. Use these procedures for the four lifecycle commands.
+the portability boundary. Use these procedures for the four lifecycle commands and the
+[`workspace` reference](#workspace) for their authoritative signatures.
 
 ### Inspect compatibility
 
@@ -361,7 +373,11 @@ First resolve any pending review. Inspect it, then apply or discard its exact ID
 cd ./knowledge
 uv run --project "$PROJECT_ROOT" bundlewalker review show
 uv run --project "$PROJECT_ROOT" bundlewalker review apply REVIEW_ID
-# Or discard instead of applying:
+```
+
+To discard instead of applying:
+
+```bash
 uv run --project "$PROJECT_ROOT" bundlewalker review discard REVIEW_ID
 cd "$PROJECT_ROOT"
 ```
@@ -426,7 +442,9 @@ after accepting the result. Retain the original workspace until that decision.
 
 <a id="command-reference"></a>
 
-## Complete CLI reference
+## CLI reference
+
+### Complete CLI reference
 
 Live `--help` output is authoritative for command names, arguments, and options. The public CLI
 contains `doctor`, `init`, `ingest`, `ask`, `lint`, `review`, and `workspace`:
@@ -658,6 +676,15 @@ String limits are part of those schemas: `query` is 1–2,000 characters; `quest
 1,000,000; and `concept_id` is 1–4,096. Every complete `ReviewResult` includes its ID, kind,
 pending-or-stale status, summary, complete diff, changed paths, creation time, and resource URI.
 
+The ten tools form three operational groups:
+
+- **Read and inspect:** `workspace_status`, `search_concepts`, `ask`, `lint`, and
+  `get_pending_review` never apply knowledge changes.
+- **Prepare:** `prepare_ingestion`, `prepare_synthesis`, and `prepare_refresh` may create only the
+  one private pending review after validation.
+- **Resolve:** `apply_review` and `discard_review` resolve that exact pending review sequentially;
+  neither accepts a second workspace or an unrelated review ID.
+
 | Tool | Strict input fields | Structured result | Provider use | State effect |
 | --- | --- | --- | --- | --- |
 | `workspace_status` | none | `WorkspaceStatus` (name, config version, concept counts, optional review summary) | Never | Read-only. |
@@ -747,6 +774,24 @@ may complete or roll back an already-reviewed interrupted transaction.
 
 Tracebacks are hidden by default. Errors report a concise primary cause without printing source
 content or provider credentials.
+
+## Limits and compatibility
+
+BundleWalker remains a proof of concept approaching beta. The latest stable release is **v3**
+(Python package `0.3.0`), while the current production release candidate is `0.4.0rc2`. macOS and
+Linux are supported; Windows is experimental. The planned local web UI is not part of either
+release line.
+
+The [workspace compatibility and portable-backup policy](workspace-compatibility.md) is
+authoritative for readable and writable formats, explicit upgrades, archive scope, restoration,
+rollback, and portability. Check compatibility before moving a workspace between BundleWalker
+versions or machines.
+
+The reviewed [performance and capacity evidence](performance-and-capacity.md) establishes a local
+workspace envelope of 1,000 knowledge documents, approximately 10 MiB of wiki content, and a
+50,000-character ingestion source on four named macOS/Linux reference environments. Model-provider
+latency is not controlled by BundleWalker and is excluded; the envelope is not a promise for every
+machine, filesystem, workspace, or provider.
 
 ### V3 producer limits and permissive reading
 
@@ -848,3 +893,20 @@ Run `ingest`, `ask`, or `lint` again to invoke authenticated recovery. Preserve
 BundleWalker never commits or pushes for you. Review durable files—especially exact bytes under
 `raw/`—before sharing them, and ignore `.bundlewalker/`. See
 [Git and privacy boundary](#git-and-privacy-boundary).
+
+## Related documentation
+
+- The [README](../README.md) is the concise product landing page and shortest useful workflow.
+- The [Tutorial](tutorial.md) is the reproducible learning journey through ingestion, a saved and
+  refreshed Synthesis, final health checks, backup, and restore.
+- The [Hermes MCP Setup Guide](hermes-mcp-setup.md) contains Hermes-specific registration, tool
+  filtering, environment forwarding, verification, troubleshooting, and removal.
+- The [Workspace Compatibility Policy](workspace-compatibility.md) defines lifecycle and
+  portability behavior.
+- [Performance and Capacity](performance-and-capacity.md) publishes reviewed measurements,
+  supported boundaries, exclusions, and reproduction steps.
+- The [Support Policy](../SUPPORT.md) explains supported platforms, issue evidence, and the
+  best-effort maintenance boundary; the [Security Policy](../SECURITY.md) gives the private
+  vulnerability route.
+- [Contributing](../CONTRIBUTING.md) covers architecture, development, verification, and
+  documentation ownership; maintainers should also use the [Release Procedure](maintainers/releases.md).

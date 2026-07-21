@@ -365,19 +365,12 @@ def test_doctor_diagnostics_and_redacted_support_reports_are_published() -> None
     assert "owner-only partial support-report target" in changelog
 
 
-def test_historical_plan_embeds_current_user_guide_byte_for_byte() -> None:
-    guide = (PROJECT_ROOT / "docs/user-guide.md").read_bytes()
-    plan = (PROJECT_ROOT / "docs/superpowers/plans/2026-07-16-end-user-guide.md").read_bytes()
-    start_marker = b"Create `docs/user-guide.md` with exactly:\n\n````markdown\n"
-    end_marker = b"\n````\n\n- [ ] **Step 3: Link the guide from the README**"
+def test_contributor_documentation_keeps_historical_records_immutable() -> None:
+    contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
 
-    assert plan.count(start_marker) == 1
-    assert plan.count(end_marker) == 1
-    embedded_start = plan.index(start_marker) + len(start_marker)
-    embedded_end = plan.index(end_marker, embedded_start)
-    embedded_guide = plan[embedded_start:embedded_end] + b"\n"
-
-    assert embedded_guide == guide
+    assert "Historical plans and specifications are immutable project records." in contributing
+    assert "Do not synchronize them with later edits to active documentation." in contributing
+    assert "After every user-guide edit, update the embedded block" not in contributing
 
 
 def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> None:

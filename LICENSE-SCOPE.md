@@ -1,7 +1,11 @@
 # BundleWalker License Scope
 
-BundleWalker is an open-source distribution containing project-owned material under two sets of
-terms. The license assigned to a file depends on its path.
+BundleWalker is an open-source distribution with a path-based license map: most project-owned
+material uses GPL-3.0-or-later, while the five convention preset resources use CC0-1.0. This page
+is the authoritative scope map; read the exact [GNU GPL text](LICENSE) and [CC0 legal
+code](LICENSES/CC0-1.0.txt) for the license terms. Start with the [README](README.md) for the
+product overview, and see [Contributing](CONTRIBUTING.md) for the inbound terms that apply to each
+contribution path.
 
 ## GPL-3.0-or-later
 

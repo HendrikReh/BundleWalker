@@ -19,6 +19,10 @@ Support is community-based and has no guaranteed response time or service-level 
 Hosted operation, remote MCP transport, multi-user synchronization, a web UI, embeddings, vector
 databases, additional source formats, and automatic Git operations are outside the first beta.
 
+Use the [User Guide](docs/user-guide.md) for supported CLI/MCP operation and troubleshooting, and
+the [Workspace Compatibility Policy](docs/workspace-compatibility.md) for format, backup, restore,
+upgrade, rollback, and portability guarantees.
+
 ## Ask for help or report a bug
 
 Search [existing issues](https://github.com/HendrikReh/BundleWalker/issues) first. If the problem

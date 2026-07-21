@@ -1,5 +1,8 @@
 # Performance and Capacity
 
+This guide presents reviewed benchmark evidence, not a universal machine guarantee. Use it to
+understand the measured local envelope and the limits around that evidence.
+
 ## Reviewed envelope
 
 Status: reviewed evidence.
@@ -12,6 +15,11 @@ Supported capacity is 1,000 knowledge documents, approximately 10 MiB of wiki co
 This statement is limited to the deterministic synthetic workload, the scenarios below, and the
 four reference environments. It is not a universal hardware SLA or a promise for every
 filesystem, machine, workspace shape, source, or model provider.
+
+**How to use these numbers.** Keep planned work within the supported profile, monitor free space,
+and benchmark your own environment before relying on its behavior. Use the [user guide](user-guide.md)
+for product workflows, the [workspace compatibility policy](workspace-compatibility.md) for
+backup and portability decisions, and the [support policy](../SUPPORT.md) when reporting a problem.
 
 ## Reviewed provenance
 

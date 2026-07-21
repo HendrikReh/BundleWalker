@@ -4,6 +4,9 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+- Reorganized active documentation around a newcomer-first README, guided tutorial, canonical
+  user reference, focused specialist guides, and consistent project-policy navigation.
+
 ## [v0.4.0rc2] - 2026-07-21
 
 ### Fixed
