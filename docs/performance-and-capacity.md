@@ -1,15 +1,53 @@
 # Performance and Capacity
 
-## Status
+## Reviewed envelope
 
-BundleWalker has a reproducible measurement foundation for local workspace behavior.
+Status: reviewed evidence.
 
-Supported capacity is not yet published.
+BundleWalker remains a proof of concept for technical solo users. The reviewed, reproducible
+evidence establishes one conservative envelope for the local CLI and workspace-bound MCP server.
 
-The current material describes how evidence will be collected; it does not set a capacity
-boundary.
+Supported capacity is 1,000 knowledge documents, approximately 10 MiB of wiki content, and a 50,000-character ingestion source.
 
-## What will be measured
+This statement is limited to the deterministic synthetic workload, the scenarios below, and the
+four reference environments. It is not a universal hardware SLA or a promise for every
+filesystem, machine, workspace shape, source, or model provider.
+
+## Reviewed provenance
+
+The evidence was measured from [source commit
+`dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c`](https://github.com/HendrikReh/BundleWalker/commit/dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c)
+in [GitHub Actions run 29789436063](https://github.com/HendrikReh/BundleWalker/actions/runs/29789436063).
+The immutable records and [deterministic rendered report](../benchmarks/evidence/report.md) are
+committed with this repository:
+
+- [Linux, Python 3.13 evidence](../benchmarks/evidence/suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.13-29789436063.json)
+- [Linux, Python 3.14 evidence](../benchmarks/evidence/suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.14-29789436063.json)
+- [macOS, Python 3.13 evidence](../benchmarks/evidence/suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.13-29789436063.json)
+- [macOS, Python 3.14 evidence](../benchmarks/evidence/suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.14-29789436063.json)
+
+The four reference environments were:
+
+- macOS 15 (Darwin 24.6.0), CPython 3.13.14, arm64, APFS
+- macOS 15 (Darwin 24.6.0), CPython 3.14.6, arm64, APFS
+- Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.13.14, x86_64, ext2/ext3
+- Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.14.6, x86_64, ext2/ext3
+
+Each record also retains the runner CPU and memory inventory, generated tree digest, complete
+samples, and checkpoint observations. The complete matrix meets the Medium targets. The overall
+report disposition is `capacity_exceeded` because the larger profiles miss targets or reach their
+deadline; that result is the measured boundary above Medium, not a failure of its completed,
+passing lower profile.
+
+## Observed disk behavior
+
+The largest Medium transaction checkpoint observed across the matrix was 12,951,552 bytes. That
+is an observation of this workload, not a reservation calculation or a guarantee that a write will
+fit on another workspace. `bundlewalker doctor` retains its conservative 1-GiB free-space advisory:
+it warns below that threshold and cannot determine whether any particular ingestion, backup, or
+transaction will fit.
+
+## What is measured
 
 The benchmark harness generates deterministic synthetic workspaces from fixed profiles and seeds.
 It measures these twelve local scenarios:
@@ -45,7 +83,7 @@ sorted tool discovery. The clean shutdown happens after the timer stops and is o
 measurement.
 
 These measurements deliberately exercise local production behavior. They do not measure a model
-call, a network connection, or a provider service.
+call, a network connection, or a provider service. In particular, remote model-provider latency is excluded because BundleWalker does not control it.
 
 ## Profiles
 
@@ -60,22 +98,15 @@ call, a network connection, or a provider service.
 Approximate wiki content is the total byte size of regular files in the configured wiki directory
 after generation; each evidence record retains the exact bytes, document count, parameters, and
 tree digest. Large and Probe both use 100,000 Unicode characters because that is the existing
-public workspace limit; Phase 1 does not raise it.
+public workspace limit; this evidence does not raise it. Smoke is a correctness profile and Probe
+is exploratory, not a promise of successful operation at that size.
 
-Smoke is a correctness check. Small, Medium, and Large are candidates for later capacity
-evaluation. Probe is exploratory and cannot become supported because a single run succeeds.
+## Platforms and exclusions
 
-## Interpretation
-
-Any result produced by this foundation is candidate only. It is evidence about named reference
-environments and a deterministic synthetic workload, not a universal hardware SLA or a promise
-about every filesystem, machine, or workspace.
-
-## Exclusions and platforms
-
-For this methodology, remote model-provider latency is excluded because BundleWalker does not
-control it. macOS and Linux are the official supported platforms for the evidence workflow on
-Python 3.13 and 3.14. Windows remains experimental, so it is not part of a capacity claim.
+macOS and Linux are the official supported platforms for the evidence workflow on Python 3.13 and
+3.14. Windows remains experimental, so it is not part of this envelope. The evidence does not
+cover hosted operation, remote MCP transport, multi-user synchronization, a web UI, embeddings,
+vector databases, additional source formats, automatic Git operations, or remote-model behavior.
 
 ## Privacy
 
@@ -104,13 +135,5 @@ uv run python -m benchmarks run \
   --output benchmark-results/local.json
 ```
 
-Inspect the generated evidence before sharing it. Local runs are useful for development, but they
-do not themselves establish a supported capacity.
-
-## Evidence process
-
-The scheduled/manual macOS and Linux evidence workflow runs after the measurement foundation is
-merged. It records the complete supported-platform matrix and uploads its JSON evidence and
-provisional summary for review. A second, reviewed evidence pull request then validates those
-artifacts and updates the public capacity documentation only when the full cross-platform evidence
-supports it.
+Inspect generated local evidence before sharing it. It is useful for development, but it neither
+changes the reviewed envelope nor substitutes for a complete reviewed cross-platform matrix.

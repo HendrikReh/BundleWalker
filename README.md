@@ -157,8 +157,10 @@ Version 3 ingests one regular UTF-8 `.md` or `.txt` file per command, with a def
 Synthesis. Model proposals, answers, paths, metadata, and citations are bounded; see the
 [detailed producer limits](docs/user-guide.md#v3-producer-limits-and-permissive-reading).
 
-This proof of concept has no published supported workspace capacity. See the provisional
-[performance and capacity methodology](docs/performance-and-capacity.md).
+This proof of concept has a reviewed envelope of 1,000 knowledge documents, approximately 10 MiB
+of wiki content, and a 50,000-character ingestion source on four named macOS/Linux reference
+environments. It excludes remote-model latency and does not promise the same result for every
+machine, filesystem, or workspace. See the [reviewed performance and capacity evidence](docs/performance-and-capacity.md).
 
 V3 does not ingest URLs, PDFs, images, audio, video, or OCR; batch or watch directories; chunk
 book-sized sources; use embeddings, vector databases, or background indexes; provide a web UI,

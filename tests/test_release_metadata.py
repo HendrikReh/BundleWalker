@@ -58,13 +58,24 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/software-agent.md",
 }
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
-ALLOWED_SUPPORTED_CAPACITY_SENTENCES = frozenset(
+PUBLISHED_SUPPORTED_CAPACITY_SENTENCE = (
+    "Supported capacity is 1,000 knowledge documents, approximately 10 MiB of wiki content, "
+    "and a 50,000-character ingestion source."
+)
+PUBLISHED_EVIDENCE_LINKS = frozenset(
     {
-        "Supported capacity is not yet published.",
-        (
-            "Local runs are useful for development, but they do not themselves establish a "
-            "supported capacity."
-        ),
+        "https://github.com/HendrikReh/BundleWalker/commit/"
+        "dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c",
+        "https://github.com/HendrikReh/BundleWalker/actions/runs/29789436063",
+        "../benchmarks/evidence/"
+        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.13-29789436063.json",
+        "../benchmarks/evidence/"
+        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.14-29789436063.json",
+        "../benchmarks/evidence/"
+        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.13-29789436063.json",
+        "../benchmarks/evidence/"
+        "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.14-29789436063.json",
+        "../benchmarks/evidence/report.md",
     }
 )
 
@@ -94,8 +105,8 @@ def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
     )
 
 
-def _assert_provisional_capacity_claims(markdown: str) -> None:
-    assert _supported_capacity_sentences(markdown) == ALLOWED_SUPPORTED_CAPACITY_SENTENCES
+def _assert_published_capacity_claim(markdown: str) -> None:
+    assert _supported_capacity_sentences(markdown) == {PUBLISHED_SUPPORTED_CAPACITY_SENTENCE}
 
 
 def test_release_versions_are_consistent() -> None:
@@ -113,21 +124,40 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
-def test_performance_document_is_provisional_and_linked() -> None:
+def test_performance_document_publishes_reviewed_medium_capacity_and_is_linked() -> None:
     performance_path = PROJECT_ROOT / "docs/performance-and-capacity.md"
     performance = performance_path.read_text(encoding="utf-8")
     markdown = MarkdownIt("commonmark")
 
-    assert performance.count("Supported capacity is not yet published.") == 1
-    assert "candidate only" in performance
-    assert "100,000 Unicode characters" in performance
+    assert performance.count(PUBLISHED_SUPPORTED_CAPACITY_SENTENCE) == 1
+    assert "Status: reviewed evidence" in performance
+    assert "12,951,552 bytes" in performance
+    assert "1-GiB free-space advisory" in performance
     assert "remote model-provider latency is excluded" in performance
     assert "Windows remains experimental" in performance
+    assert "proof of concept" in performance
 
-    _assert_provisional_capacity_claims(performance)
-    assert "BundleWalker supports up to" not in performance
+    _assert_published_capacity_claim(performance)
+    assert "Supported capacity is not yet published." not in performance
+    assert "candidate only" not in performance
     assert re.search(r"\bbeta\s+(?:is\s+)?complete\b", performance, re.IGNORECASE) is None
     assert re.search(r"\b(?:release|version)\s+(?:is|:|\d)", performance, re.IGNORECASE) is None
+
+    linked_hrefs = {
+        child.attrGet("href")
+        for token in markdown.parse(performance)
+        for child in token.children or ()
+        if child.type == "link_open" and isinstance(child.attrGet("href"), str)
+    }
+    assert linked_hrefs >= PUBLISHED_EVIDENCE_LINKS
+
+    for environment in (
+        "macOS 15 (Darwin 24.6.0), CPython 3.13.14, arm64, APFS",
+        "macOS 15 (Darwin 24.6.0), CPython 3.14.6, arm64, APFS",
+        "Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.13.14, x86_64, ext2/ext3",
+        "Ubuntu 24 (Linux 6.17.0-1020-azure), CPython 3.14.6, x86_64, ext2/ext3",
+    ):
+        assert environment in performance
 
     profile_section = performance.partition("## Profiles\n")[2].partition("\n## ")[0]
     profile_names = {"Smoke", "Small", "Medium", "Large", "Probe"}
@@ -239,13 +269,13 @@ def test_performance_document_is_provisional_and_linked() -> None:
         "A CAPACITY of 50 MiB is SUPPORTED.",
     ],
 )
-def test_performance_contract_rejects_affirmative_supported_capacity_claims(
+def test_performance_contract_rejects_another_supported_capacity_claim(
     affirmative_claim: str,
 ) -> None:
     performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
 
     with pytest.raises(AssertionError):
-        _assert_provisional_capacity_claims(f"{performance}\n\n{affirmative_claim}\n")
+        _assert_published_capacity_claim(f"{performance}\n\n{affirmative_claim}\n")
 
 
 @pytest.mark.parametrize(
