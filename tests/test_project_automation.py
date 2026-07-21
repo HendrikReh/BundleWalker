@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import re
+import shlex
+import subprocess
 import tomllib
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -403,7 +405,7 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
         "uv run pyright",
         "uv run pip-audit --strict",
         "uv build --clear --no-sources",
-        "uv run twine check dist/*",
+        'uv run twine check "${artifacts[@]}"',
         "bundlewalker --help",
         "bundlewalker-mcp --help",
         "sha256sum",
@@ -514,6 +516,42 @@ def test_pypi_workflow_requires_exact_artifacts_in_every_downstream_job() -> Non
             step.get("with") == {"name": "python-package-distributions", "path": "dist/"}
             for step in downloads
         )
+
+
+def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
+    tmp_path: Path,
+) -> None:
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    script = _step(workflow, "build", "Validate exact artifacts and metadata")["run"]
+    selector = re.search(
+        r"mapfile -t artifacts < <\((?P<command>find dist .+?) \| sort\)",
+        script,
+    )
+    assert selector is not None
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    for name in (
+        ".gitignore",
+        "bundlewalker-0.4.0rc2-py3-none-any.whl",
+        "bundlewalker-0.4.0rc2.tar.gz",
+    ):
+        (dist / name).touch()
+
+    selected = subprocess.run(
+        shlex.split(selector.group("command")),
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+
+    assert sorted(selected) == [
+        "dist/bundlewalker-0.4.0rc2-py3-none-any.whl",
+        "dist/bundlewalker-0.4.0rc2.tar.gz",
+    ]
+    assert "dist/.gitignore" not in selected
+    assert 'uv run twine check "${artifacts[@]}"' in script
 
 
 def test_pypi_verification_runs_after_ordinary_publish_failure_read_only() -> None:

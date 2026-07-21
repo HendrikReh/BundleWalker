@@ -4,7 +4,7 @@ BundleWalker is a local, review-first CLI that turns Markdown and text sources i
 cited Open Knowledge Format (OKF) wiki. Accepted source bytes stay immutable, every proposed
 knowledge change is reviewable, and the resulting Markdown remains readable without BundleWalker.
 
-Latest stable release: **v3** (Python package `0.3.0`). The current production release candidate is `0.4.0rc1`,
+Latest stable release: **v3** (Python package `0.3.0`). The current production release candidate is `0.4.0rc2`,
 adding the reviewed public-beta foundation while BundleWalker remains a proof of concept. See the
 [changelog](CHANGELOG.md) for release history.
 
@@ -29,7 +29,7 @@ BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/)
 Install the exact production release candidate as an isolated command-line tool:
 
 ```bash
-uv tool install "bundlewalker==0.4.0rc1"
+uv tool install "bundlewalker==0.4.0rc2"
 bundlewalker --help
 bundlewalker-mcp --help
 ```
