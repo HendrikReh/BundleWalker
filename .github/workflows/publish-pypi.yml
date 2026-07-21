@@ -68,11 +68,11 @@ jobs:
       - name: Validate exact artifacts and metadata
         shell: bash
         run: |
-          mapfile -t artifacts < <(find dist -maxdepth 1 -type f -print | sort)
+          mapfile -t artifacts < <(find dist -maxdepth 1 -type f \( -name '*.whl' -o -name '*.tar.gz' \) -print | sort)
           test "${#artifacts[@]}" -eq 2
           test -f "dist/bundlewalker-${{ steps.identity.outputs.version }}-py3-none-any.whl"
           test -f "dist/bundlewalker-${{ steps.identity.outputs.version }}.tar.gz"
-          uv run twine check dist/*
+          uv run twine check "${artifacts[@]}"
           sha256sum "${artifacts[@]}"
       - name: Install and smoke-test built wheel
         shell: bash
