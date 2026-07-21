@@ -6,10 +6,14 @@ All notable BundleWalker releases are recorded here.
 
 ### Added
 
+- Published reviewed four-environment benchmark evidence and the conservative Medium envelope:
+  1,000 knowledge documents, approximately 10 MiB of wiki content, and a 50,000-character
+  ingestion source. The evidence excludes remote-model latency and remains limited to its named
+  reference environments; see the performance and capacity documentation.
 - Added the offline, read-only `bundlewalker doctor` health check with stable remediation,
   automation-friendly exit behavior, and explicit redacted JSON support reports.
 - Added a reproducible synthetic benchmark foundation, a scheduled/manual supported-platform
-  evidence workflow, and provisional capacity documentation.
+  evidence workflow, and its measurement methodology.
 
 ### Changed
 

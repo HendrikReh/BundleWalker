@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tarfile
 import tomllib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from importlib.metadata import version as distribution_version
 from pathlib import Path, PurePosixPath
 
@@ -18,6 +18,9 @@ import pytest
 from markdown_it import MarkdownIt
 
 import bundlewalker
+from benchmarks.contracts import EvidenceRecord
+from benchmarks.evidence import load_evidence
+from benchmarks.report import render_report
 from bundlewalker.application import (
     DiagnosticsApplication,
     DiagnosticsDependencies,
@@ -25,6 +28,22 @@ from bundlewalker.application import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+EVIDENCE_ROOT = PROJECT_ROOT / "benchmarks/evidence"
+
+REVIEWED_EVIDENCE_SHA256 = {
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.13-29789436063.json": (
+        "cb22e213cbd7af4ac7203d055cab95b1207d5d232a2daf8fe2bf60f677d2d645"
+    ),
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.14-29789436063.json": (
+        "6abfd90b0fba6b2f7fcbcffd6aa6e7ef91a485262bceac5cab6e49f815c8311e"
+    ),
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.13-29789436063.json": (
+        "624a81b85f69b41bec7680c3b69b1ec45e6f8b91c9f0303ec0ed36d953ff4b84"
+    ),
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.14-29789436063.json": (
+        "5edc699e5fd4fd2becf6d52d24bd471d93e9b287f585a194742664df1fbe6689"
+    ),
+}
 
 LICENSE_EXPRESSION = "GPL-3.0-or-later AND CC0-1.0"
 LICENSE_FILES = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
@@ -40,15 +59,98 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/software-agent.md",
 }
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
-ALLOWED_SUPPORTED_CAPACITY_SENTENCES = frozenset(
-    {
-        "Supported capacity is not yet published.",
-        (
-            "Local runs are useful for development, but they do not themselves establish a "
-            "supported capacity."
-        ),
-    }
-)
+
+
+@dataclass(frozen=True)
+class PublishedCapacity:
+    profile_name: str
+    document_count: int
+    wiki_bytes: int
+    source_characters: int
+
+
+def _reviewed_evidence() -> tuple[tuple[Path, EvidenceRecord], ...]:
+    return tuple((path, load_evidence(path)) for path in sorted(EVIDENCE_ROOT.glob("*.json")))
+
+
+def _published_capacity(records: tuple[EvidenceRecord, ...]) -> PublishedCapacity:
+    report = render_report(records, provisional=False, require_matrix=True)
+    match = re.search(
+        r"^Supported capacity: (?P<profile>[A-Z][A-Za-z]+) "
+        r"\((?P<documents>\d+) documents, (?P<wiki_bytes>\d+) profile wiki bytes, "
+        r"(?P<source_characters>\d+) ingestion source characters\)$",
+        report,
+        re.MULTILINE,
+    )
+    assert match is not None
+    capacity = PublishedCapacity(
+        profile_name=match.group("profile").casefold(),
+        document_count=int(match.group("documents")),
+        wiki_bytes=int(match.group("wiki_bytes")),
+        source_characters=int(match.group("source_characters")),
+    )
+    profiles = [profile for profile in records[0].profiles if profile.name == capacity.profile_name]
+    assert len(profiles) == 1
+    assert (
+        profiles[0].document_count,
+        profiles[0].target_wiki_bytes,
+        profiles[0].source_characters,
+    ) == (
+        capacity.document_count,
+        capacity.wiki_bytes,
+        capacity.source_characters,
+    )
+    return capacity
+
+
+def _published_capacity_sentence(capacity: PublishedCapacity) -> str:
+    return (
+        f"Supported capacity is {capacity.document_count:,} knowledge documents, approximately "
+        f"{capacity.wiki_bytes / (1024**2):g} MiB of wiki content, and a "
+        f"{capacity.source_characters:,}-character ingestion source."
+    )
+
+
+def _published_evidence_links(
+    evidence: tuple[tuple[Path, EvidenceRecord], ...],
+) -> frozenset[str]:
+    records = tuple(record for _, record in evidence)
+    commits = {record.git_commit for record in records}
+    run_ids = {record.run_id for record in records}
+    assert len(commits) == len(run_ids) == 1
+    commit = commits.pop()
+    run_id = run_ids.pop()
+    github_run_id = run_id.removeprefix("github-")
+    return frozenset(
+        {
+            f"https://github.com/HendrikReh/BundleWalker/commit/{commit}",
+            f"https://github.com/HendrikReh/BundleWalker/actions/runs/{github_run_id}",
+            *(f"../benchmarks/evidence/{path.name}" for path, _ in evidence),
+            "../benchmarks/evidence/report.md",
+        }
+    )
+
+
+def _reference_environment(record: EvidenceRecord) -> str:
+    environment = record.environment
+    assert environment.filesystem_type is not None
+    assert environment.runner_image is not None
+    return (
+        f"{environment.os_name} {environment.os_release}, "
+        f"{environment.python_implementation} {environment.python_version}, "
+        f"{environment.architecture}, {environment.filesystem_type} "
+        f"(runner {environment.runner_image})"
+    )
+
+
+def _checkpoint_maximum(records: tuple[EvidenceRecord, ...], capacity: PublishedCapacity) -> int:
+    return max(
+        byte_count
+        for record in records
+        for scenario in record.scenarios
+        if scenario.profile == capacity.profile_name
+        for byte_count in scenario.checkpoint_bytes.values()
+    )
 
 
 def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
@@ -76,8 +178,8 @@ def _supported_capacity_sentences(markdown: str) -> frozenset[str]:
     )
 
 
-def _assert_provisional_capacity_claims(markdown: str) -> None:
-    assert _supported_capacity_sentences(markdown) == ALLOWED_SUPPORTED_CAPACITY_SENTENCES
+def _assert_published_capacity_claim(markdown: str, capacity: PublishedCapacity) -> None:
+    assert _supported_capacity_sentences(markdown) == {_published_capacity_sentence(capacity)}
 
 
 def test_release_versions_are_consistent() -> None:
@@ -95,21 +197,40 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
-def test_performance_document_is_provisional_and_linked() -> None:
+def test_performance_document_publishes_reviewed_capacity_derived_from_evidence_and_is_linked() -> (
+    None
+):
     performance_path = PROJECT_ROOT / "docs/performance-and-capacity.md"
     performance = performance_path.read_text(encoding="utf-8")
     markdown = MarkdownIt("commonmark")
+    evidence = _reviewed_evidence()
+    records = tuple(record for _, record in evidence)
+    capacity = _published_capacity(records)
 
-    assert performance.count("Supported capacity is not yet published.") == 1
-    assert "candidate only" in performance
-    assert "100,000 Unicode characters" in performance
+    assert performance.count(_published_capacity_sentence(capacity)) == 1
+    assert "Status: reviewed evidence" in performance
+    assert f"{_checkpoint_maximum(records, capacity):,} bytes" in performance
+    assert "1-GiB free-space advisory" in performance
     assert "remote model-provider latency is excluded" in performance
     assert "Windows remains experimental" in performance
+    assert "proof of concept" in performance
 
-    _assert_provisional_capacity_claims(performance)
-    assert "BundleWalker supports up to" not in performance
+    _assert_published_capacity_claim(performance, capacity)
+    assert "Supported capacity is not yet published." not in performance
+    assert "candidate only" not in performance
     assert re.search(r"\bbeta\s+(?:is\s+)?complete\b", performance, re.IGNORECASE) is None
     assert re.search(r"\b(?:release|version)\s+(?:is|:|\d)", performance, re.IGNORECASE) is None
+
+    linked_hrefs = {
+        child.attrGet("href")
+        for token in markdown.parse(performance)
+        for child in token.children or ()
+        if child.type == "link_open" and isinstance(child.attrGet("href"), str)
+    }
+    assert linked_hrefs >= _published_evidence_links(evidence)
+
+    for environment in (_reference_environment(record) for record in records):
+        assert environment in performance
 
     profile_section = performance.partition("## Profiles\n")[2].partition("\n## ")[0]
     profile_names = {"Smoke", "Small", "Medium", "Large", "Probe"}
@@ -120,12 +241,14 @@ def test_performance_document_is_provisional_and_linked() -> None:
         and (cells := tuple(cell.strip() for cell in line.strip("|").split("|")))[0]
         in profile_names
     )
-    assert profile_rows == (
-        ("Smoke", "50", "0.5 MiB", "10,000 Unicode characters"),
-        ("Small", "250", "2.5 MiB", "25,000 Unicode characters"),
-        ("Medium", "1,000", "10 MiB", "50,000 Unicode characters"),
-        ("Large", "5,000", "50 MiB", "100,000 Unicode characters"),
-        ("Probe", "10,000", "100 MiB", "100,000 Unicode characters"),
+    assert profile_rows == tuple(
+        (
+            profile.name.capitalize(),
+            f"{profile.document_count:,}",
+            f"{profile.target_wiki_bytes / (1024**2):g} MiB",
+            f"{profile.source_characters:,} Unicode characters",
+        )
+        for profile in records[0].profiles
     )
 
     scenario_section = performance.partition("### Scenario inventory\n")[2].partition(
@@ -213,6 +336,23 @@ def test_performance_document_is_provisional_and_linked() -> None:
         assert performance_path.resolve() in targets
 
 
+def test_performance_document_marks_reported_large_and_probe_boundaries_unsupported() -> None:
+    records = tuple(record for _, record in _reviewed_evidence())
+    report = render_report(records, provisional=False, require_matrix=True)
+    boundary_labels = tuple(
+        match.group("profile")
+        for line in report.splitlines()
+        if (
+            match := re.fullmatch(
+                r"Unsupported boundary evidence: (?P<profile>[A-Z][A-Za-z]+) \(.+\)\.", line
+            )
+        )
+    )
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+
+    assert f"{' and '.join(boundary_labels)} are unsupported boundary evidence." in performance
+
+
 @pytest.mark.parametrize(
     "affirmative_claim",
     [
@@ -221,13 +361,14 @@ def test_performance_document_is_provisional_and_linked() -> None:
         "A CAPACITY of 50 MiB is SUPPORTED.",
     ],
 )
-def test_performance_contract_rejects_affirmative_supported_capacity_claims(
+def test_performance_contract_rejects_another_supported_capacity_claim(
     affirmative_claim: str,
 ) -> None:
     performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
+    capacity = _published_capacity(tuple(record for _, record in _reviewed_evidence()))
 
     with pytest.raises(AssertionError):
-        _assert_provisional_capacity_claims(f"{performance}\n\n{affirmative_claim}\n")
+        _assert_published_capacity_claim(f"{performance}\n\n{affirmative_claim}\n", capacity)
 
 
 @pytest.mark.parametrize(
@@ -357,6 +498,46 @@ def test_official_license_texts_are_unmodified() -> None:
     for relative, expected_digest in OFFICIAL_LICENSE_SHA256.items():
         content = (PROJECT_ROOT / relative).read_bytes()
         assert hashlib.sha256(content).hexdigest() == expected_digest
+
+
+def test_reviewed_benchmark_evidence_has_complete_immutable_provenance() -> None:
+    paths = tuple(sorted(EVIDENCE_ROOT.glob("*.json")))
+    assert tuple(path.name for path in paths) == tuple(REVIEWED_EVIDENCE_SHA256)
+
+    expected_manifest = "".join(
+        f"{digest}  {name}\n" for name, digest in REVIEWED_EVIDENCE_SHA256.items()
+    )
+    assert (EVIDENCE_ROOT / "SHA256SUMS").read_text(encoding="ascii") == expected_manifest
+    assert {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths
+    } == REVIEWED_EVIDENCE_SHA256
+
+    records = tuple(load_evidence(path) for path in paths)
+    for record in records:
+        assert record.schema_version == record.suite_version == 1
+        assert record.correctness_only is False
+        assert (record.warmup_count, record.read_only_repetitions, record.mutation_repetitions) == (
+            1,
+            7,
+            5,
+        )
+        assert record.git_commit == "dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c"
+        assert record.run_id == "github-29789436063"
+        assert record.bundlewalker_version == "0.4.0a2"
+
+    assert {
+        (record.environment.os_name, ".".join(record.environment.python_version.split(".")[:2]))
+        for record in records
+    } == {("Darwin", "3.13"), ("Darwin", "3.14"), ("Linux", "3.13"), ("Linux", "3.14")}
+
+
+def test_reviewed_benchmark_report_is_regenerated_from_committed_evidence() -> None:
+    records = tuple(load_evidence(path) for path in sorted(EVIDENCE_ROOT.glob("*.json")))
+    assert (EVIDENCE_ROOT / "report.md").read_text(encoding="utf-8") == render_report(
+        records,
+        provisional=False,
+        require_matrix=True,
+    )
 
 
 def test_cc0_scope_matches_the_packaged_convention_presets() -> None:

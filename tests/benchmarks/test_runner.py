@@ -15,14 +15,157 @@ import pytest
 
 import benchmarks.__main__ as benchmark_cli
 import benchmarks.runner as runner_module
-from benchmarks.contracts import EnvironmentRecord, ScenarioDisposition, ScenarioName
+from benchmarks.contracts import (
+    CheckpointBytes,
+    CheckpointName,
+    EnvironmentRecord,
+    EvidenceRecord,
+    FixtureIdentity,
+    ScenarioDisposition,
+    ScenarioEvidence,
+    ScenarioName,
+    profile_sha256,
+)
 from benchmarks.evidence import load_evidence, write_evidence
 from benchmarks.fixtures import generate_fixture
-from benchmarks.profiles import PROFILES
+from benchmarks.profiles import PROFILES, target_ns
 from benchmarks.runner import BenchmarkRunError, RunConfig, run_benchmarks
+from benchmarks.scenarios import SCENARIOS
 from tests.benchmarks.factories import evidence_record
 
 PROJECT_ROOT = Path(__file__).parents[2]
+
+
+def _qualifying_matrix_record(*, os_name: str, python_version: str) -> EvidenceRecord:
+    checkpoint_catalog: dict[ScenarioName, dict[CheckpointName, CheckpointBytes]] = {
+        ScenarioName.INITIALIZE: {"initialized_workspace": 1},
+        ScenarioName.PREPARE_INGESTION: {"prepared": 1},
+        ScenarioName.COMMIT: {"prepared": 1, "committed": 2, "cleaned": 0},
+        ScenarioName.RECOVER_PREPARED: {"prepared": 1},
+        ScenarioName.RECOVER_SWAPPING: {
+            "prepared": 1,
+            "interrupted": 2,
+            "committed": 3,
+            "cleaned": 0,
+        },
+    }
+
+    def scenario_evidence(scenario: ScenarioName, profile: str | None) -> ScenarioEvidence:
+        sample_count = (
+            5
+            if scenario
+            in {
+                ScenarioName.PREPARE_INGESTION,
+                ScenarioName.COMMIT,
+                ScenarioName.RECOVER_PREPARED,
+                ScenarioName.RECOVER_SWAPPING,
+            }
+            else 7
+        )
+        samples = tuple(range(100, 100 + sample_count))
+        return ScenarioEvidence(
+            scenario=scenario,
+            profile=profile,
+            target_ns=target_ns(scenario),
+            samples_ns=samples,
+            median_ns=samples[len(samples) // 2],
+            p95_ns=samples[-1],
+            output_sha256="e" * 64,
+            checkpoint_bytes=checkpoint_catalog.get(scenario, {}),
+            disposition=ScenarioDisposition.PASS,
+        )
+
+    base = evidence_record(os_name=os_name, python_version=python_version)
+    values = base.model_dump(mode="python")
+    values["profiles"] = tuple(PROFILES.values())
+    values["fixtures"] = tuple(
+        FixtureIdentity(
+            profile=profile.name,
+            document_count=profile.document_count,
+            exact_wiki_bytes=profile.target_wiki_bytes,
+            exact_workspace_bytes=profile.target_wiki_bytes + 1,
+            source_characters=profile.source_characters,
+            profile_sha256=profile_sha256(profile),
+            tree_sha256=(format(index + 10, "x") * 64)[:64],
+        )
+        for index, profile in enumerate(PROFILES.values(), start=1)
+    )
+    values["scenarios"] = (
+        scenario_evidence(ScenarioName.INITIALIZE, None),
+        *(
+            scenario_evidence(scenario, profile.name)
+            for profile in PROFILES.values()
+            for scenario in SCENARIOS
+        ),
+    )
+    return EvidenceRecord.model_validate(values)
+
+
+def test_report_parser_requires_one_explicit_publication_mode() -> None:
+    parser = benchmark_cli._parser()
+    base_arguments = ["report", "--evidence", "records", "--output", "report.md"]
+
+    provisional = parser.parse_args([*base_arguments, "--provisional"])
+    published = parser.parse_args([*base_arguments, "--published"])
+
+    assert provisional.provisional
+    assert not provisional.published
+    assert published.published
+    assert not published.provisional
+    with pytest.raises(SystemExit, match="2"):
+        parser.parse_args([*base_arguments, "--provisional", "--published"])
+
+
+def test_published_report_requires_matrix_before_reading_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_load(_path: Path) -> EvidenceRecord:
+        raise AssertionError(
+            "published reports must validate --require-matrix before reading evidence"
+        )
+
+    monkeypatch.setattr(benchmark_cli, "load_evidence", unexpected_load)
+
+    with pytest.raises(SystemExit, match="2"):
+        benchmark_cli.main(
+            [
+                "report",
+                "--evidence",
+                str(tmp_path),
+                "--output",
+                str(tmp_path / "report.md"),
+                "--published",
+            ]
+        )
+
+
+def test_published_report_writes_reviewed_evidence_from_a_qualifying_directory(
+    tmp_path: Path,
+) -> None:
+    evidence_directory = tmp_path / "records"
+    evidence_directory.mkdir()
+    for os_name in ("Darwin", "Linux"):
+        for minor in ("3.13", "3.14"):
+            write_evidence(
+                evidence_directory / f"{os_name}-{minor}.json",
+                _qualifying_matrix_record(os_name=os_name, python_version=f"{minor}.0"),
+            )
+    output = tmp_path / "report.md"
+
+    result = benchmark_cli.main(
+        [
+            "report",
+            "--evidence",
+            str(evidence_directory),
+            "--output",
+            str(output),
+            "--published",
+            "--require-matrix",
+        ]
+    )
+
+    assert result == 0
+    assert "Status: reviewed evidence" in output.read_text(encoding="utf-8")
 
 
 def test_correctness_only_runner_writes_one_sample_per_scenario(

@@ -313,9 +313,11 @@ log structure, raw-source identity, citation structure, source line ranges, and 
 Broken internal links and orphans are warnings. Deterministic errors set process status `1`; a
 clean run or warnings-only run exits `0`.
 
-The provisional [performance and capacity methodology](performance-and-capacity.md) describes the
-local workspace scenarios that are measured. Model-provider latency is not controlled by
-BundleWalker and is excluded from that methodology.
+The reviewed [performance and capacity evidence](performance-and-capacity.md) establishes a local
+workspace envelope of 1,000 knowledge documents, approximately 10 MiB of wiki content, and a
+50,000-character ingestion source on four named macOS/Linux reference environments. Model-provider
+latency is not controlled by BundleWalker and is excluded; the envelope is not a promise for every
+machine, filesystem, workspace, or provider.
 
 `--semantic` runs one additional read-only model-backed pass for contradictions, staleness,
 unsupported claims, missing concepts, and knowledge gaps. Semantic findings may use `ERROR`,
