@@ -672,11 +672,14 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
     ).read_text(encoding="utf-8")
 
     assert "successful workflow" not in plan.lower()
-    rerun = plan.index('gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"')
+    recovery_marker = plan.index("If only exact-version installation exhausts")
+    rerun_command = 'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"'
+    rerun = plan.index(rerun_command, recovery_marker)
+    assert recovery_marker < rerun
     independent_verification = plan.index(
         "- [ ] **Step 7: Independently verify production PyPI", rerun
     )
-    recovery_audit = plan[rerun:independent_verification]
+    recovery_audit = plan[rerun + len(rerun_command) : independent_verification]
     assert 'gh run watch "$RUN_ID"' in recovery_audit
     assert 'gh run watch "$RUN_ID" --exit-status' not in recovery_audit
     for assertion in (
