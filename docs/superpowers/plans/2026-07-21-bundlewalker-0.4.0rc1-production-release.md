@@ -102,6 +102,10 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
 
     verify = workflow["jobs"]["verify"]
     assert verify["needs"] == ["build", "publish"]
+    assert verify["if"] == (
+        "${{ always() && needs.build.result == 'success' && "
+        "(needs.publish.result == 'success' || needs.publish.result == 'failure') }}"
+    )
     assert verify["permissions"] == {"contents": "read"}
     verify_commands = _run_commands(workflow, "verify")
     assert "retry_delays=(5 10 20 40 80)" in verify_commands
@@ -133,6 +137,21 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
         )
     _assert_actions_are_sha_pinned(workflow)
 ```
+
+Also add focused structural tests that:
+
+- extract the exact release-lane regex from the identity step and accept `0.4.0rc1`, `0.4.0rc2`,
+  `0.4.0rc10`, and `0.4.0`, while rejecting `0.4.0rc0`, `0.4.1rc1`, `0.4.0a2`, and `1.0.0`;
+- extract the exact release-step prerelease branch and prove RCs are prereleases while final
+  `0.4.0` is not;
+- require the exact local and production-PyPI two-file counts, expected wheel and sdist names,
+  digest equality before the install retry, and artifact name/path in every downstream download;
+- require read-only verification after ordinary publish success or failure without
+  `continue-on-error`, rebuilding, or republishing;
+- require live remote annotated-tag and peeled-commit validation before build and before GitHub
+  release creation; and
+- prove only the exact production-index install loop owns the 5/10/20/40/80-second retry and the
+  production-PyPI JSON request has no retry flags.
 
 - [ ] **Step 2: Run the focused test and confirm the missing-workflow failure**
 
@@ -173,6 +192,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Validate current remote annotated tag
+        shell: bash
+        run: |
+          test "$GITHUB_REF_TYPE" = "tag"
+          tag="$GITHUB_REF_NAME"
+          remote_refs="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}" '$2 == ref { print $1 }')"
+          peeled_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}^{}" '$2 == ref { print $1 }')"
+          test -n "$tag_oid"
+          test -n "$peeled_oid"
+          test "$peeled_oid" = "$GITHUB_SHA"
       - name: Install uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
@@ -251,6 +281,7 @@ jobs:
   verify:
     name: Verify production PyPI installation and checksums
     needs: [build, publish]
+    if: ${{ always() && needs.build.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'failure') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -269,6 +300,26 @@ jobs:
         shell: bash
         run: |
           version="${{ needs.build.outputs.version }}"
+          curl --fail --silent --show-error --location "https://pypi.org/pypi/bundlewalker/${version}/json" --output "$RUNNER_TEMP/pypi.json"
+          uv run --no-project python - "$RUNNER_TEMP/pypi.json" "$version" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          version = sys.argv[2]
+          assert payload["info"]["version"] == version
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          remote = {item["filename"]: item["digests"]["sha256"] for item in payload["urls"]}
+          assert len(payload["urls"]) == 2
+          assert len(local) == 2
+          assert local == remote, {"local": local, "remote": remote}
+          PY
           uv venv --python "3.13" .pypi-venv
           uv pip install --python .pypi-venv/bin/python dist/*.whl
           .pypi-venv/bin/bundlewalker --help
@@ -290,24 +341,6 @@ jobs:
           test "$(.pypi-venv/bin/python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = "$version"
           .pypi-venv/bin/bundlewalker --help
           .pypi-venv/bin/bundlewalker-mcp --help
-          curl --fail --silent --show-error --location --retry 5 --retry-all-errors "https://pypi.org/pypi/bundlewalker/${version}/json" --output "$RUNNER_TEMP/pypi.json"
-          uv run --no-project python - "$RUNNER_TEMP/pypi.json" "$version" <<'PY'
-          import hashlib
-          import json
-          import sys
-          from pathlib import Path
-
-          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          version = sys.argv[2]
-          assert payload["info"]["version"] == version
-          local = {
-              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in Path("dist").iterdir()
-              if path.is_file()
-          }
-          remote = {item["filename"]: item["digests"]["sha256"] for item in payload["urls"]}
-          assert local == remote, {"local": local, "remote": remote}
-          PY
 
   github-release:
     name: Create GitHub release from exact distributions
@@ -320,6 +353,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Revalidate current remote annotated tag
+        shell: bash
+        run: |
+          test "$GITHUB_REF_TYPE" = "tag"
+          tag="$GITHUB_REF_NAME"
+          remote_refs="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}" '$2 == ref { print $1 }')"
+          peeled_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}^{}" '$2 == ref { print $1 }')"
+          test -n "$tag_oid"
+          test -n "$peeled_oid"
+          test "$peeled_oid" = "$GITHUB_SHA"
       - name: Download exact distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -483,7 +527,9 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
         "GitHub environment `pypi`",
         "pending trusted publisher",
         "v0.4.0rc1",
-        "never move or reuse",
+        "Never move, delete, or reuse",
+        "TestPyPI and production builds are separate",
+        "fresh artifacts from its reviewed tag",
         "rerun only",
     ):
         assert phrase in releases
@@ -593,6 +639,15 @@ Replace the comparison-link footer with:
 
 - [ ] **Step 7: Replace the future-production placeholder with the exact maintainer procedure**
 
+Replace the opening artifact paragraph with:
+
+```markdown
+TestPyPI and production builds are separate.
+Production builds fresh artifacts from its reviewed tag: one wheel and one source distribution.
+The publish, verification, and GitHub release jobs then reuse those exact production bytes without
+rebuilding them.
+```
+
 In `docs/maintainers/releases.md`, retain the TestPyPI section and replace
 `## Production PyPI and GitHub releases` through the paragraph before `## Failure and rollback`
 with:
@@ -618,18 +673,36 @@ pending trusted publisher while signed in as `hereh`:
 | Workflow | `publish-pypi.yml` |
 | Environment | `pypi` |
 
-For `0.4.0rc1`, merge the protected release pull request first. Confirm clean synchronized
-`master`, create annotated tag `v0.4.0rc1` at that exact merge commit, verify it, and push it once.
-Inspect the build evidence before approving the `pypi` deployment. The workflow then publishes,
-verifies a clean exact production installation with bounded propagation retry, compares PyPI
-digests, and creates GitHub prerelease `BundleWalker 0.4.0rc1`.
+For `0.4.0rc1`, merge the protected release pull request first, binding the merge to its recorded
+head commit. Immediately before tagging, fetch fresh `origin/master` and tags; require local
+`master`, fresh `origin/master`, and PR #12's actual merge OID to agree. Re-read the `pypi`
+environment reviewer and tag-only rule, re-open PyPI publishing settings to verify the exact
+pending-publisher tuple, and confirm production version `0.4.0rc1` is still unavailable. Only then
+create annotated tag `v0.4.0rc1` at that exact merge commit, verify it, and push it once. Inspect
+the build evidence before approving the `pypi` deployment. The workflow validates the current
+remote annotated tag before building and again before creating GitHub prerelease
+`BundleWalker 0.4.0rc1`.
 
-Never move or reuse a pushed tag or package version. If build or pre-upload validation fails after
-tag push, fix through review and advance to `0.4.0rc2`. If upload succeeds but propagation
-verification exhausts its bounded retry, confirm the immutable PyPI files and rerun only the
+Never move, delete, or reuse a pushed tag or package version. If build or pre-upload validation
+fails after tag push, fix through review and advance to `0.4.0rc2`. The read-only verification job
+runs after either ordinary success or ordinary failure of the upload action and treats production
+PyPI as authoritative:
+
+- If PyPI exposes neither file, verification fails; advance through review to `0.4.0rc2`.
+- If PyPI exposes one file or any filename or digest differs, treat the release as unsafe, yank
+  the partial version through PyPI, and advance through review to `0.4.0rc2`.
+- If PyPI exposes both exact filenames and digests, verification continues even when the upload
+  action reported failure. A successful exact-version install then permits the downstream GitHub
+  release job to attach the retained workflow artifacts without rebuilding or republishing.
+
+Only the exact production-index installation receives the bounded 5/10/20/40/80-second
+propagation retry. Metadata, checksum, artifact, and CLI failures remain immediate. If that
+installation alone exhausts its retry after both exact PyPI files were verified, rerun only the
 failed verification job and downstream release job. If only GitHub release creation fails, rerun
 only that downstream job; it reuses the retained workflow artifact and verifies any existing
-same-named asset byte-for-byte.
+same-named asset byte-for-byte. A fully cancelled workflow may not reach verification; inspect
+production PyPI manually before any further action and never restart build or publish for a
+version whose files may have been accepted.
 
 Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc1` certifies the
 production clean-install candidate, not final beta readiness. The next gate is a
@@ -642,6 +715,12 @@ In `## Version policy`, replace the TestPyPI-only candidate line with:
 ```markdown
 - Alpha versions are rehearsed on TestPyPI; release candidates are published to production PyPI
   only through the protected production workflow.
+```
+
+In `## Failure and rollback`, ensure the tag instruction says:
+
+```markdown
+publish an advisory, and issue a fixed version; never move, delete, or reuse its Git tag.
 ```
 
 - [ ] **Step 8: Run focused version and documentation verification**
@@ -824,7 +903,8 @@ PR_NUMBER="$(gh pr view --json number --jq .number)"
 PR_HEAD="$(gh pr view --json headRefOid --jq .headRefOid)"
 test "$PR_HEAD" = "$(git rev-parse HEAD)"
 gh pr checks "$PR_NUMBER"
-gh pr merge "$PR_NUMBER" --merge --subject "Release BundleWalker 0.4.0rc1 to production PyPI"
+gh pr merge "$PR_NUMBER" --merge --match-head-commit "$PR_HEAD" \
+  --subject "Release BundleWalker 0.4.0rc1 to production PyPI"
 ```
 
 Expected: GitHub merges the exact checked head into protected `master`; no tag exists yet.
@@ -943,18 +1023,42 @@ Expected: HTTP 404. The pending publisher is account configuration, not a packag
 Run in the clean synchronized primary checkout:
 
 ```bash
+git fetch origin master --tags
 test "$(git branch --show-current)" = master
 test -z "$(git status --porcelain)"
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
+PR_MERGE_OID="$(gh pr view 12 --json mergeCommit --jq '.mergeCommit.oid')"
+test -n "$PR_MERGE_OID"
+test "$(git rev-parse master)" = "$(git rev-parse origin/master)"
+test "$(git rev-parse master)" = "$PR_MERGE_OID"
 test "$(uv run python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = 0.4.0rc1
 test -z "$(git tag --list v0.4.0rc1)"
 git ls-remote --exit-code --tags origin refs/tags/v0.4.0rc1 && exit 1 || test "$?" -eq 2
-test "$(curl --silent --output /dev/null --write-out '%{http_code}' https://pypi.org/pypi/bundlewalker/0.4.0rc1/json)" = 404
-gh api repos/HendrikReh/BundleWalker/environments/pypi --jq '.protection_rules'
+ENVIRONMENT_JSON="$(gh api \
+  -H "X-GitHub-Api-Version: 2026-03-10" \
+  repos/HendrikReh/BundleWalker/environments/pypi)"
+test "$(printf '%s' "$ENVIRONMENT_JSON" | jq -r \
+  '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login] | sort | join(",")')" = HendrikReh
+test "$(printf '%s' "$ENVIRONMENT_JSON" | jq -r \
+  '.deployment_branch_policy.custom_branch_policies')" = true
+TAG_POLICIES="$(gh api \
+  -H "X-GitHub-Api-Version: 2026-03-10" \
+  repos/HendrikReh/BundleWalker/environments/pypi/deployment-branch-policies)"
+test "$(printf '%s' "$TAG_POLICIES" | jq -r \
+  '[.branch_policies[] | select(.type == "tag") | .name] | sort | join(",")')" = v0.4.0\*
+test "$(printf '%s' "$TAG_POLICIES" | jq -r '.branch_policies | length')" = 1
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  https://pypi.org/pypi/bundlewalker/json)" = 404
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  https://pypi.org/pypi/bundlewalker/0.4.0rc1/json)" = 404
 ```
 
-Expected: all identity and absence checks pass. This is the last point where release cancellation
-does not consume a version or tag.
+Re-open [PyPI publishing settings](https://pypi.org/manage/account/publishing/) while signed in as
+`hereh` and require the pending publisher to still show the exact tuple
+`bundlewalker/HendrikReh/BundleWalker/publish-pypi.yml/pypi`. Do not create the tag unless the
+reviewer, sole tag rule, publisher tuple, project absence, and version absence all remain exact.
+
+Expected: the fetched branch identity, actual PR merge OID, protection, publisher, and absence
+checks pass. This is the last point where release cancellation does not consume a version or tag.
 
 - [ ] **Step 2: Create and verify the annotated tag locally**
 
@@ -1002,7 +1106,7 @@ gh run view "$RUN_ID" --log --job "$(gh run view "$RUN_ID" --json jobs --jq '.jo
 
 Expected: the build job passes exact identity, test, audit, artifact-count, Twine, clean-wheel, and
 checksum gates; the publish job waits for environment approval. If build fails, do not approve or
-move the tag; prepare `0.4.0rc2` through a new pull request.
+publish. Never move, delete, or reuse the tag; prepare `0.4.0rc2` through a new pull request.
 
 - [ ] **Step 5: Approve only the displayed `pypi` deployment for v0.4.0rc1**
 
@@ -1027,13 +1131,19 @@ gh run watch "$RUN_ID" --exit-status
 gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs
 ```
 
-Expected: build, publish, production verification, and GitHub release jobs all conclude
-`success`; `headBranch` is `v0.4.0rc1` and `headSha` is the reviewed release commit.
+Expected: build, production verification, and GitHub release jobs conclude `success`. The publish
+job ordinarily succeeds, but may conclude `failure` when PyPI nevertheless accepted both exact
+files; in that case successful authoritative verification and GitHub release completion establish
+the safe outcome. `headBranch` is `v0.4.0rc1` and `headSha` is the reviewed release commit.
 
-If publish succeeds but verification fails only because propagation exceeded the bounded window,
-confirm the PyPI files and use GitHub's **Re-run failed jobs** so build/publish are not rerun. If
-the GitHub release job alone fails, rerun that failed job only. Any checksum or behavior mismatch
-stops the release and advances the fix to `0.4.0rc2`.
+After ordinary publish success or failure, verification reads production PyPI as the authority. If
+neither file exists, advance to `0.4.0rc2`. If one file exists or a filename or digest mismatches,
+yank the unsafe partial release through PyPI and advance to `0.4.0rc2`. If both exact files and
+digests exist, verification can succeed and the GitHub release job can use the retained artifact
+even when the upload action reported failure. If only exact-version installation exhausts the
+bounded propagation window, use GitHub's **Re-run failed jobs** so build/publish are not rerun. If
+the GitHub release job alone fails, rerun that failed job only. A fully cancelled workflow requires
+manual production-PyPI inspection before any further action.
 
 - [ ] **Step 7: Independently verify production PyPI and clean installation**
 

@@ -46,7 +46,7 @@ by itself, remove BundleWalker's proof-of-concept status.
   ingestion formats, or another application feature.
 - Do not replace the current GPL-3.0-or-later/CC0-1.0 license split or rewrite historical release
   artifacts.
-- Do not delete, move, replace, or reuse any existing tag, release, or package version.
+- Never move, delete, or reuse any existing tag, release, or package version.
 - Do not promote files downloaded from TestPyPI. The TestPyPI alphas already exercised the
   packaging and OIDC path; production `0.4.0rc1` is built from its own reviewed tag.
 - Do not store a PyPI password or API token in GitHub secrets.
@@ -97,10 +97,13 @@ OIDC operation, repository-owned validation must prove all of the following:
 - the version is valid PEP 440 metadata;
 - the version belongs to the beta lane: `0.4.0rcN`, where `N` is a positive integer, or final
   `0.4.0`; and
-- installed distribution metadata produced from the checked-out tag equals the declared version.
+- installed distribution metadata produced from the checked-out tag equals the declared version;
+  and
+- the current `origin` tag has both an annotated-tag ref and a peeled ref whose commit equals the
+  workflow event commit.
 
-`0.4.0rc1` and `v0.4.0rc1` are single-use identifiers. Once the tag is pushed, it is never moved,
-deleted, or reused, even if failure occurs before PyPI accepts an upload. A repository or workflow
+`0.4.0rc1` and `v0.4.0rc1` are single-use identifiers. Once the tag is pushed, never move, delete,
+or reuse it, even if failure occurs before PyPI accepts an upload. A repository or workflow
 fix after tag creation advances to `0.4.0rc2` and `v0.4.0rc2`. If PyPI accepts any file, the version
 is also permanently consumed.
 
@@ -138,19 +141,21 @@ The dependency order is:
 The `build` job runs on Ubuntu 24.04 with Python 3.13 and read-only repository contents. It checks
 out the exact tagged commit and performs these gates before producing release files:
 
-1. validate the ref, declared version, beta-lane version, tag/version equality, and installed
+1. query `origin` for both the current tag ref and its peeled ref, rejecting missing, lightweight,
+   deleted, or moved tags and requiring the peeled commit to equal `GITHUB_SHA`;
+2. validate the ref, declared version, beta-lane version, tag/version equality, and installed
    metadata;
-2. synchronize the frozen environment and verify the lockfile;
-3. run the full offline non-evaluation test suite;
-4. run Ruff formatting and lint checks;
-5. run Pyright;
-6. export and audit locked third-party dependencies with `pip-audit`;
-7. build with `uv build --clear --no-sources`;
-8. require exactly one `bundlewalker-*.whl` and one `bundlewalker-*.tar.gz` for the exact version;
-9. validate both files with Twine;
-10. install the built wheel into a clean environment and smoke-test `bundlewalker --help` and
+3. synchronize the frozen environment and verify the lockfile;
+4. run the full offline non-evaluation test suite;
+5. run Ruff formatting and lint checks;
+6. run Pyright;
+7. export and audit locked third-party dependencies with `pip-audit`;
+8. build with `uv build --clear --no-sources`;
+9. require exactly one `bundlewalker-*.whl` and one `bundlewalker-*.tar.gz` for the exact version;
+10. validate both files with Twine;
+11. install the built wheel into a clean environment and smoke-test `bundlewalker --help` and
     `bundlewalker-mcp --help`; and
-11. calculate and log SHA-256 digests for both files.
+12. calculate and log SHA-256 digests for both files.
 
 Only after all gates pass does the job upload the two-file `dist/` directory as the workflow
 artifact `python-package-distributions`. Later jobs download this artifact; they never invoke a
@@ -168,20 +173,20 @@ default endpoint. It supplies no password, API token, or TestPyPI repository URL
 
 ### Verify job
 
-The `verify` job runs only after PyPI upload succeeds. It has read-only permissions and downloads
-the exact build artifact. It then:
+The `verify` job runs after either ordinary success or ordinary failure of the upload action,
+provided the build succeeded. It has read-only permissions, no OIDC or repository-write
+permission, and downloads the exact build artifact. It then:
 
-1. creates a clean Python 3.13 virtual environment;
-2. installs the workflow-built wheel with dependencies and confirms both command entry points;
-3. uninstalls BundleWalker while retaining those resolved dependencies;
-4. installs exact version `bundlewalker==${project_version}` from production PyPI with
+1. queries the official production-PyPI JSON API for the exact version without retrying metadata;
+2. requires exactly the expected wheel and source archive filenames and SHA-256 digests;
+3. creates a clean Python 3.13 virtual environment;
+4. installs the workflow-built wheel with dependencies and confirms both command entry points;
+5. uninstalls BundleWalker while retaining those resolved dependencies;
+6. installs exact version `bundlewalker==${project_version}` from production PyPI with
    `--no-deps`;
-5. retries only this exact production-index installation for a bounded propagation window;
-6. confirms installed distribution metadata equals the tag-derived version;
-7. smoke-tests `bundlewalker --help` and `bundlewalker-mcp --help` from the production install;
-8. queries the official production-PyPI JSON API for the exact version; and
-9. proves the wheel and source archive filenames and SHA-256 digests in PyPI metadata match the
-   downloaded workflow artifacts.
+7. retries only this exact production-index installation for a bounded propagation window;
+8. confirms installed distribution metadata equals the tag-derived version; and
+9. smoke-tests `bundlewalker --help` and `bundlewalker-mcp --help` from the production install.
 
 The bounded index retry uses at most six attempts with waits of 5, 10, 20, 40, and 80 seconds,
 matching the proven TestPyPI propagation policy. Only production-index resolution is retryable.
@@ -190,9 +195,10 @@ Artifact installation, metadata, checksum, and command failures remain immediate
 ### GitHub release job
 
 The `github-release` job runs only after production verification passes. It alone receives
-`contents: write`. It downloads `python-package-distributions`, verifies that the tag still names
-the workflow commit, and creates a GitHub release titled `BundleWalker 0.4.0rc1` for the existing
-tag.
+`contents: write`. Before using that permission, it queries `origin` again for the current tag and
+peeled ref, rejecting a lightweight, deleted, or moved tag and requiring the peeled commit to equal
+`GITHUB_SHA`. It downloads `python-package-distributions` and creates a GitHub release titled
+`BundleWalker 0.4.0rc1` for the existing tag.
 
 For `0.4.0rcN`, the release is marked as a prerelease. When the same workflow later handles exact
 version `0.4.0`, it creates a non-prerelease release. Release notes come from the corresponding
@@ -242,18 +248,24 @@ secrets.
 
 The external release transaction is deliberately ordered:
 
-1. merge the protected release-preparation pull request into `master` after required checks pass;
-2. confirm local `master`, `origin/master`, and the PR merge commit agree and the tree is clean;
-3. create and verify the protected GitHub `pypi` environment;
-4. register and verify the production-PyPI pending trusted publisher;
-5. create annotated tag `v0.4.0rc1` at the exact reviewed merge commit;
-6. verify the tag locally before pushing it;
-7. push the tag once, starting the production workflow;
-8. inspect the build evidence and explicitly approve the `pypi` environment deployment;
-9. wait for publish, production verification, and GitHub prerelease creation to pass;
-10. independently inspect production-PyPI JSON, the project page, the remote tag, workflow run,
+1. merge the protected release-preparation pull request into `master` after required checks pass,
+   binding the merge to the recorded reviewed PR head;
+2. create and verify the protected GitHub `pypi` environment;
+3. register and verify the production-PyPI pending trusted publisher;
+4. immediately before tagging, fetch fresh `origin/master` and tags, read the actual PR merge OID
+   from GitHub, and require it, local `master`, and fresh `origin/master` to agree while the tree is
+   clean;
+5. re-read the environment reviewer and tag-only rule, re-open the PyPI publishing settings to
+   verify the exact pending-publisher tuple, and confirm the production project/version remains
+   unavailable;
+6. create annotated tag `v0.4.0rc1` at the exact reviewed merge commit;
+7. verify the tag locally before pushing it;
+8. push the tag once, starting the production workflow;
+9. inspect the build evidence and explicitly approve the `pypi` environment deployment;
+10. wait for publish, production verification, and GitHub prerelease creation to pass;
+11. independently inspect production-PyPI JSON, the project page, the remote tag, workflow run,
     GitHub prerelease, attached assets, and checksums; and
-11. perform one final clean install of exact `bundlewalker==0.4.0rc1` and run both CLI help smokes.
+12. perform one final clean install of exact `bundlewalker==0.4.0rc1` and run both CLI help smokes.
 
 The production environment approval is the final human authorization before an irreversible PyPI
 upload. Approval applies to the displayed tag and build evidence, not to a mutable branch head.
@@ -263,21 +275,29 @@ upload. Approval applies to the displayed tag and build evidence, not to a mutab
 Failures before the tag is created are ordinary reviewed repository fixes; `0.4.0rc1` remains
 available if no immutable release identity exists.
 
-Once `v0.4.0rc1` is pushed, never move or reuse it. A build or pre-upload failure requires a
+Once `v0.4.0rc1` is pushed, never move, delete, or reuse it. A build or pre-upload failure requires a
 reviewed fix and new version/tag `0.4.0rc2`/`v0.4.0rc2` rather than mutating the first tag.
 
-Once PyPI accepts the upload:
+After either ordinary success or ordinary failure of the upload action, read-only verification uses
+production PyPI as the authority:
 
-- never rerun build or publish for `0.4.0rc1`;
-- if production index propagation exhausts the bounded window, confirm the files exist and rerun
-  only the failed verification job and its downstream release job;
-- if checksum or package behavior verification fails, treat the release as unsafe, diagnose it,
-  and advance to a corrected release candidate;
+- if no remote files exist, verification fails and the release advances to `0.4.0rc2`;
+- if one remote file exists or any filename or digest mismatches, verification fails, the unsafe
+  partial release is yanked through PyPI, and the release advances to `0.4.0rc2`;
+- if both exact filenames and digests exist, verification continues even if the upload action
+  reported failure, allowing the downstream GitHub release to attach the retained artifacts
+  without rebuilding or republishing;
+- if only production-index installation exhausts the bounded propagation window after exact
+  metadata succeeds, rerun only the failed verification job and downstream release job;
 - if only GitHub release creation or attachment fails, rerun only that downstream job using the
   retained exact workflow artifact; and
 - if an unsafe production version is discovered later, use PyPI's supported yank mechanism,
-  publish an advisory, and issue a new version. Do not delete the historical GitHub release or
-  move its tag.
+  publish an advisory, and issue a new version. Preserve the historical GitHub release and never
+  move, delete, or reuse its tag.
+
+A fully cancelled workflow may not execute verification. Maintainers must inspect production PyPI
+manually before any further action and must never restart build or publish for a version whose files
+may already have been accepted.
 
 Workflow artifact retention must be long enough to support downstream recovery. Maintainers also
 record the two distribution SHA-256 digests in the successful run and GitHub release evidence.
@@ -301,15 +321,17 @@ Focused automation tests will parse the production workflow and enforce its cont
 
 - tag-only trigger and exact tag/version validation;
 - accepted beta-lane versions and rejection of unrelated tags;
+- current remote annotated-tag and peeled-commit validation before build and GitHub release;
 - frozen setup, offline tests, lint, type, lock, audit, build, Twine, artifact-count, and clean-wheel
   smoke gates;
 - one artifact passed through build, publish, verify, and GitHub release jobs;
 - `pypi` environment use and production trusted publishing without a token or TestPyPI endpoint;
 - least-privilege job permissions;
 - bounded production-index propagation retry;
+- ordinary upload-action failure flowing to read-only PyPI verification;
 - exact installed-version, filename, and checksum verification;
 - GitHub prerelease behavior for release candidates and final-release behavior for `0.4.0`;
-- no `continue-on-error` on a production release job; and
+- no `continue-on-error` on a production release job, no JSON metadata retry; and
 - no second build or publication command in downstream jobs.
 
 Before the pull request is proposed, run the full non-evaluation suite, Ruff formatting and lint,

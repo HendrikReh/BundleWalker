@@ -22,6 +22,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Validate current remote annotated tag
+        shell: bash
+        run: |
+          test "$GITHUB_REF_TYPE" = "tag"
+          tag="$GITHUB_REF_NAME"
+          remote_refs="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}" '$2 == ref { print $1 }')"
+          peeled_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}^{}" '$2 == ref { print $1 }')"
+          test -n "$tag_oid"
+          test -n "$peeled_oid"
+          test "$peeled_oid" = "$GITHUB_SHA"
       - name: Install uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
@@ -100,6 +111,7 @@ jobs:
   verify:
     name: Verify production PyPI installation and checksums
     needs: [build, publish]
+    if: ${{ always() && needs.build.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'failure') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -118,6 +130,26 @@ jobs:
         shell: bash
         run: |
           version="${{ needs.build.outputs.version }}"
+          curl --fail --silent --show-error --location "https://pypi.org/pypi/bundlewalker/${version}/json" --output "$RUNNER_TEMP/pypi.json"
+          uv run --no-project python - "$RUNNER_TEMP/pypi.json" "$version" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          version = sys.argv[2]
+          assert payload["info"]["version"] == version
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file()
+          }
+          remote = {item["filename"]: item["digests"]["sha256"] for item in payload["urls"]}
+          assert len(payload["urls"]) == 2
+          assert len(local) == 2
+          assert local == remote, {"local": local, "remote": remote}
+          PY
           uv venv --python "3.13" .pypi-venv
           uv pip install --python .pypi-venv/bin/python dist/*.whl
           .pypi-venv/bin/bundlewalker --help
@@ -139,24 +171,6 @@ jobs:
           test "$(.pypi-venv/bin/python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = "$version"
           .pypi-venv/bin/bundlewalker --help
           .pypi-venv/bin/bundlewalker-mcp --help
-          curl --fail --silent --show-error --location --retry 5 --retry-all-errors "https://pypi.org/pypi/bundlewalker/${version}/json" --output "$RUNNER_TEMP/pypi.json"
-          uv run --no-project python - "$RUNNER_TEMP/pypi.json" "$version" <<'PY'
-          import hashlib
-          import json
-          import sys
-          from pathlib import Path
-
-          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          version = sys.argv[2]
-          assert payload["info"]["version"] == version
-          local = {
-              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in Path("dist").iterdir()
-              if path.is_file()
-          }
-          remote = {item["filename"]: item["digests"]["sha256"] for item in payload["urls"]}
-          assert local == remote, {"local": local, "remote": remote}
-          PY
 
   github-release:
     name: Create GitHub release from exact distributions
@@ -169,6 +183,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Revalidate current remote annotated tag
+        shell: bash
+        run: |
+          test "$GITHUB_REF_TYPE" = "tag"
+          tag="$GITHUB_REF_NAME"
+          remote_refs="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}" '$2 == ref { print $1 }')"
+          peeled_oid="$(printf '%s\n' "$remote_refs" | awk -v ref="refs/tags/${tag}^{}" '$2 == ref { print $1 }')"
+          test -n "$tag_oid"
+          test -n "$peeled_oid"
+          test "$peeled_oid" = "$GITHUB_SHA"
       - name: Download exact distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +28,10 @@ def _steps(workflow: dict[str, Any], job: str) -> list[dict[str, Any]]:
 
 def _run_commands(workflow: dict[str, Any], job: str) -> str:
     return "\n".join(step.get("run", "") for step in _steps(workflow, job))
+
+
+def _step(workflow: dict[str, Any], job: str, name: str) -> dict[str, Any]:
+    return next(step for step in _steps(workflow, job) if step["name"] == name)
 
 
 def _step_command_sequence(workflow: dict[str, Any], job: str) -> list[tuple[str, str]]:
@@ -447,3 +452,123 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
             for step in _steps(workflow, job_name)
         )
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_pypi_workflow_uses_its_release_lane_and_prerelease_branches() -> None:
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    identity_script = _step(workflow, "build", "Validate release identity")["run"]
+    pattern_match = re.search(
+        r'assert re\.fullmatch\(r"(?P<pattern>[^"]+)", value\)', identity_script
+    )
+    assert pattern_match is not None
+    version_pattern = pattern_match.group("pattern")
+
+    for version in ("0.4.0rc1", "0.4.0rc2", "0.4.0rc10", "0.4.0"):
+        assert re.fullmatch(version_pattern, version), version
+    for version in ("0.4.0rc0", "0.4.1rc1", "0.4.0a2", "1.0.0"):
+        assert re.fullmatch(version_pattern, version) is None, version
+
+    release_script = _step(workflow, "github-release", "Create or complete the GitHub release")[
+        "run"
+    ]
+    prerelease_match = re.search(
+        r'expected_prerelease=false\s+case "\$version" in\s+'
+        r"(?P<pattern>\S+)\) expected_prerelease=true ;;\s+esac",
+        release_script,
+    )
+    assert prerelease_match is not None
+    prerelease_pattern = prerelease_match.group("pattern")
+    for version in ("0.4.0rc1", "0.4.0rc2", "0.4.0rc10"):
+        assert fnmatchcase(version, prerelease_pattern), version
+    assert not fnmatchcase("0.4.0", prerelease_pattern)
+
+
+def test_pypi_workflow_requires_exact_artifacts_in_every_downstream_job() -> None:
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    artifact_script = _step(workflow, "build", "Validate exact artifacts and metadata")["run"]
+    assert 'test "${#artifacts[@]}" -eq 2' in artifact_script
+    assert (
+        'test -f "dist/bundlewalker-${{ steps.identity.outputs.version }}-py3-none-any.whl"'
+        in artifact_script
+    )
+    assert (
+        'test -f "dist/bundlewalker-${{ steps.identity.outputs.version }}.tar.gz"'
+        in artifact_script
+    )
+    verify_script = _step(workflow, "verify", "Install and smoke-test published release")["run"]
+    assert 'assert len(payload["urls"]) == 2' in verify_script
+    assert "assert len(local) == 2" in verify_script
+    assert 'assert local == remote, {"local": local, "remote": remote}' in verify_script
+    assert verify_script.index("payload = json.loads(Path(sys.argv[1])") < verify_script.index(
+        "retry_delays=(5 10 20 40 80)"
+    )
+
+    for job_name in ("publish", "verify", "github-release"):
+        downloads = [
+            step
+            for step in _steps(workflow, job_name)
+            if step.get("uses", "").startswith("actions/download-artifact@")
+        ]
+        assert downloads
+        assert all(
+            step.get("with") == {"name": "python-package-distributions", "path": "dist/"}
+            for step in downloads
+        )
+
+
+def test_pypi_verification_runs_after_ordinary_publish_failure_read_only() -> None:
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    verify = workflow["jobs"]["verify"]
+    assert verify["needs"] == ["build", "publish"]
+    assert verify["if"] == (
+        "${{ always() && needs.build.result == 'success' && "
+        "(needs.publish.result == 'success' || needs.publish.result == 'failure') }}"
+    )
+    assert verify["permissions"] == {"contents": "read"}
+    assert "id-token" not in verify["permissions"]
+    verify_commands = _run_commands(workflow, "verify")
+    assert "uv build" not in verify_commands
+    assert "gh-action-pypi-publish" not in str(_steps(workflow, "verify"))
+    assert "continue-on-error" not in str(verify)
+
+
+def test_pypi_workflow_validates_current_remote_annotated_tag_twice() -> None:
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    expected_remote_query = (
+        'git ls-remote --exit-code --tags origin "refs/tags/${tag}" "refs/tags/${tag}^{}"'
+    )
+
+    for job_name, step_name in (
+        ("build", "Validate current remote annotated tag"),
+        ("github-release", "Revalidate current remote annotated tag"),
+    ):
+        steps = _steps(workflow, job_name)
+        assert steps[1]["name"] == step_name
+        script = steps[1]["run"]
+        assert expected_remote_query in script
+        assert 'refs/tags/${tag}"' in script
+        assert 'refs/tags/${tag}^{}"' in script
+        assert 'test -n "$tag_oid"' in script
+        assert 'test -n "$peeled_oid"' in script
+        assert 'test "$peeled_oid" = "$GITHUB_SHA"' in script
+
+
+def test_pypi_verification_retries_only_exact_index_installation() -> None:
+    path = PROJECT_ROOT / ".github/workflows/publish-pypi.yml"
+    workflow_text = path.read_text(encoding="utf-8")
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    verify_script = _step(workflow, "verify", "Install and smoke-test published release")["run"]
+
+    assert workflow_text.count("retry_delays=(5 10 20 40 80)") == 1
+    assert workflow_text.count("for attempt in 1 2 3 4 5 6; do") == 1
+    assert (
+        "if uv pip install --python .pypi-venv/bin/python --no-deps "
+        '--default-index https://pypi.org/simple "bundlewalker==${version}"; then' in verify_script
+    )
+    json_command = next(
+        line.strip()
+        for line in verify_script.splitlines()
+        if "https://pypi.org/pypi/bundlewalker/${version}/json" in line
+    )
+    assert "--retry" not in json_command
+    assert "--retry-all-errors" not in json_command
