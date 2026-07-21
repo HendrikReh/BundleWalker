@@ -4,8 +4,13 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+## [v0.4.0rc1] - 2026-07-21
+
 ### Added
 
+- Added a tag-gated, human-approved, OIDC-only production-PyPI workflow that builds once,
+  verifies exact production filenames and SHA-256 digests, and creates the GitHub prerelease from
+  the same artifacts.
 - Published reviewed four-environment benchmark evidence and the conservative Medium envelope:
   1,000 knowledge documents, approximately 10 MiB of wiki content, and a 50,000-character
   ingestion source. The evidence excludes remote-model latency and remains limited to its named
@@ -96,8 +101,9 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
-[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...HEAD
-[v3]: https://github.com/HendrikReh/BundleWalker/compare/v2...v3
+[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...HEAD
+[v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1
 [v0.4.0a2]: https://github.com/HendrikReh/BundleWalker/compare/v3...v0.4.0a2
+[v3]: https://github.com/HendrikReh/BundleWalker/compare/v2...v3
 [v2]: https://github.com/HendrikReh/BundleWalker/compare/v1...v2
 [v1]: https://github.com/HendrikReh/BundleWalker/tree/v1

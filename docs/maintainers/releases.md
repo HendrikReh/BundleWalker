@@ -1,7 +1,9 @@
 # BundleWalker Release Procedure
 
-BundleWalker builds one wheel and one source distribution for each publication. The same verified
-artifacts are promoted; they are never rebuilt between indexes or release attachments.
+TestPyPI and production builds are separate.
+Production builds fresh artifacts from its reviewed tag: one wheel and one source distribution.
+The publish, verification, and GitHub release jobs then reuse those exact production bytes without
+rebuilding them.
 
 ## Version policy
 
@@ -9,7 +11,8 @@ artifacts are promoted; they are never rebuilt between indexes or release attach
 - `bundlewalker.__version__` reads installed distribution metadata.
 - Historical `v1`, `v2`, and `v3` tags remain unchanged.
 - New tags match package versions, for example `v0.4.0` and `v0.4.1`.
-- Alpha or release-candidate versions may be published to TestPyPI.
+- Alpha versions are rehearsed on TestPyPI; release candidates are published to production PyPI
+  only through the protected production workflow.
 - Production `0.4.0` is forbidden until every public-beta exit gate passes.
 
 ## Local release verification
@@ -81,16 +84,73 @@ only the failed verification job; do not dispatch a new build or publication for
 
 ## Production PyPI and GitHub releases
 
-Production publication is a later milestone. Before enabling it, add a separate `pypi` environment
-with required human approval, configure its trusted publisher, require a package-aligned tag, and
-attach the exact workflow-built wheel and source archive to the GitHub release.
+Production publishing uses `publish-pypi.yml`, GitHub environment `pypi`, and a matching PyPI
+trusted publisher. The workflow starts only from a pushed `v*` tag, validates that the tag is
+exactly `v${project.version}`, and accepts only `0.4.0rcN` or final `0.4.0`. It builds one wheel and
+one source archive, publishes those exact files, verifies production filenames and SHA-256
+digests, and attaches the same files to the GitHub release.
 
-Never delete or replace historical releases to correct a later license, documentation, or
-compatibility decision. Publish a new version and document the difference.
+Before the first production upload, configure GitHub environment `pypi` with exactly one
+required-reviewers rule naming only GitHub user `HendrikReh`, self-review permitted, no wait timer
+or custom protection rule, custom deployment policies enabled, and protected-branch policy
+disabled. The only other protection-rule type must be the branch-policy rule, and the separate
+policy endpoint must contain exactly one tag rule `v0.4.0*` and no branch rule. Register the PyPI
+pending trusted publisher while signed in as `hereh`:
+
+| Field | Value |
+| --- | --- |
+| PyPI project | `bundlewalker` |
+| GitHub owner | `HendrikReh` |
+| GitHub repository | `BundleWalker` |
+| Workflow | `publish-pypi.yml` |
+| Environment | `pypi` |
+
+For `0.4.0rc1`, merge the protected release pull request first, binding the merge to its recorded
+head commit. Immediately before tagging, fetch fresh `origin/master` and tags; require local
+`master`, fresh `origin/master`, and PR #12's actual merge OID to agree. Re-read the `pypi`
+environment reviewer and tag-only rule, re-open PyPI publishing settings to verify the exact
+pending-publisher tuple, and confirm production version `0.4.0rc1` is still unavailable. Only then
+create annotated tag `v0.4.0rc1` at that exact merge commit, verify it, and push it once. Inspect
+the build evidence before approving the `pypi` deployment. The workflow validates the current
+remote annotated tag before building and again before creating GitHub prerelease
+`BundleWalker 0.4.0rc1`.
+
+Never move, delete, or reuse a pushed tag or package version. If build or pre-upload validation
+fails after tag push, fix through review and advance to `0.4.0rc2`. The read-only verification job
+runs after either ordinary success or ordinary failure of the upload action and treats production
+PyPI as authoritative:
+
+- If PyPI exposes neither file, verification fails; advance through review to `0.4.0rc2`.
+- If PyPI exposes one file or any filename or digest differs, treat the release as unsafe, yank
+  the partial version through PyPI, and advance through review to `0.4.0rc2`.
+- If PyPI exposes both exact filenames and digests, verification continues even when the upload
+  action reported failure. A successful exact-version install then permits the downstream GitHub
+  release job to attach the retained workflow artifacts without rebuilding or republishing.
+
+Only the exact production-index installation receives the bounded 5/10/20/40/80-second
+propagation retry. Metadata, checksum, artifact, and CLI failures remain immediate. If that
+installation alone exhausts its retry, download the original run artifact and prove production
+JSON has the complete exact filename/digest set. Obtain the original verification job database ID,
+then run `gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"`; this reruns verification and its
+dependent release job without rerunning upload. Never rerun a failed publish job. If only GitHub
+release creation fails, target only that original job; it reuses the retained workflow artifact and
+verifies any existing same-named asset byte-for-byte. A fully cancelled workflow may not reach
+verification; inspect production PyPI manually before any further action and never restart build
+or publish for a version whose files may have been accepted.
+
+Completion requires successful build, authoritative verification, and GitHub release jobs.
+Publish normally succeeds; a failed publish is safe only when the same run's exact-set verification
+and GitHub release both succeed. Keep that failed job visible and record a recovered publication
+warning in the completion report.
+
+Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc1` certifies the
+production clean-install candidate, not final beta readiness. The next gate is a
+production-installed workspace lifecycle rehearsal covering inspection, backup, separate-target
+restore, upgrade behavior, rollback, and post-operation verification.
 
 ## Failure and rollback
 
 Do not retry by rebuilding the same version. Diagnose the failed job, fix the repository, increment
 the prerelease or patch version, and run the complete verification again. If a production release
 is later found unsafe, stop new installations through the package index's supported yank mechanism,
-publish an advisory, and issue a fixed version; do not move or reuse its Git tag.
+publish an advisory, and issue a fixed version; never move, delete, or reuse its Git tag.
