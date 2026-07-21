@@ -260,6 +260,9 @@ BundleWalker performed no Git operation during this journey.
 - Configure another client through the
   [local MCP host section](user-guide.md#use-bundlewalker-through-a-local-mcp-host).
 - Follow the [Hermes MCP setup guide](hermes-mcp-setup.md) for a Hermes-specific connection.
+- Follow the [VS Code/Copilot MCP setup guide](vscode-copilot-mcp-setup.md) for a workspace-scoped
+  VS Code connection, and check the [MCP host compatibility record](mcp-compatibility.md) for the
+  exact tested versions and capability evidence.
 - Read the [workspace compatibility policy](workspace-compatibility.md) before moving, upgrading,
   or publishing a workspace.
 - Consult the [reviewed performance and capacity evidence](performance-and-capacity.md) before

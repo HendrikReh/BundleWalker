@@ -13,6 +13,9 @@ including review, recovery, lifecycle management, and troubleshooting.
 - **MCP-host users:** start with the [host-neutral local MCP guide](#use-bundlewalker-through-a-local-mcp-host).
 - **Hermes users:** use the separate [Hermes MCP setup guide](hermes-mcp-setup.md) for
   Hermes-specific registration and configuration.
+- **VS Code/Copilot users:** use the separate
+  [VS Code/Copilot MCP setup guide](vscode-copilot-mcp-setup.md) and check the
+  [MCP host compatibility record](mcp-compatibility.md).
 - **Maintainers:** use the [release procedure](maintainers/releases.md) for TestPyPI, production
   PyPI, versioning, and immutable release recovery.
 
@@ -606,6 +609,12 @@ If your MCP host is Hermes Agent, follow the dedicated
 [Hermes MCP setup guide](hermes-mcp-setup.md) for registration, tool filtering, provider-variable
 forwarding, reload, and Hermes-specific troubleshooting.
 
+If your MCP host is Visual Studio Code with GitHub Copilot, follow the dedicated
+[VS Code/Copilot MCP setup guide](vscode-copilot-mcp-setup.md) for `.vscode/mcp.json`, secret
+inputs, tool selection, approval prompts, resources, logs, restart, and removal. The
+[MCP host compatibility record](mcp-compatibility.md) identifies the exact certified versions,
+operations observed through the host, platform coverage, and provider-dependent gaps.
+
 ```text
 uv run --project PROJECT_ROOT bundlewalker-mcp --workspace WORKSPACE
 ```
@@ -901,6 +910,9 @@ BundleWalker never commits or pushes for you. Review durable files—especially 
   refreshed Synthesis, final health checks, backup, and restore.
 - The [Hermes MCP Setup Guide](hermes-mcp-setup.md) contains Hermes-specific registration, tool
   filtering, environment forwarding, verification, troubleshooting, and removal.
+- The [VS Code/Copilot MCP Setup Guide](vscode-copilot-mcp-setup.md) contains workspace-scoped
+  configuration, secret inputs, tool selection, approvals, resources, diagnostics, and removal;
+  the [MCP Host Compatibility Record](mcp-compatibility.md) publishes the exact observed evidence.
 - The [Workspace Compatibility Policy](workspace-compatibility.md) defines lifecycle and
   portability behavior.
 - [Performance and Capacity](performance-and-capacity.md) publishes reviewed measurements,
