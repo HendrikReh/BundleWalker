@@ -18,6 +18,8 @@ import pytest
 from markdown_it import MarkdownIt
 
 import bundlewalker
+from benchmarks.evidence import load_evidence
+from benchmarks.report import render_report
 from bundlewalker.application import (
     DiagnosticsApplication,
     DiagnosticsDependencies,
@@ -25,6 +27,22 @@ from bundlewalker.application import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+EVIDENCE_ROOT = PROJECT_ROOT / "benchmarks/evidence"
+
+REVIEWED_EVIDENCE_SHA256 = {
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.13-29789436063.json": (
+        "cb22e213cbd7af4ac7203d055cab95b1207d5d232a2daf8fe2bf60f677d2d645"
+    ),
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-Linux-py3.14-29789436063.json": (
+        "6abfd90b0fba6b2f7fcbcffd6aa6e7ef91a485262bceac5cab6e49f815c8311e"
+    ),
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.13-29789436063.json": (
+        "624a81b85f69b41bec7680c3b69b1ec45e6f8b91c9f0303ec0ed36d953ff4b84"
+    ),
+    "suite-1-dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c-macOS-py3.14-29789436063.json": (
+        "5edc699e5fd4fd2becf6d52d24bd471d93e9b287f585a194742664df1fbe6689"
+    ),
+}
 
 LICENSE_EXPRESSION = "GPL-3.0-or-later AND CC0-1.0"
 LICENSE_FILES = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
@@ -357,6 +375,46 @@ def test_official_license_texts_are_unmodified() -> None:
     for relative, expected_digest in OFFICIAL_LICENSE_SHA256.items():
         content = (PROJECT_ROOT / relative).read_bytes()
         assert hashlib.sha256(content).hexdigest() == expected_digest
+
+
+def test_reviewed_benchmark_evidence_has_complete_immutable_provenance() -> None:
+    paths = tuple(sorted(EVIDENCE_ROOT.glob("*.json")))
+    assert tuple(path.name for path in paths) == tuple(REVIEWED_EVIDENCE_SHA256)
+
+    expected_manifest = "".join(
+        f"{digest}  {name}\n" for name, digest in REVIEWED_EVIDENCE_SHA256.items()
+    )
+    assert (EVIDENCE_ROOT / "SHA256SUMS").read_text(encoding="ascii") == expected_manifest
+    assert {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths
+    } == REVIEWED_EVIDENCE_SHA256
+
+    records = tuple(load_evidence(path) for path in paths)
+    for record in records:
+        assert record.schema_version == record.suite_version == 1
+        assert record.correctness_only is False
+        assert (record.warmup_count, record.read_only_repetitions, record.mutation_repetitions) == (
+            1,
+            7,
+            5,
+        )
+        assert record.git_commit == "dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c"
+        assert record.run_id == "github-29789436063"
+        assert record.bundlewalker_version == "0.4.0a2"
+
+    assert {
+        (record.environment.os_name, ".".join(record.environment.python_version.split(".")[:2]))
+        for record in records
+    } == {("Darwin", "3.13"), ("Darwin", "3.14"), ("Linux", "3.13"), ("Linux", "3.14")}
+
+
+def test_reviewed_benchmark_report_is_regenerated_from_committed_evidence() -> None:
+    records = tuple(load_evidence(path) for path in sorted(EVIDENCE_ROOT.glob("*.json")))
+    assert (EVIDENCE_ROOT / "report.md").read_text(encoding="utf-8") == render_report(
+        records,
+        provisional=False,
+        require_matrix=True,
+    )
 
 
 def test_cc0_scope_matches_the_packaged_convention_presets() -> None:

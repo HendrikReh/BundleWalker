@@ -1,0 +1,996 @@
+{
+  "bundlewalker_version": "0.4.0a2",
+  "capacity_stop": {
+    "deadline_ns": 180000000000,
+    "profile": "large",
+    "reason": "deadline_exceeded",
+    "scenario": "recover_swapping"
+  },
+  "completed_at": "2026-07-21T01:30:02.435686Z",
+  "correctness_only": false,
+  "disposition": "capacity_exceeded",
+  "environment": {
+    "architecture": "arm64",
+    "filesystem_type": "apfs",
+    "logical_cpu_count": 3,
+    "os_name": "Darwin",
+    "os_release": "24.6.0",
+    "python_implementation": "CPython",
+    "python_version": "3.13.14",
+    "runner_image": "macos15",
+    "total_memory_bytes": 7516192768
+  },
+  "fixtures": [
+    {
+      "document_count": 50,
+      "exact_wiki_bytes": 524288,
+      "exact_workspace_bytes": 525269,
+      "profile": "smoke",
+      "profile_sha256": "b1723d2a96337355d40c61c87a68e613adc8a141449105e0dc91b43f75fc30e8",
+      "source_characters": 10000,
+      "tree_sha256": "2056081991941f2b9aab5a32ff1fa22058d959cb86f122caab1aea29e8ed5676"
+    },
+    {
+      "document_count": 250,
+      "exact_wiki_bytes": 2621440,
+      "exact_workspace_bytes": 2623741,
+      "profile": "small",
+      "profile_sha256": "c5c1ca138d891c43bb3343fad441624b9ba0cc536a383538adedb98042222aca",
+      "source_characters": 25000,
+      "tree_sha256": "9727173321acf3c9193865d0f31df12a1a0221b4e05d25d6cfda2092409057df"
+    },
+    {
+      "document_count": 1000,
+      "exact_wiki_bytes": 10485760,
+      "exact_workspace_bytes": 10493011,
+      "profile": "medium",
+      "profile_sha256": "01285f8b1cba7587722f2c5adeee8f5a21ed428635555a17df170f13f1d2ff7a",
+      "source_characters": 50000,
+      "tree_sha256": "3f5a4083bcbab9a69169eaca55c122e2cfde01852a988d315822074b12d65cf5"
+    },
+    {
+      "document_count": 5000,
+      "exact_wiki_bytes": 52428800,
+      "exact_workspace_bytes": 52462451,
+      "profile": "large",
+      "profile_sha256": "b1789f5d2ad55622690abe544e95f6e49ef689e3448b32639552dd4dacb68343",
+      "source_characters": 100000,
+      "tree_sha256": "9f99b5a5c5c7bdac10981e8889bb9ef69c25b63fc1cd424ea1030535bd869072"
+    },
+    {
+      "document_count": 10000,
+      "exact_wiki_bytes": 104857600,
+      "exact_workspace_bytes": 104924251,
+      "profile": "probe",
+      "profile_sha256": "f571ad8627659918e86925eb40c85fe1e66a8f8f44fc3e4740a6391e95410fcb",
+      "source_characters": 100000,
+      "tree_sha256": "fa6f7de49a3d3ebd2e032e5a421f4946465ec606d5d19c14523cc3257029d644"
+    }
+  ],
+  "git_commit": "dfaa31dfca3a431e7b2e2cb1ceda1e2cc0df286c",
+  "mutation_repetitions": 5,
+  "profiles": [
+    {
+      "document_count": 50,
+      "name": "smoke",
+      "seed": 20260719,
+      "source_characters": 10000,
+      "target_wiki_bytes": 524288
+    },
+    {
+      "document_count": 250,
+      "name": "small",
+      "seed": 20260719,
+      "source_characters": 25000,
+      "target_wiki_bytes": 2621440
+    },
+    {
+      "document_count": 1000,
+      "name": "medium",
+      "seed": 20260719,
+      "source_characters": 50000,
+      "target_wiki_bytes": 10485760
+    },
+    {
+      "document_count": 5000,
+      "name": "large",
+      "seed": 20260719,
+      "source_characters": 100000,
+      "target_wiki_bytes": 52428800
+    },
+    {
+      "document_count": 10000,
+      "name": "probe",
+      "seed": 20260719,
+      "source_characters": 100000,
+      "target_wiki_bytes": 104857600
+    }
+  ],
+  "read_only_repetitions": 7,
+  "run_id": "github-29789436063",
+  "scenarios": [
+    {
+      "checkpoint_bytes": {
+        "initialized_workspace": 1060
+      },
+      "disposition": "pass",
+      "median_ns": 3323750,
+      "output_sha256": "abcf8b0a9d5941251c1ac5379e6824349dc5af04f6cd95839034320f1bcf974a",
+      "p95_ns": 5399625,
+      "profile": null,
+      "samples_ns": [
+        5399625,
+        3323750,
+        3150000,
+        3460792,
+        3261000,
+        3104583,
+        3581500
+      ],
+      "scenario": "initialize",
+      "scenario_version": 1,
+      "target_ns": 3000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 52484792,
+      "output_sha256": "a104a88faa0ba24529ba951d507813062bd5e158beb6ea7bf8bcbe48bab02026",
+      "p95_ns": 62272833,
+      "profile": "smoke",
+      "samples_ns": [
+        62272833,
+        57485584,
+        51923125,
+        53706542,
+        48231041,
+        52484792,
+        48316292
+      ],
+      "scenario": "status",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 51630375,
+      "output_sha256": "176dc8908b412754740c84e4c687db3eb47c87921c8976e47e2f061e13602c8d",
+      "p95_ns": 54517000,
+      "profile": "smoke",
+      "samples_ns": [
+        54517000,
+        51630375,
+        48545250,
+        51876917,
+        48596042,
+        51546500,
+        52244083
+      ],
+      "scenario": "list_concepts",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 53367208,
+      "output_sha256": "fed2da06143b451d193f9b6a96873cc78344e82b32930148d4f5a79ebed4d3ed",
+      "p95_ns": 75876667,
+      "profile": "smoke",
+      "samples_ns": [
+        48715542,
+        51591084,
+        62462584,
+        75876667,
+        53367208,
+        59783333,
+        52925209
+      ],
+      "scenario": "read_concept",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 52757667,
+      "output_sha256": "6af90ed90b751b1c8e09f081d65837172a346ca2279c28a77f64cec4a0b3dfdf",
+      "p95_ns": 61235042,
+      "profile": "smoke",
+      "samples_ns": [
+        52800250,
+        61235042,
+        52757667,
+        49485667,
+        52409000,
+        49821625,
+        52769750
+      ],
+      "scenario": "search_present",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 56552750,
+      "output_sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+      "p95_ns": 61732042,
+      "profile": "smoke",
+      "samples_ns": [
+        61732042,
+        51931875,
+        52777750,
+        57116625,
+        56552750,
+        59411416,
+        52586791
+      ],
+      "scenario": "search_absent",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 64156417,
+      "output_sha256": "e2f10d9e47eee372ee21ccd40b282edb8a49c698120248817d0c5a6096c82d2e",
+      "p95_ns": 69581458,
+      "profile": "smoke",
+      "samples_ns": [
+        64231167,
+        69581458,
+        60899375,
+        64156417,
+        60571334,
+        64576833,
+        63475833
+      ],
+      "scenario": "lint",
+      "scenario_version": 1,
+      "target_ns": 30000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 667648
+      },
+      "disposition": "pass",
+      "median_ns": 560738583,
+      "output_sha256": "4e623543581839c38eab0ec57ca7051e46f257a75e2c9ac244cc5feb6cc11dd3",
+      "p95_ns": 590872041,
+      "profile": "smoke",
+      "samples_ns": [
+        560738583,
+        555495042,
+        579268208,
+        543600334,
+        590872041
+      ],
+      "scenario": "prepare_ingestion",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 684032,
+        "prepared": 667648
+      },
+      "disposition": "pass",
+      "median_ns": 480857125,
+      "output_sha256": "4ce4f8f5f8add63359f3b06998831a45528b68ea1fe4b4b208916f32262fc471",
+      "p95_ns": 602701792,
+      "profile": "smoke",
+      "samples_ns": [
+        394789000,
+        432592125,
+        527956667,
+        602701792,
+        480857125
+      ],
+      "scenario": "commit",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 667648
+      },
+      "disposition": "pass",
+      "median_ns": 71633459,
+      "output_sha256": "c52984af6cb5d366899081bcdd09a8bdbb58c25eed89d2266ccfa85fe37c776c",
+      "p95_ns": 77411833,
+      "profile": "smoke",
+      "samples_ns": [
+        67725584,
+        71050625,
+        72398167,
+        77411833,
+        71633459
+      ],
+      "scenario": "recover_prepared",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 684032,
+        "interrupted": 667648,
+        "prepared": 667648
+      },
+      "disposition": "pass",
+      "median_ns": 301672084,
+      "output_sha256": "4ce4f8f5f8add63359f3b06998831a45528b68ea1fe4b4b208916f32262fc471",
+      "p95_ns": 407708750,
+      "profile": "smoke",
+      "samples_ns": [
+        311196500,
+        284796875,
+        301672084,
+        407708750,
+        282774833
+      ],
+      "scenario": "recover_swapping",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 819694875,
+      "output_sha256": "d6e5bd156d7baa6ff7389c1ae7b78afeb097f32f69d2884a9c201ae3686e76b6",
+      "p95_ns": 1053447959,
+      "profile": "smoke",
+      "samples_ns": [
+        819694875,
+        802492083,
+        781080250,
+        771332666,
+        856525542,
+        827842000,
+        1053447959
+      ],
+      "scenario": "mcp_startup",
+      "scenario_version": 1,
+      "target_ns": 5000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 275069375,
+      "output_sha256": "132f3b905ff5bdc9e1d9f4bb20ca957707662f1b01ee2ea7d72b6bc41f220a5c",
+      "p95_ns": 323434666,
+      "profile": "small",
+      "samples_ns": [
+        275069375,
+        266598209,
+        323434666,
+        276109000,
+        290616625,
+        274325416,
+        266156708
+      ],
+      "scenario": "status",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 268914541,
+      "output_sha256": "7cd5ec54f26a5b9856fffac30489d977a85f5e8c2ef98c672ca0861a434d00a3",
+      "p95_ns": 270160167,
+      "profile": "small",
+      "samples_ns": [
+        269253416,
+        266331959,
+        265940000,
+        263885167,
+        268914541,
+        270160167,
+        269785584
+      ],
+      "scenario": "list_concepts",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 274667958,
+      "output_sha256": "077b19ed7dd50a8f330b9d595bcf76fc2b767fcd1659d9cd3b3453464b9b836f",
+      "p95_ns": 350642625,
+      "profile": "small",
+      "samples_ns": [
+        350642625,
+        273614542,
+        274667958,
+        277845917,
+        277252542,
+        269914542,
+        272997125
+      ],
+      "scenario": "read_concept",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 278024708,
+      "output_sha256": "4acc43b474eb5b90560fd9ad6676560fa089522ce69c5d8c499748224a91d5cb",
+      "p95_ns": 283014875,
+      "profile": "small",
+      "samples_ns": [
+        283014875,
+        277872000,
+        278068584,
+        278024708,
+        278690791,
+        277714208,
+        275037708
+      ],
+      "scenario": "search_present",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 277233375,
+      "output_sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+      "p95_ns": 281492875,
+      "profile": "small",
+      "samples_ns": [
+        277623667,
+        279115000,
+        277233375,
+        281492875,
+        274690459,
+        271806750,
+        274620875
+      ],
+      "scenario": "search_absent",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 326991916,
+      "output_sha256": "e2f10d9e47eee372ee21ccd40b282edb8a49c698120248817d0c5a6096c82d2e",
+      "p95_ns": 369960209,
+      "profile": "small",
+      "samples_ns": [
+        325704625,
+        369960209,
+        324420042,
+        325095375,
+        333497875,
+        328140417,
+        326991916
+      ],
+      "scenario": "lint",
+      "scenario_version": 1,
+      "target_ns": 30000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 3158016
+      },
+      "disposition": "pass",
+      "median_ns": 2911017625,
+      "output_sha256": "dc1f8dbaa771bd203e1fc5f626ff24829fcaf770e5641764dc06c2d2f3f096b6",
+      "p95_ns": 2930595042,
+      "profile": "small",
+      "samples_ns": [
+        2860970500,
+        2927039958,
+        2911017625,
+        2930595042,
+        2742302792
+      ],
+      "scenario": "prepare_ingestion",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 3256320,
+        "prepared": 3158016
+      },
+      "disposition": "pass",
+      "median_ns": 1950691584,
+      "output_sha256": "3d16b2ee5f5e12f352b7fa944479f3a132b84b11e3145999eb11b284b8df4729",
+      "p95_ns": 1968887750,
+      "profile": "small",
+      "samples_ns": [
+        1950691584,
+        1968887750,
+        1937461666,
+        1947552333,
+        1955958000
+      ],
+      "scenario": "commit",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 3158016
+      },
+      "disposition": "pass",
+      "median_ns": 369399541,
+      "output_sha256": "0a8b39fe1a155c5207b8cc41ffdb0ecce0142f231045e238e0aa89c9be19639e",
+      "p95_ns": 380079916,
+      "profile": "small",
+      "samples_ns": [
+        364414667,
+        371372125,
+        359951083,
+        369399541,
+        380079916
+      ],
+      "scenario": "recover_prepared",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 3256320,
+        "interrupted": 3158016,
+        "prepared": 3158016
+      },
+      "disposition": "pass",
+      "median_ns": 1455592083,
+      "output_sha256": "3d16b2ee5f5e12f352b7fa944479f3a132b84b11e3145999eb11b284b8df4729",
+      "p95_ns": 1541108750,
+      "profile": "small",
+      "samples_ns": [
+        1541108750,
+        1455592083,
+        1388331166,
+        1443330167,
+        1466746750
+      ],
+      "scenario": "recover_swapping",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 705885459,
+      "output_sha256": "d6e5bd156d7baa6ff7389c1ae7b78afeb097f32f69d2884a9c201ae3686e76b6",
+      "p95_ns": 756693416,
+      "profile": "small",
+      "samples_ns": [
+        686326541,
+        705885459,
+        677629041,
+        711233834,
+        722648459,
+        691016084,
+        756693416
+      ],
+      "scenario": "mcp_startup",
+      "scenario_version": 1,
+      "target_ns": 5000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 1012035959,
+      "output_sha256": "48ba26b11546c13810d3d22ccb59f59112484324f1fd2db009c923f5aea248a1",
+      "p95_ns": 1193135292,
+      "profile": "medium",
+      "samples_ns": [
+        1042887125,
+        1193135292,
+        1010922958,
+        1012035959,
+        1006503417,
+        1010581959,
+        1045053000
+      ],
+      "scenario": "status",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 1010380125,
+      "output_sha256": "071c9a1f0d57f164a13112039d35c51ccca615dd9eba140ca08c44ab5ec1a7cc",
+      "p95_ns": 1036739667,
+      "profile": "medium",
+      "samples_ns": [
+        1010380125,
+        1010136292,
+        1009263541,
+        1036739667,
+        1010761750,
+        1009763375,
+        1015325083
+      ],
+      "scenario": "list_concepts",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 1466689042,
+      "output_sha256": "dc519b9ffa92ab68a6a770ab90d52c51b67bf6b7a195388130abdea0750848c9",
+      "p95_ns": 1701074958,
+      "profile": "medium",
+      "samples_ns": [
+        1072290792,
+        1245502042,
+        1466689042,
+        1629109000,
+        1570194625,
+        1701074958,
+        1089756166
+      ],
+      "scenario": "read_concept",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 1169531416,
+      "output_sha256": "1e5c28c0eb3665fb989c32fa484f3ab5df13327ed79c36eac8b2cce892d5c879",
+      "p95_ns": 1274996583,
+      "profile": "medium",
+      "samples_ns": [
+        1187356125,
+        1025108375,
+        1169531416,
+        1190485167,
+        1166908291,
+        1124564458,
+        1274996583
+      ],
+      "scenario": "search_present",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 1165438666,
+      "output_sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+      "p95_ns": 1491136459,
+      "profile": "medium",
+      "samples_ns": [
+        1491136459,
+        1386445958,
+        1165438666,
+        1176757375,
+        1059492250,
+        1052058708,
+        1124781416
+      ],
+      "scenario": "search_absent",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 1376838458,
+      "output_sha256": "e2f10d9e47eee372ee21ccd40b282edb8a49c698120248817d0c5a6096c82d2e",
+      "p95_ns": 1464774750,
+      "profile": "medium",
+      "samples_ns": [
+        1256934667,
+        1464774750,
+        1344205167,
+        1463243583,
+        1369742000,
+        1386426833,
+        1376838458
+      ],
+      "scenario": "lint",
+      "scenario_version": 1,
+      "target_ns": 30000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 12464128
+      },
+      "disposition": "pass",
+      "median_ns": 12798769542,
+      "output_sha256": "201e64e21a51dd267491456f3252a4205c308678317c3a25e5ed28217220f008",
+      "p95_ns": 15360138375,
+      "profile": "medium",
+      "samples_ns": [
+        13119511375,
+        15360138375,
+        11481557500,
+        12619865792,
+        12798769542
+      ],
+      "scenario": "prepare_ingestion",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 12869632,
+        "prepared": 12464128
+      },
+      "disposition": "pass",
+      "median_ns": 7788279459,
+      "output_sha256": "8e775b9c1cb4ad673ea4568f84063b75da4f1248ad324bec6627cf66d443d2eb",
+      "p95_ns": 8344092125,
+      "profile": "medium",
+      "samples_ns": [
+        8344092125,
+        7845411709,
+        7578337042,
+        7788279459,
+        7563559042
+      ],
+      "scenario": "commit",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 12464128
+      },
+      "disposition": "pass",
+      "median_ns": 1291204167,
+      "output_sha256": "d9c013eecd291a5c50993b53022a22dbe277df8c5337d9facac346964a90a7a2",
+      "p95_ns": 1335005333,
+      "profile": "medium",
+      "samples_ns": [
+        1287585209,
+        1291204167,
+        1335005333,
+        1293190959,
+        1262697750
+      ],
+      "scenario": "recover_prepared",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 12869632,
+        "interrupted": 12464128,
+        "prepared": 12464128
+      },
+      "disposition": "pass",
+      "median_ns": 5160922792,
+      "output_sha256": "8e775b9c1cb4ad673ea4568f84063b75da4f1248ad324bec6627cf66d443d2eb",
+      "p95_ns": 6426990291,
+      "profile": "medium",
+      "samples_ns": [
+        5160922792,
+        5081337875,
+        5025865167,
+        5546062375,
+        6426990291
+      ],
+      "scenario": "recover_swapping",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 761589250,
+      "output_sha256": "d6e5bd156d7baa6ff7389c1ae7b78afeb097f32f69d2884a9c201ae3686e76b6",
+      "p95_ns": 926537375,
+      "profile": "medium",
+      "samples_ns": [
+        777665875,
+        713999750,
+        701434917,
+        652844542,
+        926537375,
+        761589250,
+        855808875
+      ],
+      "scenario": "mcp_startup",
+      "scenario_version": 1,
+      "target_ns": 5000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "target_missed",
+      "median_ns": 5566592625,
+      "output_sha256": "31214d92da51184732965e89543196facb91fd4b8fa2257503209c072d0de2ee",
+      "p95_ns": 6004605458,
+      "profile": "large",
+      "samples_ns": [
+        6004605458,
+        5803092666,
+        5566592625,
+        5677948334,
+        5374836000,
+        5114011875,
+        5415558375
+      ],
+      "scenario": "status",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "target_missed",
+      "median_ns": 5994604375,
+      "output_sha256": "071c9a1f0d57f164a13112039d35c51ccca615dd9eba140ca08c44ab5ec1a7cc",
+      "p95_ns": 6788156208,
+      "profile": "large",
+      "samples_ns": [
+        6788156208,
+        5994604375,
+        5738554458,
+        6001838083,
+        6323260750,
+        5993172167,
+        5927461959
+      ],
+      "scenario": "list_concepts",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "target_missed",
+      "median_ns": 5561378750,
+      "output_sha256": "d7db073115265933bef2f61f905af2e79db45f0dfaa814b6a24d56d7c833538a",
+      "p95_ns": 7565177916,
+      "profile": "large",
+      "samples_ns": [
+        5264262291,
+        5401599333,
+        7565177916,
+        6406335917,
+        5561378750,
+        5732577875,
+        5121142500
+      ],
+      "scenario": "read_concept",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "target_missed",
+      "median_ns": 5916105500,
+      "output_sha256": "8e113ea750a5d00437a6f897c4ca9089b9bde8372d1a657396b10387a46f2e50",
+      "p95_ns": 6646811458,
+      "profile": "large",
+      "samples_ns": [
+        5205045834,
+        6646811458,
+        5916105500,
+        6238290708,
+        6044388708,
+        5524407625,
+        5883140625
+      ],
+      "scenario": "search_present",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "target_missed",
+      "median_ns": 5539628291,
+      "output_sha256": "eef46741adfc3a9f76294d3b78f37a45f113092ac9d44ee77c7a038a88ff09a1",
+      "p95_ns": 5792689458,
+      "profile": "large",
+      "samples_ns": [
+        5539628291,
+        5442333250,
+        5522234042,
+        5778584875,
+        5792689458,
+        5594813250,
+        5269910209
+      ],
+      "scenario": "search_absent",
+      "scenario_version": 1,
+      "target_ns": 2000000000
+    },
+    {
+      "checkpoint_bytes": {},
+      "disposition": "pass",
+      "median_ns": 6740974958,
+      "output_sha256": "e2f10d9e47eee372ee21ccd40b282edb8a49c698120248817d0c5a6096c82d2e",
+      "p95_ns": 6992136667,
+      "profile": "large",
+      "samples_ns": [
+        6346417208,
+        6816661625,
+        6759498417,
+        6740974958,
+        6992136667,
+        6624553417,
+        6698539500
+      ],
+      "scenario": "lint",
+      "scenario_version": 1,
+      "target_ns": 30000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 62025728
+      },
+      "disposition": "target_missed",
+      "median_ns": 61098638667,
+      "output_sha256": "0b3f9bc0b1da506fdf179c3f2906f69b290a689f4bd005c655b1f2322676b7f3",
+      "p95_ns": 64544490500,
+      "profile": "large",
+      "samples_ns": [
+        61443926208,
+        61098638667,
+        60788662250,
+        58901374625,
+        64544490500
+      ],
+      "scenario": "prepare_ingestion",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "cleaned": 0,
+        "committed": 64069632,
+        "prepared": 62025728
+      },
+      "disposition": "pass",
+      "median_ns": 39110873916,
+      "output_sha256": "6f132c624fb39bc366fe6f69febe303f4099500285eb2c597d50b90a94add25d",
+      "p95_ns": 40404912583,
+      "profile": "large",
+      "samples_ns": [
+        40404912583,
+        39038693708,
+        38512374625,
+        39110873916,
+        39634720625
+      ],
+      "scenario": "commit",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    },
+    {
+      "checkpoint_bytes": {
+        "prepared": 62025728
+      },
+      "disposition": "pass",
+      "median_ns": 7942348750,
+      "output_sha256": "075463cc1540b048bedc6bce6cc0b15fc76f23b319d4c331c3ccc1b1e6f04844",
+      "p95_ns": 8830005042,
+      "profile": "large",
+      "samples_ns": [
+        7643576916,
+        6759643166,
+        7942348750,
+        8830005042,
+        8561849416
+      ],
+      "scenario": "recover_prepared",
+      "scenario_version": 1,
+      "target_ns": 60000000000
+    }
+  ],
+  "schema_version": 1,
+  "started_at": "2026-07-21T00:09:08.852168Z",
+  "suite_version": 1,
+  "warmup_count": 1
+}
