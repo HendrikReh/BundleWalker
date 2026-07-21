@@ -18,9 +18,8 @@ Before proposing an expansion of that scope, read the original
 [MCP and local web architecture](docs/superpowers/specs/2026-07-17-mcp-web-interface-architecture-design.md),
 the approved
 [public-beta roadmap](docs/superpowers/specs/2026-07-18-bundlewalker-public-beta-roadmap-design.md),
-and the relevant records in [`docs/superpowers/specs/`](docs/superpowers/specs/) and
-[`docs/superpowers/plans/`](docs/superpowers/plans/). A scope change should begin with an explicit
-design decision, not an incidental implementation change.
+and the relevant records in `docs/superpowers/specs/` and `docs/superpowers/plans/`. A scope
+change should begin with an explicit design decision, not an incidental implementation change.
 
 ## Architecture
 
@@ -141,12 +140,13 @@ Validate documented commands against live `bundlewalker --help` output and the h
 affected subcommand. Also check all local Markdown links whenever a document moves, gains a
 section, or changes its navigation.
 
-The historical plan `docs/superpowers/plans/2026-07-16-end-user-guide.md` embeds an exact copy of
-`docs/user-guide.md`. Its synchronization contract locates that copy after the start marker
-``Create `docs/user-guide.md` with exactly:`` and its opening four-backtick `markdown` fence, and
-before the closing four-backtick fence followed by the Step 3 README-link marker. After every
-user-guide edit, update the embedded block and verify byte equality with the canonical guide,
-including the final newline.
+Historical plans and specifications are immutable project records.
+Do not synchronize them with later edits to active documentation. Validate the current README,
+tutorial, user guide, specialist guides, and policy files against the live product instead.
+
+For every active-document change, check relative links and local heading anchors, compare affected
+commands with live help, and preserve versioned statements that intentionally describe a tagged
+release or reviewed evidence set.
 
 ## Security and compatibility
 
@@ -189,7 +189,8 @@ copyright assignment, contributor license agreement, or Developer Certificate of
 - [ ] `uv run pyright` reports no errors or warnings.
 - [ ] `git diff --check` is silent for the working tree.
 - [ ] `git diff --check origin/master...HEAD` is silent for the branch range.
-- [ ] Documentation matches live help, links resolve, and the embedded user guide is synchronized.
+- [ ] Active documentation matches live help, local links and anchors resolve, and historical
+  records remain unchanged.
 - [ ] No credentials, private source material, or sensitive provider output appears in the diff.
 - [ ] The pull request explicitly discloses whether any live provider evaluation was run, and
   names the configured model if it was.

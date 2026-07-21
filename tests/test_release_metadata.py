@@ -13,6 +13,7 @@ import tomllib
 from dataclasses import dataclass, replace
 from importlib.metadata import version as distribution_version
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote, urlsplit
 
 import pytest
 from markdown_it import MarkdownIt
@@ -59,6 +60,45 @@ CC0_PRESET_PATHS = {
     "src/bundlewalker/convention_presets/software-agent.md",
 }
 PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
+ACTIVE_DOCUMENTATION = (
+    Path("README.md"),
+    Path("CHANGELOG.md"),
+    Path("CONTRIBUTING.md"),
+    Path("LICENSE-SCOPE.md"),
+    Path("SECURITY.md"),
+    Path("SUPPORT.md"),
+    Path("docs/hermes-mcp-setup.md"),
+    Path("docs/maintainers/releases.md"),
+    Path("docs/performance-and-capacity.md"),
+    Path("docs/tutorial.md"),
+    Path("docs/user-guide.md"),
+    Path("docs/workspace-compatibility.md"),
+)
+
+
+def _github_anchor(text: str) -> str:
+    without_punctuation = re.sub(r"[^\w\- ]", "", text.strip().casefold())
+    return re.sub(r"\s+", "-", without_punctuation)
+
+
+def _heading_anchors(markdown: str) -> frozenset[str]:
+    anchors: set[str] = set()
+    occurrences: dict[str, int] = {}
+    tokens = MarkdownIt("commonmark").parse(markdown)
+    for index, token in enumerate(tokens[:-1]):
+        if token.type != "heading_open":
+            continue
+        inline = tokens[index + 1]
+        text = "".join(
+            child.content
+            for child in inline.children or ()
+            if child.type in {"text", "code_inline"}
+        )
+        base = _github_anchor(text)
+        occurrence = occurrences.get(base, 0)
+        occurrences[base] = occurrence + 1
+        anchors.add(base if occurrence == 0 else f"{base}-{occurrence}")
+    return frozenset(anchors)
 
 
 @dataclass(frozen=True)
@@ -195,6 +235,29 @@ def test_release_versions_are_consistent() -> None:
     assert bundlewalker.__version__ == expected
     assert distribution_version("bundlewalker") == expected
     assert editable_package["version"] == expected
+
+
+def test_active_documentation_local_links_and_anchors_resolve() -> None:
+    parser = MarkdownIt("commonmark")
+    for relative in ACTIVE_DOCUMENTATION:
+        source = PROJECT_ROOT / relative
+        markdown = source.read_text(encoding="utf-8")
+        for token in parser.parse(markdown):
+            for child in token.children or ():
+                if child.type != "link_open":
+                    continue
+                href = child.attrGet("href")
+                assert isinstance(href, str)
+                parsed = urlsplit(href)
+                if parsed.scheme or parsed.netloc:
+                    continue
+                target = source if not parsed.path else source.parent / unquote(parsed.path)
+                target = target.resolve()
+                assert target.is_file(), f"{relative}: missing link target {href}"
+                if parsed.fragment and target.suffix.casefold() == ".md":
+                    anchors = _heading_anchors(target.read_text(encoding="utf-8"))
+                    fragment = unquote(parsed.fragment).casefold()
+                    assert fragment in anchors, f"{relative}: missing anchor {href}"
 
 
 def test_performance_document_publishes_reviewed_capacity_derived_from_evidence_and_is_linked() -> (
