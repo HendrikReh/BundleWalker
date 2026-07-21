@@ -71,10 +71,10 @@ from release provenance, and retain the explicit Hatch source-distribution inclu
 
 ## Development setup
 
-BundleWalker requires Python 3.13 and 3.14. Required CI runs on macOS and Linux for both versions;
-Windows is experimental and remains visible without being a supported gate. Use the locked
-dependency graph so local results match CI and other contributors. Credentials are unnecessary for
-the default suite.
+BundleWalker development requires Python 3.13 or 3.14. Required CI tests both versions on macOS
+and Linux; Windows is experimental and remains visible without being a supported gate. Use the
+locked dependency graph so local results match CI and other contributors. Credentials are
+unnecessary for the default suite.
 
 ```bash
 git clone https://github.com/HendrikReh/BundleWalker.git
