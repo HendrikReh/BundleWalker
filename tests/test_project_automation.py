@@ -371,3 +371,79 @@ def test_historical_plan_embeds_current_user_guide_byte_for_byte() -> None:
     embedded_guide = plan[embedded_start:embedded_end] + b"\n"
 
     assert embedded_guide == guide
+
+
+def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> None:
+    path = PROJECT_ROOT / ".github/workflows/publish-pypi.yml"
+    workflow_text = path.read_text(encoding="utf-8")
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+
+    assert workflow["on"] == {"push": {"tags": ["v*"]}}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["env"]["UV_VERSION"] == "0.11.28"
+    assert list(workflow["jobs"]) == ["build", "publish", "verify", "github-release"]
+
+    build = workflow["jobs"]["build"]
+    assert build["outputs"] == {"version": "${{ steps.identity.outputs.version }}"}
+    build_commands = _run_commands(workflow, "build")
+    for required in (
+        'test "$GITHUB_REF_TYPE" = "tag"',
+        'test "$GITHUB_REF_NAME" = "v${version}"',
+        r"0\.4\.0(?:rc[1-9][0-9]*)?",
+        "uv sync --locked",
+        "uv lock --check",
+        "uv run pytest -m 'not eval' -q",
+        "uv run ruff format --check .",
+        "uv run ruff check .",
+        "uv run pyright",
+        "uv run pip-audit --strict",
+        "uv build --clear --no-sources",
+        "uv run twine check dist/*",
+        "bundlewalker --help",
+        "bundlewalker-mcp --help",
+        "sha256sum",
+    ):
+        assert required in build_commands
+    assert "persist-credentials" in str(_steps(workflow, "build")[0])
+    assert _steps(workflow, "build")[0]["with"]["persist-credentials"] == "false"
+
+    publish = workflow["jobs"]["publish"]
+    assert publish["needs"] == ["build"]
+    assert publish["environment"]["name"] == "pypi"
+    assert publish["permissions"] == {"id-token": "write"}
+    publish_action = _steps(workflow, "publish")[-1]
+    assert publish_action["uses"].startswith("pypa/gh-action-pypi-publish@")
+    assert "with" not in publish_action
+
+    verify = workflow["jobs"]["verify"]
+    assert verify["needs"] == ["build", "publish"]
+    assert verify["permissions"] == {"contents": "read"}
+    verify_commands = _run_commands(workflow, "verify")
+    assert "retry_delays=(5 10 20 40 80)" in verify_commands
+    assert "for attempt in 1 2 3 4 5 6; do" in verify_commands
+    assert "--default-index https://pypi.org/simple" in verify_commands
+    assert "https://pypi.org/pypi/bundlewalker/${version}/json" in verify_commands
+    assert 'item["digests"]["sha256"]' in verify_commands
+
+    release = workflow["jobs"]["github-release"]
+    assert release["needs"] == ["build", "verify"]
+    assert release["permissions"] == {"contents": "write"}
+    release_commands = _run_commands(workflow, "github-release")
+    assert "gh release create" in release_commands
+    assert "--prerelease" in release_commands
+    assert "gh release upload" in release_commands
+    assert "gh release download" in release_commands
+    assert "cmp --silent" in release_commands
+
+    assert workflow_text.count("uv build --clear --no-sources") == 1
+    assert workflow_text.count("pypa/gh-action-pypi-publish@") == 1
+    assert "repository-url:" not in workflow_text
+    assert "password:" not in workflow_text
+    assert "secrets." not in workflow_text
+    assert "continue-on-error" not in workflow_text
+    for job_name in ("publish", "verify", "github-release"):
+        assert any(
+            step.get("uses", "").startswith("actions/download-artifact@")
+            for step in _steps(workflow, job_name)
+        )
+    _assert_actions_are_sha_pinned(workflow)
