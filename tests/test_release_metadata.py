@@ -604,11 +604,11 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
-def test_development_version_is_first_release_candidate() -> None:
+def test_development_version_is_second_release_candidate() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0rc1"
-    assert bundlewalker.__version__ == "0.4.0rc1"
+    assert project["project"]["version"] == "0.4.0rc2"
+    assert bundlewalker.__version__ == "0.4.0rc2"
 
 
 def test_source_distribution_excludes_untracked_superpowers_worker_state(
@@ -651,19 +651,23 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
     assert (
-        "bundlewalker-0.4.0rc1/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+        "bundlewalker-0.4.0rc2/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
 
 
-def test_first_release_candidate_is_documented_without_final_beta_claim() -> None:
+def test_second_release_candidate_documents_rc1_recovery_without_final_beta_claim() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
 
-    assert "current production release candidate is `0.4.0rc1`" in readme
-    assert 'uv tool install "bundlewalker==0.4.0rc1"' in readme
+    assert "current production release candidate is `0.4.0rc2`" in readme
+    assert 'uv tool install "bundlewalker==0.4.0rc2"' in readme
     assert "proof of concept" in readme
+    assert "## [v0.4.0rc2] - 2026-07-21" in changelog
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
+    assert (
+        "[v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2"
+    ) in changelog
     assert (
         "[v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1"
     ) in changelog
@@ -672,6 +676,8 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
         "GitHub environment `pypi`",
         "pending trusted publisher",
         "v0.4.0rc1",
+        "29847165596",
+        "v0.4.0rc2",
         "Never move, delete, or reuse",
         "TestPyPI and production builds are separate",
         "fresh artifacts from its reviewed tag",

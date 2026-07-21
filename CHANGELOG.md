@@ -4,6 +4,14 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+## [v0.4.0rc2] - 2026-07-21
+
+### Fixed
+
+- Excluded the `uv`-created `dist/.gitignore` marker from production distribution selection so
+  exact-artifact validation counts and checks only the wheel and source archive. The immutable
+  `v0.4.0rc1` workflow failed at this pre-upload check and was not rerun or published.
+
 ## [v0.4.0rc1] - 2026-07-21
 
 ### Added
@@ -101,7 +109,8 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
-[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...HEAD
+[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...HEAD
+[v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2
 [v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1
 [v0.4.0a2]: https://github.com/HendrikReh/BundleWalker/compare/v3...v0.4.0a2
 [v3]: https://github.com/HendrikReh/BundleWalker/compare/v2...v3

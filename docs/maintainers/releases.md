@@ -105,15 +105,21 @@ pending trusted publisher while signed in as `hereh`:
 | Workflow | `publish-pypi.yml` |
 | Environment | `pypi` |
 
-For `0.4.0rc1`, merge the protected release pull request first, binding the merge to its recorded
+`v0.4.0rc1` is consumed and immutable at commit
+`d3a18370e2fdc7cfe2f79728731c82ba63aa0cf1`. Production workflow run `29847165596` failed once in
+the reversible build stage because `uv build --clear` created `dist/.gitignore` and the validation
+step counted every regular file. It produced no retained workflow artifact, deployment approval,
+OIDC upload, PyPI version, or GitHub release. Never rerun that workflow or move, delete, or reuse
+the rc1 tag.
+
+For `0.4.0rc2`, merge the protected recovery pull request first, binding the merge to its recorded
 head commit. Immediately before tagging, fetch fresh `origin/master` and tags; require local
-`master`, fresh `origin/master`, and PR #12's actual merge OID to agree. Re-read the `pypi`
-environment reviewer and tag-only rule, re-open PyPI publishing settings to verify the exact
-pending-publisher tuple, and confirm production version `0.4.0rc1` is still unavailable. Only then
-create annotated tag `v0.4.0rc1` at that exact merge commit, verify it, and push it once. Inspect
-the build evidence before approving the `pypi` deployment. The workflow validates the current
-remote annotated tag before building and again before creating GitHub prerelease
-`BundleWalker 0.4.0rc1`.
+`master`, fresh `origin/master`, and the pull request's actual merge OID to agree. Re-read the
+`pypi` environment reviewer and tag-only rule, and verify the still-pending trusted-publisher tuple
+`bundlewalker/HendrikReh/BundleWalker/publish-pypi.yml/pypi`; this tuple is keyed by workflow and
+environment, not package version. Confirm production `0.4.0rc2` is unavailable. Only then create
+annotated tag `v0.4.0rc2` at that exact merge commit, verify it, and push it once. Inspect the
+build evidence before approving only the exact `pypi` deployment for that tag and commit.
 
 Never move, delete, or reuse a pushed tag or package version. If build or pre-upload validation
 fails after tag push, fix through review and advance to `0.4.0rc2`. The read-only verification job
@@ -143,7 +149,7 @@ Publish normally succeeds; a failed publish is safe only when the same run's exa
 and GitHub release both succeed. Keep that failed job visible and record a recovered publication
 warning in the completion report.
 
-Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc1` certifies the
+Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc2` certifies the
 production clean-install candidate, not final beta readiness. The next gate is a
 production-installed workspace lifecycle rehearsal covering inspection, backup, separate-target
 restore, upgrade behavior, rollback, and post-operation verification.
