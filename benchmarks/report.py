@@ -12,6 +12,7 @@ from benchmarks.contracts import (
     ScenarioDisposition,
     ScenarioEvidence,
     ScenarioName,
+    WorkspaceProfile,
 )
 from benchmarks.profiles import PROFILES, target_ns
 from benchmarks.scenarios import SCENARIOS
@@ -62,25 +63,42 @@ def render_report(
 ) -> str:
     if not records:
         raise ValueError("at least one evidence record is required")
-    if not provisional:
-        raise ValueError("phase one reports must remain provisional")
+    if not provisional and not require_matrix:
+        raise ValueError("published reports require matrix validation")
 
     ordered = tuple(sorted(records, key=_record_sort_key))
     _validate_records(ordered, require_matrix=require_matrix)
     overall_disposition = _overall_disposition(ordered)
+    candidate_names = tuple(
+        profile.name
+        for profile in ordered[0].profiles
+        if profile.name in {"small", "medium", "large"}
+    )
+    candidate_statuses = {name: _candidate_status(ordered, name) for name in candidate_names}
+    supported_profile = (
+        _supported_profile(ordered[0].profiles, candidate_statuses) if not provisional else None
+    )
 
     lines = [
         "# BundleWalker Performance and Capacity",
         "",
-        "Status: provisional",
+        "Status: provisional" if provisional else "Status: reviewed evidence",
         "",
         "Measurement foundation: available",
         "",
-        "Supported capacity: not yet published",
-        "",
-        f"Overall disposition: {overall_disposition.value}",
+        "Supported capacity: not yet published"
+        if supported_profile is None
+        else _supported_capacity_line(supported_profile),
         "",
     ]
+    if not provisional:
+        lines.extend([f"Source commit: `{ordered[0].git_commit}`", ""])
+    lines.extend(
+        [
+            f"Overall disposition: {overall_disposition.value}",
+            "",
+        ]
+    )
     capacity_stops = tuple(
         record.capacity_stop for record in ordered if record.capacity_stop is not None
     )
@@ -93,12 +111,24 @@ def render_report(
     else:
         lines.append("Capacity stop: none")
     lines.extend(
-        [
-            "",
-            (
-                "These measurements describe candidate profiles only. They do not establish a "
-                "supported capacity envelope."
-            ),
+        (
+            [
+                "",
+                (
+                    "These measurements describe candidate profiles only. They do not establish a "
+                    "supported capacity envelope."
+                ),
+            ]
+            if provisional
+            else [
+                "",
+                (
+                    "This reviewed evidence establishes the conservative supported capacity "
+                    "envelope above."
+                ),
+            ]
+        )
+        + [
             "",
             "## Profiles",
             "",
@@ -130,8 +160,15 @@ def render_report(
     lines.extend(
         [
             "",
-            "Small, Medium, and Large are candidate only profiles. Smoke is a correctness "
-            "profile. Probe is exploratory and is not a support claim.",
+            (
+                "Small, Medium, and Large are candidate only profiles. Smoke is a correctness "
+                "profile. Probe is exploratory and is not a support claim."
+                if provisional
+                else (
+                    "Smoke is a correctness profile. Probe is exploratory and is not a support "
+                    "claim."
+                )
+            ),
             "",
             "## Measurement policy and reference targets",
             "",
@@ -196,12 +233,6 @@ def render_report(
         for scenario in sorted(record.scenarios, key=_scenario_sort_key):
             lines.append(_scenario_row(record, scenario))
 
-    candidate_names = tuple(
-        profile.name
-        for profile in ordered[0].profiles
-        if profile.name in {"small", "medium", "large"}
-    )
-    candidate_statuses = {name: _candidate_status(ordered, name) for name in candidate_names}
     measured_candidates = [
         name
         for name in candidate_names
@@ -211,7 +242,7 @@ def render_report(
     lines.extend(
         [
             "",
-            "## Candidate interpretation",
+            "## Candidate interpretation" if provisional else "## Capacity interpretation",
             "",
             f"Measured candidate only profiles: {candidates}.",
             "",
@@ -221,6 +252,14 @@ def render_report(
     )
     for name in candidate_names:
         lines.append(f"| {_label(name)} | {candidate_statuses[name]} |")
+    if supported_profile is not None:
+        supported_index = _PROFILE_ORDER[supported_profile.name]
+        for profile in ordered[0].profiles:
+            if _PROFILE_ORDER[profile.name] > supported_index:
+                lines.append(
+                    f"Unsupported boundary evidence: {_label(profile.name)} "
+                    f"({_candidate_status(ordered, profile.name)})."
+                )
     lines.extend(
         [
             "",
@@ -244,12 +283,32 @@ def render_report(
             (
                 "python -m benchmarks report --evidence benchmark-results "
                 "--output benchmark-results/report.md --provisional"
+                if provisional
+                else "python -m benchmarks report --evidence benchmark-results "
+                "--output benchmark-results/report.md --published --require-matrix"
             ),
             "```",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _supported_profile(
+    profiles: Sequence[WorkspaceProfile], candidate_statuses: dict[str, str]
+) -> WorkspaceProfile:
+    for name in ("large", "medium"):
+        if candidate_statuses[name] == "complete successful candidate measurement":
+            return next(profile for profile in profiles if profile.name == name)
+    raise ValueError("published reports require at least Medium support across the matrix")
+
+
+def _supported_capacity_line(profile: WorkspaceProfile) -> str:
+    return (
+        f"Supported capacity: {_label(profile.name)} ({profile.document_count} documents, "
+        f"{profile.target_wiki_bytes} profile wiki bytes, {profile.source_characters} "
+        "ingestion source characters)"
+    )
 
 
 def _validate_records(records: Sequence[EvidenceRecord], *, require_matrix: bool) -> None:

@@ -41,7 +41,9 @@ def _parser() -> argparse.ArgumentParser:
     report = subcommands.add_parser("report")
     report.add_argument("--evidence", required=True, type=Path)
     report.add_argument("--output", required=True, type=Path)
-    report.add_argument("--provisional", action="store_true", required=True)
+    report_mode = report.add_mutually_exclusive_group(required=True)
+    report_mode.add_argument("--provisional", action="store_true")
+    report_mode.add_argument("--published", action="store_true")
     report.add_argument("--require-matrix", action="store_true")
     return parser
 
@@ -96,6 +98,8 @@ def _run_command(parser: argparse.ArgumentParser, arguments: argparse.Namespace)
 
 
 def _report_command(parser: argparse.ArgumentParser, arguments: argparse.Namespace) -> int:
+    if arguments.published and not arguments.require_matrix:
+        parser.error("published reports require --require-matrix")
     evidence_directory = _absolute(arguments.evidence)
     output = _absolute(arguments.output)
     _validate_output_path(parser, output)
@@ -115,7 +119,7 @@ def _report_command(parser: argparse.ArgumentParser, arguments: argparse.Namespa
         records = tuple(load_evidence(path) for path in evidence_paths)
         report = render_report(
             records,
-            provisional=arguments.provisional,
+            provisional=not arguments.published,
             require_matrix=arguments.require_matrix,
         )
         publication.publish(lambda anchored: write_new_text(anchored, report))

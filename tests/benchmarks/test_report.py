@@ -122,6 +122,47 @@ def _capacity_stopped_record() -> EvidenceRecord:
     return EvidenceRecord.model_validate(values)
 
 
+def _large_stopped_matrix_record(
+    *, os_name: str = "Linux", python_version: str = "3.13.0"
+) -> EvidenceRecord:
+    complete = _matrix_record(os_name=os_name, python_version=python_version)
+    stop = CapacityStop(
+        profile="large",
+        scenario=ScenarioName.STATUS,
+        deadline_ns=30_000_000_000,
+    )
+    stop_index = next(
+        index
+        for index, item in enumerate(complete.scenarios)
+        if (item.profile, item.scenario) == (stop.profile, stop.scenario)
+    )
+    values = complete.model_dump(mode="python")
+    values["scenarios"] = complete.scenarios[:stop_index]
+    values["capacity_stop"] = stop
+    values["disposition"] = ScenarioDisposition.CAPACITY_EXCEEDED
+    return EvidenceRecord.model_validate(values)
+
+
+def _with_target_misses(record: EvidenceRecord, profiles: set[str]) -> EvidenceRecord:
+    scenarios = tuple(
+        scenario.model_copy(
+            update={
+                "samples_ns": (scenario.target_ns + 1,) * len(scenario.samples_ns),
+                "median_ns": scenario.target_ns + 1,
+                "p95_ns": scenario.target_ns + 1,
+                "disposition": ScenarioDisposition.TARGET_MISSED,
+            }
+        )
+        if scenario.profile in profiles and scenario.scenario is ScenarioName.STATUS
+        else scenario
+        for scenario in record.scenarios
+    )
+    values = record.model_dump(mode="python")
+    values["scenarios"] = scenarios
+    values["disposition"] = ScenarioDisposition.TARGET_MISSED
+    return EvidenceRecord.model_validate(values)
+
+
 @pytest.mark.parametrize(
     ("current", "baseline", "flagged"),
     [
@@ -151,6 +192,40 @@ def test_provisional_report_cannot_publish_a_supported_envelope() -> None:
     assert "Supported capacity: not yet published" in report
     assert "candidate only" in report
     assert "BundleWalker supports up to" not in report
+
+
+def test_reviewed_report_publishes_medium_and_identifies_unsupported_boundaries() -> None:
+    matrix = tuple(
+        _large_stopped_matrix_record(os_name=os_name, python_version=f"{minor}.0")
+        for os_name in ("Darwin", "Linux")
+        for minor in ("3.13", "3.14")
+    )
+
+    report = render_report(matrix, provisional=False, require_matrix=True)
+
+    assert "Status: reviewed evidence" in report
+    assert "Source commit: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`" in report
+    assert (
+        "Supported capacity: Medium (1000 documents, 10485760 profile wiki bytes, "
+        "50000 ingestion source characters)" in report
+    )
+    assert "Unsupported boundary evidence: Large" in report
+    assert "Unsupported boundary evidence: Probe" in report
+
+
+def test_reviewed_report_rejects_small_only_or_unvalidated_envelopes() -> None:
+    matrix = tuple(
+        _with_target_misses(
+            _matrix_record(os_name=os_name, python_version=f"{minor}.0"), {"medium", "large"}
+        )
+        for os_name in ("Darwin", "Linux")
+        for minor in ("3.13", "3.14")
+    )
+
+    with pytest.raises(ValueError, match="at least Medium"):
+        render_report(matrix, provisional=False, require_matrix=True)
+    with pytest.raises(ValueError, match="matrix"):
+        render_report(matrix, provisional=False)
 
 
 @pytest.mark.parametrize(("current", "baseline"), [(-1, 1), (1, 0), (1, -1)])
@@ -308,6 +383,7 @@ def test_report_sorts_full_python_versions_and_lists_every_sample() -> None:
 
     assert report.index("linux-3.13.9") < report.index("linux-3.13.10")
     assert "100, 200, 300, 400, 500, 600, 700" in report
+    assert "| Small | incomplete |" not in report
 
 
 def test_capacity_stop_is_explicit_and_incomplete_large_is_not_measured() -> None:
