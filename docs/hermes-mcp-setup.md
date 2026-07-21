@@ -1,8 +1,8 @@
 # Connect Hermes Agent to BundleWalker over MCP
 
-This guide connects Hermes Agent to one local BundleWalker OKF workspace through BundleWalker's
-`stdio` MCP server. It covers Hermes-specific registration, tool selection, credential forwarding,
-reload, troubleshooting, and removal.
+Use this specialist guide after you have initialized a BundleWalker workspace and confirmed that
+Hermes runs on the same machine. It covers only Hermes-specific registration, tool selection,
+credential forwarding, reload, troubleshooting, and removal for one local `stdio` connection.
 
 For BundleWalker's complete MCP resource, tool-schema, and durable-review contracts, use the
 [host-neutral MCP reference](user-guide.md#use-bundlewalker-through-a-local-mcp-host).
@@ -285,7 +285,7 @@ For the OpenAI-shaped example, check that both assignments exist without printin
 
 ```bash
 rg -q '^BUNDLEWALKER_MODEL=.+' "$HERMES_CONFIG_DIR/.env"
-rg -q '^OPENAI_API_KEY=.+' "$HERMES_CONFIG_DIR/.env"
+rg -q '^OPENAI_API_KEY[=].+' "$HERMES_CONFIG_DIR/.env"
 ```
 
 For another provider, check its credential variable instead. Confirm that the same variable names
@@ -344,11 +344,18 @@ hermes mcp remove bundlewalker
 Then use `/reload-mcp` or start a fresh Hermes session so the removed tools disappear from the
 conversation context.
 
-## References
+## Hermes references
 
-- [BundleWalker host-neutral MCP reference](user-guide.md#use-bundlewalker-through-a-local-mcp-host)
-- [BundleWalker model and provider setup](user-guide.md#model-and-provider-setup)
 - [Hermes MCP documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp)
 - [Hermes CLI reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands)
 - [Hermes configuration documentation](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)
 - [Hermes security documentation](https://hermes-agent.nousresearch.com/docs/user-guide/security)
+
+## Related BundleWalker documentation
+
+- [BundleWalker host-neutral MCP reference](user-guide.md#use-bundlewalker-through-a-local-mcp-host)
+- [BundleWalker model and provider setup](user-guide.md#model-and-provider-setup)
+- [BundleWalker maintenance and recovery guidance](user-guide.md#maintain-and-recover-the-bundle)
+- [BundleWalker troubleshooting and safety guidance](user-guide.md#troubleshooting-and-safety)
+- [Workspace compatibility and portable backups](workspace-compatibility.md)
+- [BundleWalker support policy](../SUPPORT.md)

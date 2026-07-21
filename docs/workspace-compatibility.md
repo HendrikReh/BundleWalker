@@ -4,6 +4,17 @@ This document is the authoritative policy for BundleWalker workspace compatibili
 backup and restore, explicit upgrade, and rollback. The [user guide](user-guide.md) turns this
 policy into task-oriented procedures; command `--help` remains authoritative for CLI spelling.
 
+Use this guide when you need to inspect, move, restore, upgrade, or roll back a workspace without
+assuming that BundleWalker will migrate or overwrite it automatically.
+
+| Need | Action |
+| --- | --- |
+| Inspect without changing anything | Run `bundlewalker workspace status`. |
+| Move or archive a workspace | Create and verify a backup; protect it as sensitive data. |
+| Recover elsewhere | Restore into a new or empty target. |
+| Adopt a newer format | Create a pre-upgrade backup, then request an explicit upgrade. |
+| Return to an earlier state | Restore a known backup into a separate target. |
+
 ## Supported artifacts
 
 Durable workspace data and temporary transaction data are versioned independently.
