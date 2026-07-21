@@ -4,8 +4,8 @@ BundleWalker is a local, review-first CLI that turns Markdown and text sources i
 cited Open Knowledge Format (OKF) wiki. Accepted source bytes stay immutable, every proposed
 knowledge change is reviewable, and the resulting Markdown remains readable without BundleWalker.
 
-Latest stable release: **v3** (Python package `0.3.0`). The current alpha is
-`0.4.0a2`, adding workspace lifecycle safety to the public-beta release foundation. See the
+Latest stable release: **v3** (Python package `0.3.0`). The current production release candidate is `0.4.0rc1`,
+adding the reviewed public-beta foundation while BundleWalker remains a proof of concept. See the
 [changelog](CHANGELOG.md) for release history.
 
 [Tutorial](docs/tutorial.md) · [User Guide](docs/user-guide.md) ·
@@ -24,9 +24,21 @@ Latest stable release: **v3** (Python package `0.3.0`). The current alpha is
 
 ## Quick start
 
-BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/). Install the
-locked repository environment, record its path, and configure a model supported by your installed
-PydanticAI version:
+BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/).
+
+Install the exact production release candidate as an isolated command-line tool:
+
+```bash
+uv tool install "bundlewalker==0.4.0rc1"
+bundlewalker --help
+bundlewalker-mcp --help
+```
+
+Because this is a prerelease, use the exact version shown above. Final `0.4.0` is not published.
+The complete walkthrough below uses a locked source checkout so its commands remain reproducible.
+
+Install the locked repository environment, record its path, and configure a model supported by your
+installed PydanticAI version:
 
 ```bash
 git clone https://github.com/HendrikReh/BundleWalker.git
@@ -224,8 +236,8 @@ Each document has one primary job:
   guidance.
 - The [Support Policy](SUPPORT.md) defines supported platforms, issue reporting, and the
   best-effort maintenance boundary.
-- The [Release Procedure](docs/maintainers/releases.md) defines maintainer-only build,
-  TestPyPI, versioning, and failure handling.
+- The [Release Procedure](docs/maintainers/releases.md) defines maintainer-only build, TestPyPI,
+  production PyPI, GitHub release, versioning, and failure handling.
 
 ## Development
 

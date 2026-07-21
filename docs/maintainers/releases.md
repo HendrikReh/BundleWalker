@@ -9,7 +9,8 @@ artifacts are promoted; they are never rebuilt between indexes or release attach
 - `bundlewalker.__version__` reads installed distribution metadata.
 - Historical `v1`, `v2`, and `v3` tags remain unchanged.
 - New tags match package versions, for example `v0.4.0` and `v0.4.1`.
-- Alpha or release-candidate versions may be published to TestPyPI.
+- Alpha versions are rehearsed on TestPyPI; release candidates are published to production PyPI
+  only through the protected production workflow.
 - Production `0.4.0` is forbidden until every public-beta exit gate passes.
 
 ## Local release verification
@@ -81,12 +82,42 @@ only the failed verification job; do not dispatch a new build or publication for
 
 ## Production PyPI and GitHub releases
 
-Production publication is a later milestone. Before enabling it, add a separate `pypi` environment
-with required human approval, configure its trusted publisher, require a package-aligned tag, and
-attach the exact workflow-built wheel and source archive to the GitHub release.
+Production publishing uses `publish-pypi.yml`, GitHub environment `pypi`, and a matching PyPI
+trusted publisher. The workflow starts only from a pushed `v*` tag, validates that the tag is
+exactly `v${project.version}`, and accepts only `0.4.0rcN` or final `0.4.0`. It builds one wheel and
+one source archive, publishes those exact files, verifies production filenames and SHA-256
+digests, and attaches the same files to the GitHub release.
 
-Never delete or replace historical releases to correct a later license, documentation, or
-compatibility decision. Publish a new version and document the difference.
+Before the first production upload, configure GitHub environment `pypi` with required reviewer
+`HendrikReh`, self-review permitted, and a tag-only deployment rule `v0.4.0*`. Register the PyPI
+pending trusted publisher while signed in as `hereh`:
+
+| Field | Value |
+| --- | --- |
+| PyPI project | `bundlewalker` |
+| GitHub owner | `HendrikReh` |
+| GitHub repository | `BundleWalker` |
+| Workflow | `publish-pypi.yml` |
+| Environment | `pypi` |
+
+For `0.4.0rc1`, merge the protected release pull request first. Confirm clean synchronized
+`master`, create annotated tag `v0.4.0rc1` at that exact merge commit, verify it, and push it once.
+Inspect the build evidence before approving the `pypi` deployment. The workflow then publishes,
+verifies a clean exact production installation with bounded propagation retry, compares PyPI
+digests, and creates GitHub prerelease `BundleWalker 0.4.0rc1`.
+
+Never move or reuse a pushed tag or package version. If build or pre-upload validation fails after
+tag push, fix through review and advance to `0.4.0rc2`. If upload succeeds but propagation
+verification exhausts its bounded retry, confirm the immutable PyPI files and rerun only the
+failed verification job and downstream release job. If only GitHub release creation fails, rerun
+only that downstream job; it reuses the retained workflow artifact and verifies any existing
+same-named asset byte-for-byte. A maintainer must never move or reuse a pushed tag or package
+version.
+
+Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc1` certifies the
+production clean-install candidate, not final beta readiness. The next gate is a
+production-installed workspace lifecycle rehearsal covering inspection, backup, separate-target
+restore, upgrade behavior, rollback, and post-operation verification.
 
 ## Failure and rollback
 
