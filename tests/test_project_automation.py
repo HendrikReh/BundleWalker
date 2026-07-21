@@ -684,14 +684,16 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
     run_json_command = (
         'RUN_JSON="$(gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs)"'
     )
+    build_extraction = 'BUILD_CONCLUSION="$(job_conclusion "Build and verify exact distributions")"'
     watch = recovery_audit.index(watch_command)
     refreshed_run_json = recovery_audit.index(run_json_command, watch + len(watch_command))
     post_watch_audit = recovery_audit[watch + len(watch_command) :]
+    post_refresh_audit = recovery_audit[refreshed_run_json + len(run_json_command) :]
     assert watch < refreshed_run_json
     assert 'gh run watch "$RUN_ID" --exit-status' not in recovery_audit
+    assert run_json_command in post_watch_audit
     for assertion in (
-        run_json_command,
-        'BUILD_CONCLUSION="$(job_conclusion "Build and verify exact distributions")"',
+        build_extraction,
         'PUBLISH_CONCLUSION="$(job_conclusion "Publish exact distributions")"',
         'VERIFY_CONCLUSION="$(job_conclusion "Verify production PyPI installation and checksums")"',
         'RELEASE_CONCLUSION="$(job_conclusion "Create GitHub release from exact distributions")"',
@@ -701,4 +703,4 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
         'case "$PUBLISH_CONCLUSION" in',
         "recovered publication warning",
     ):
-        assert assertion in post_watch_audit
+        assert assertion in post_refresh_audit
