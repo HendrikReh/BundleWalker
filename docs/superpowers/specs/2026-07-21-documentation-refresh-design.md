@@ -1,7 +1,7 @@
 # BundleWalker Documentation Refresh Design
 
 **Date:** 2026-07-21
-**Status:** Proposed — design sections approved; written specification pending final review
+**Status:** Approved
 
 ## Context
 
