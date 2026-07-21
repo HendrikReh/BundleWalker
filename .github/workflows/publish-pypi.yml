@@ -175,6 +175,7 @@ jobs:
   github-release:
     name: Create GitHub release from exact distributions
     needs: [build, verify]
+    if: ${{ always() && needs.build.result == 'success' && needs.verify.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

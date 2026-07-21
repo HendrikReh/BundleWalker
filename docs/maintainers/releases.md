@@ -90,8 +90,11 @@ exactly `v${project.version}`, and accepts only `0.4.0rcN` or final `0.4.0`. It 
 one source archive, publishes those exact files, verifies production filenames and SHA-256
 digests, and attaches the same files to the GitHub release.
 
-Before the first production upload, configure GitHub environment `pypi` with required reviewer
-`HendrikReh`, self-review permitted, and a tag-only deployment rule `v0.4.0*`. Register the PyPI
+Before the first production upload, configure GitHub environment `pypi` with exactly one
+required-reviewers rule naming only GitHub user `HendrikReh`, self-review permitted, no wait timer
+or custom protection rule, custom deployment policies enabled, and protected-branch policy
+disabled. The only other protection-rule type must be the branch-policy rule, and the separate
+policy endpoint must contain exactly one tag rule `v0.4.0*` and no branch rule. Register the PyPI
 pending trusted publisher while signed in as `hereh`:
 
 | Field | Value |
@@ -126,12 +129,19 @@ PyPI as authoritative:
 
 Only the exact production-index installation receives the bounded 5/10/20/40/80-second
 propagation retry. Metadata, checksum, artifact, and CLI failures remain immediate. If that
-installation alone exhausts its retry after both exact PyPI files were verified, rerun only the
-failed verification job and downstream release job. If only GitHub release creation fails, rerun
-only that downstream job; it reuses the retained workflow artifact and verifies any existing
-same-named asset byte-for-byte. A fully cancelled workflow may not reach verification; inspect
-production PyPI manually before any further action and never restart build or publish for a
-version whose files may have been accepted.
+installation alone exhausts its retry, download the original run artifact and prove production
+JSON has the complete exact filename/digest set. Obtain the original verification job database ID,
+then run `gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"`; this reruns verification and its
+dependent release job without rerunning upload. Never rerun a failed publish job. If only GitHub
+release creation fails, target only that original job; it reuses the retained workflow artifact and
+verifies any existing same-named asset byte-for-byte. A fully cancelled workflow may not reach
+verification; inspect production PyPI manually before any further action and never restart build
+or publish for a version whose files may have been accepted.
+
+Completion requires successful build, authoritative verification, and GitHub release jobs.
+Publish normally succeeds; a failed publish is safe only when the same run's exact-set verification
+and GitHub release both succeed. Keep that failed job visible and record a recovered publication
+warning in the completion report.
 
 Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc1` certifies the
 production clean-install candidate, not final beta readiness. The next gate is a

@@ -675,7 +675,8 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
         "Never move, delete, or reuse",
         "TestPyPI and production builds are separate",
         "fresh artifacts from its reviewed tag",
-        "rerun only",
+        'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
+        "Never rerun a failed publish job",
     ):
         assert phrase in releases
     assert "Production `0.4.0` is forbidden" in releases

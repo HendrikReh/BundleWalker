@@ -572,3 +572,94 @@ def test_pypi_verification_retries_only_exact_index_installation() -> None:
     )
     assert "--retry" not in json_command
     assert "--retry-all-errors" not in json_command
+
+
+def test_pypi_release_runs_after_authoritative_recovery() -> None:
+    workflow = _yaml(".github/workflows/publish-pypi.yml")
+    release = workflow["jobs"]["github-release"]
+
+    assert release["needs"] == ["build", "verify"]
+    assert release["if"] == (
+        "${{ always() && needs.build.result == 'success' && needs.verify.result == 'success' }}"
+    )
+    assert release["permissions"] == {"contents": "write"}
+    release_text = str(release)
+    assert "pypa/gh-action-pypi-publish@" not in release_text
+    assert "uv build" not in release_text
+
+
+def test_release_recovery_reruns_only_the_original_verification_job() -> None:
+    plan = (
+        PROJECT_ROOT
+        / "docs/superpowers/plans/2026-07-21-bundlewalker-0.4.0rc1-production-release.md"
+    ).read_text(encoding="utf-8")
+    design = (
+        PROJECT_ROOT
+        / "docs/superpowers/specs/2026-07-21-bundlewalker-0.4.0rc1-production-release-design.md"
+    ).read_text(encoding="utf-8")
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+
+    for document in (plan, design, releases):
+        assert "Re-run failed jobs" not in document
+        assert "never rerun a failed publish job" in document.lower()
+    for command in (
+        'gh run download "$RUN_ID" --name python-package-distributions',
+        "https://pypi.org/pypi/bundlewalker/${version}/json",
+        'VERIFY_JOB_ID="$(gh run view "$RUN_ID" --json jobs',
+        'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
+    ):
+        assert command in plan
+    assert "assert local == remote" in plan
+
+
+def test_release_plan_fails_closed_on_environment_approval_drift() -> None:
+    plan = (
+        PROJECT_ROOT
+        / "docs/superpowers/plans/2026-07-21-bundlewalker-0.4.0rc1-production-release.md"
+    ).read_text(encoding="utf-8")
+
+    for assertion in (
+        ".protection_rules | map(.type) | sort",
+        '["branch_policy", "required_reviewers"]',
+        '[.protection_rules[] | select(.type == "required_reviewers")] | length',
+        ".prevent_self_review == false",
+        "(.reviewers | map({type, login: .reviewer.login})) == "
+        '[{"type":"User","login":"HendrikReh"}]',
+        ".deployment_branch_policy.protected_branches == false",
+        ".deployment_branch_policy.custom_branch_policies == true",
+        ".total_count == 1",
+        '(.branch_policies[0].name == "v0.4.0*")',
+        '(.branch_policies[0].type == "tag")',
+    ):
+        assert plan.count(assertion) == 2, assertion
+    assert plan.count("| jq -e '") >= 4
+
+
+def test_release_completion_allows_only_exactly_verified_publish_failure() -> None:
+    plan = (
+        PROJECT_ROOT
+        / "docs/superpowers/plans/2026-07-21-bundlewalker-0.4.0rc1-production-release.md"
+    ).read_text(encoding="utf-8")
+    design = (
+        PROJECT_ROOT
+        / "docs/superpowers/specs/2026-07-21-bundlewalker-0.4.0rc1-production-release-design.md"
+    ).read_text(encoding="utf-8")
+
+    assert 'gh run watch "$RUN_ID" --exit-status' not in plan
+    for job_name in (
+        "Build and verify exact distributions",
+        "Publish exact distributions",
+        "Verify production PyPI installation and checksums",
+        "Create GitHub release from exact distributions",
+    ):
+        assert job_name in plan
+    for assertion in (
+        'test "$BUILD_CONCLUSION" = success',
+        'test "$VERIFY_CONCLUSION" = success',
+        'test "$RELEASE_CONCLUSION" = success',
+        'case "$PUBLISH_CONCLUSION" in',
+        "recovered publication warning",
+    ):
+        assert assertion in plan
+    assert "publish may conclude `failure`" in design
+    assert "recovered publication warning" in design

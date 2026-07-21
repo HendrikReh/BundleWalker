@@ -194,9 +194,11 @@ Artifact installation, metadata, checksum, and command failures remain immediate
 
 ### GitHub release job
 
-The `github-release` job runs only after production verification passes. It alone receives
-`contents: write`. Before using that permission, it queries `origin` again for the current tag and
-peeled ref, rejecting a lightweight, deleted, or moved tag and requiring the peeled commit to equal
+The `github-release` job has an explicit `always()` condition requiring `build` and authoritative
+`verify` to succeed. This bypasses GitHub's implicit ancestor `success()` skip when `publish`
+reported failure after PyPI accepted both exact files. The job alone receives `contents: write`.
+Before using that permission, it queries `origin` again for the current tag and peeled ref,
+rejecting a lightweight, deleted, or moved tag and requiring the peeled commit to equal
 `GITHUB_SHA`. It downloads `python-package-distributions` and creates a GitHub release titled
 `BundleWalker 0.4.0rc1` for the existing tag.
 
@@ -215,15 +217,18 @@ Python distributions.
 
 Before the tag is pushed, create GitHub environment `pypi` with:
 
-- required reviewer: GitHub account `HendrikReh`;
-- deployment branches and tags limited to release tags matching the repository's `v*` release
-  convention;
+- exactly one required-reviewers rule whose reviewer list is exactly GitHub user `HendrikReh`;
+- self-review permitted (`prevent_self_review` is false);
+- no wait timer or custom protection rule;
+- the branch-policy protection rule as the only other protection-rule type;
+- custom deployment policies enabled and protected-branch policy disabled;
+- exactly one custom deployment policy, tag rule `v0.4.0*`, with no branch rule;
 - no PyPI token secret; and
 - environment URL `https://pypi.org/project/bundlewalker/` in the workflow.
 
-After configuration, inspect the environment through GitHub's API and confirm that approval and
-tag restriction rules are actually present. The tag must not be pushed while the environment is
-unprotected.
+After configuration and again immediately before tagging, parse the environment and custom-policy
+API responses with fail-closed assertions for every rule above. Printing selected fields is not
+sufficient. The tag must not be pushed while the environment is unprotected or has any extra rule.
 
 ### Production PyPI pending publisher
 
@@ -262,7 +267,10 @@ The external release transaction is deliberately ordered:
 7. verify the tag locally before pushing it;
 8. push the tag once, starting the production workflow;
 9. inspect the build evidence and explicitly approve the `pypi` environment deployment;
-10. wait for publish, production verification, and GitHub prerelease creation to pass;
+10. wait without treating the overall run conclusion as the release result, then inspect every
+    named job: require build, authoritative verification, and GitHub release success; accept a
+    failed publish only when same-run exact-set verification and GitHub release both succeeded and
+    record a recovered publication warning;
 11. independently inspect production-PyPI JSON, the project page, the remote tag, workflow run,
     GitHub prerelease, attached assets, and checksums; and
 12. perform one final clean install of exact `bundlewalker==0.4.0rc1` and run both CLI help smokes.
@@ -288,16 +296,19 @@ production PyPI as the authority:
   reported failure, allowing the downstream GitHub release to attach the retained artifacts
   without rebuilding or republishing;
 - if only production-index installation exhausts the bounded propagation window after exact
-  metadata succeeds, rerun only the failed verification job and downstream release job;
+  metadata succeeds, download the original run artifact, prove production JSON contains the
+  complete exact filename/digest set, obtain the original verification job's database ID, and use
+  `gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"` to rerun only verification and its dependent
+  release job;
 - if only GitHub release creation or attachment fails, rerun only that downstream job using the
   retained exact workflow artifact; and
 - if an unsafe production version is discovered later, use PyPI's supported yank mechanism,
   publish an advisory, and issue a new version. Preserve the historical GitHub release and never
   move, delete, or reuse its tag.
 
-A fully cancelled workflow may not execute verification. Maintainers must inspect production PyPI
-manually before any further action and must never restart build or publish for a version whose files
-may already have been accepted.
+Never rerun a failed publish job. A fully cancelled workflow may not execute verification.
+Maintainers must inspect production PyPI manually before any further action and must never restart
+build or publish for a version whose files may already have been accepted.
 
 Workflow artifact retention must be long enough to support downstream recovery. Maintainers also
 record the two distribution SHA-256 digests in the successful run and GitHub release evidence.
@@ -372,10 +383,14 @@ The `0.4.0rc1` production release is complete only when all of the following are
 - [ ] The release-preparation pull request is merged with all required supported-platform checks
   passing.
 - [ ] `master`, `origin/master`, and annotated tag `v0.4.0rc1` identify the exact reviewed commit.
-- [ ] The GitHub `pypi` environment requires `HendrikReh` approval and permits only release tags.
+- [ ] The GitHub `pypi` environment has exactly one required-reviewers rule for user `HendrikReh`,
+  permits self-review, has no wait timer or custom protection rule, disables protected branches,
+  enables custom policies, and contains only tag rule `v0.4.0*`.
 - [ ] Production PyPI recognizes the pending or converted publisher for owner/repository/workflow/
   environment tuple `HendrikReh/BundleWalker/publish-pypi.yml/pypi`.
-- [ ] The workflow build, publish, production verification, and GitHub release jobs all pass.
+- [ ] The workflow build, authoritative verification, and GitHub release jobs succeed. Publish
+  ordinarily succeeds, but publish may conclude `failure` only when the same run's exact-set
+  verification and GitHub release succeed; record that outcome as a recovered publication warning.
 - [ ] Production PyPI reports `bundlewalker==0.4.0rc1` with exactly the expected wheel and source
   archive.
 - [ ] Production PyPI SHA-256 digests equal the workflow artifact digests.

@@ -116,6 +116,10 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
 
     release = workflow["jobs"]["github-release"]
     assert release["needs"] == ["build", "verify"]
+    assert release["if"] == (
+        "${{ always() && needs.build.result == 'success' && "
+        "needs.verify.result == 'success' }}"
+    )
     assert release["permissions"] == {"contents": "write"}
     release_commands = _run_commands(workflow, "github-release")
     assert "gh release create" in release_commands
@@ -149,9 +153,17 @@ Also add focused structural tests that:
 - require read-only verification after ordinary publish success or failure without
   `continue-on-error`, rebuilding, or republishing;
 - require live remote annotated-tag and peeled-commit validation before build and before GitHub
-  release creation; and
+  release creation;
 - prove only the exact production-index install loop owns the 5/10/20/40/80-second retry and the
-  production-PyPI JSON request has no retry flags.
+  production-PyPI JSON request has no retry flags;
+- require the GitHub release job's exact `always()` condition so authoritative recovery bypasses
+  the failed publish ancestor's implicit `success()` guard;
+- reject broad failed-job reruns in favor of original-artifact/production-JSON proof followed by
+  job-specific verification rerun;
+- require Task 4 and Task 5 to fail closed on any reviewer, self-review, wait-timer, protection-rule,
+  or branch/tag-policy drift; and
+- accept publish failure at completion only when the same run's build, authoritative verification,
+  and GitHub release jobs succeeded and a recovered publication warning is recorded.
 
 - [ ] **Step 2: Run the focused test and confirm the missing-workflow failure**
 
@@ -345,6 +357,7 @@ jobs:
   github-release:
     name: Create GitHub release from exact distributions
     needs: [build, verify]
+    if: ${{ always() && needs.build.result == 'success' && needs.verify.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -530,7 +543,8 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
         "Never move, delete, or reuse",
         "TestPyPI and production builds are separate",
         "fresh artifacts from its reviewed tag",
-        "rerun only",
+        'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
+        "Never rerun a failed publish job",
     ):
         assert phrase in releases
     assert "Production `0.4.0` is forbidden" in releases
@@ -961,19 +975,35 @@ human approver.
 Run:
 
 ```bash
-gh api \
+ENVIRONMENT_JSON="$(gh api \
   -H "X-GitHub-Api-Version: 2026-03-10" \
-  repos/HendrikReh/BundleWalker/environments/pypi \
-  --jq '{name, protection_rules, deployment_branch_policy}'
-gh api \
+  repos/HendrikReh/BundleWalker/environments/pypi)"
+printf '%s' "$ENVIRONMENT_JSON" | jq -e '
+  (.protection_rules | map(.type) | sort) == ["branch_policy", "required_reviewers"] and
+  ([.protection_rules[] | select(.type == "required_reviewers")] | length) == 1 and
+  ([.protection_rules[] | select(.type == "required_reviewers")][0] |
+    .prevent_self_review == false and
+    (.reviewers | map({type, login: .reviewer.login})) == [{"type":"User","login":"HendrikReh"}]
+  ) and
+  .deployment_branch_policy.protected_branches == false and
+  .deployment_branch_policy.custom_branch_policies == true
+' >/dev/null
+TAG_POLICIES="$(gh api \
   -H "X-GitHub-Api-Version: 2026-03-10" \
-  repos/HendrikReh/BundleWalker/environments/pypi/deployment-branch-policies \
-  --jq '.branch_policies[] | {name, type}'
+  repos/HendrikReh/BundleWalker/environments/pypi/deployment-branch-policies)"
+printf '%s' "$TAG_POLICIES" | jq -e '
+  .total_count == 1 and
+  (.branch_policies | length) == 1 and
+  (.branch_policies[0].name == "v0.4.0*") and
+  (.branch_policies[0].type == "tag")
+' >/dev/null
 ```
 
-Expected: `protection_rules` contains required reviewer `HendrikReh`, custom branch policies are
-enabled, and the only selected release rule is tag type `v0.4.0*`. If any rule is absent or is a
-branch rule, stop before registration or tagging.
+Expected: the required-reviewers rule exists exactly once, names only user `HendrikReh`, and
+permits self-review. The only other protection rule is `branch_policy`; no wait timer or custom
+protection rule exists. Custom policies are enabled, protected-branch selection is disabled, and
+the separate endpoint contains exactly one tag rule `v0.4.0*` with no branch rule. Any drift exits
+nonzero and stops the release before registration or tagging.
 
 - [ ] **Step 5: Register the production-PyPI pending trusted publisher**
 
@@ -1036,16 +1066,25 @@ git ls-remote --exit-code --tags origin refs/tags/v0.4.0rc1 && exit 1 || test "$
 ENVIRONMENT_JSON="$(gh api \
   -H "X-GitHub-Api-Version: 2026-03-10" \
   repos/HendrikReh/BundleWalker/environments/pypi)"
-test "$(printf '%s' "$ENVIRONMENT_JSON" | jq -r \
-  '[.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login] | sort | join(",")')" = HendrikReh
-test "$(printf '%s' "$ENVIRONMENT_JSON" | jq -r \
-  '.deployment_branch_policy.custom_branch_policies')" = true
+printf '%s' "$ENVIRONMENT_JSON" | jq -e '
+  (.protection_rules | map(.type) | sort) == ["branch_policy", "required_reviewers"] and
+  ([.protection_rules[] | select(.type == "required_reviewers")] | length) == 1 and
+  ([.protection_rules[] | select(.type == "required_reviewers")][0] |
+    .prevent_self_review == false and
+    (.reviewers | map({type, login: .reviewer.login})) == [{"type":"User","login":"HendrikReh"}]
+  ) and
+  .deployment_branch_policy.protected_branches == false and
+  .deployment_branch_policy.custom_branch_policies == true
+' >/dev/null
 TAG_POLICIES="$(gh api \
   -H "X-GitHub-Api-Version: 2026-03-10" \
   repos/HendrikReh/BundleWalker/environments/pypi/deployment-branch-policies)"
-test "$(printf '%s' "$TAG_POLICIES" | jq -r \
-  '[.branch_policies[] | select(.type == "tag") | .name] | sort | join(",")')" = v0.4.0\*
-test "$(printf '%s' "$TAG_POLICIES" | jq -r '.branch_policies | length')" = 1
+printf '%s' "$TAG_POLICIES" | jq -e '
+  .total_count == 1 and
+  (.branch_policies | length) == 1 and
+  (.branch_policies[0].name == "v0.4.0*") and
+  (.branch_policies[0].type == "tag")
+' >/dev/null
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   https://pypi.org/pypi/bundlewalker/json)" = 404
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -1127,23 +1166,91 @@ differs.
 Run:
 
 ```bash
-gh run watch "$RUN_ID" --exit-status
-gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs
+gh run watch "$RUN_ID"
+RUN_JSON="$(gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs)"
+test "$(printf '%s' "$RUN_JSON" | jq -r .status)" = completed
+test "$(printf '%s' "$RUN_JSON" | jq -r .headBranch)" = v0.4.0rc1
+test "$(printf '%s' "$RUN_JSON" | jq -r .headSha)" = "$RELEASE_COMMIT"
+job_conclusion() {
+  local name="$1"
+  printf '%s' "$RUN_JSON" | jq -er --arg name "$name" '
+    [.jobs[] | select(.name == $name)] |
+    if length == 1 and .[0].conclusion != null then .[0].conclusion
+    else error("missing or duplicate completed job: \($name)") end
+  '
+}
+BUILD_CONCLUSION="$(job_conclusion "Build and verify exact distributions")"
+PUBLISH_CONCLUSION="$(job_conclusion "Publish exact distributions")"
+VERIFY_CONCLUSION="$(job_conclusion "Verify production PyPI installation and checksums")"
+RELEASE_CONCLUSION="$(job_conclusion "Create GitHub release from exact distributions")"
+test "$BUILD_CONCLUSION" = success
+test "$VERIFY_CONCLUSION" = success
+test "$RELEASE_CONCLUSION" = success
+case "$PUBLISH_CONCLUSION" in
+  success) ;;
+  failure)
+    echo "recovered publication warning: publish failed, but same-run verification and GitHub release succeeded"
+    ;;
+  *) exit 1 ;;
+esac
 ```
 
 Expected: build, production verification, and GitHub release jobs conclude `success`. The publish
 job ordinarily succeeds, but may conclude `failure` when PyPI nevertheless accepted both exact
 files; in that case successful authoritative verification and GitHub release completion establish
-the safe outcome. `headBranch` is `v0.4.0rc1` and `headSha` is the reviewed release commit.
+the safe outcome, and the completion report records a recovered publication warning. No other
+publish result is accepted. `headBranch` is `v0.4.0rc1` and `headSha` is the reviewed release
+commit.
 
 After ordinary publish success or failure, verification reads production PyPI as the authority. If
 neither file exists, advance to `0.4.0rc2`. If one file exists or a filename or digest mismatches,
 yank the unsafe partial release through PyPI and advance to `0.4.0rc2`. If both exact files and
 digests exist, verification can succeed and the GitHub release job can use the retained artifact
-even when the upload action reported failure. If only exact-version installation exhausts the
-bounded propagation window, use GitHub's **Re-run failed jobs** so build/publish are not rerun. If
-the GitHub release job alone fails, rerun that failed job only. A fully cancelled workflow requires
-manual production-PyPI inspection before any further action.
+even when the upload action reported failure.
+
+If only exact-version installation exhausts the bounded propagation window, first prove the
+complete exact PyPI set against the original run artifact, then rerun only the original
+verification job and its dependent release job:
+
+```bash
+version=0.4.0rc1
+RECOVERY_ROOT="$(mktemp -d)"
+gh run download "$RUN_ID" --name python-package-distributions --dir "$RECOVERY_ROOT/dist"
+curl --fail --silent --show-error --location \
+  "https://pypi.org/pypi/bundlewalker/${version}/json" \
+  --output "$RECOVERY_ROOT/pypi.json"
+uv run --no-project python - "$RECOVERY_ROOT/pypi.json" "$RECOVERY_ROOT/dist" "$version" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+dist = Path(sys.argv[2])
+version = sys.argv[3]
+expected_names = {
+    f"bundlewalker-{version}-py3-none-any.whl",
+    f"bundlewalker-{version}.tar.gz",
+}
+local = {
+    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in dist.iterdir()
+    if path.is_file()
+}
+remote = {item["filename"]: item["digests"]["sha256"] for item in payload["urls"]}
+assert payload["info"]["version"] == version
+assert set(local) == expected_names
+assert set(remote) == expected_names
+assert local == remote, {"local": local, "remote": remote}
+PY
+VERIFY_JOB_ID="$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.name == "Verify production PyPI installation and checksums") | .databaseId')"
+test -n "$VERIFY_JOB_ID"
+gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"
+```
+
+Never rerun a failed publish job. If the GitHub release job alone fails, target only that original
+job by database ID. A fully cancelled workflow requires manual production-PyPI inspection before
+any further action.
 
 - [ ] **Step 7: Independently verify production PyPI and clean installation**
 
