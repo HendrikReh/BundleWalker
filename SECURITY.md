@@ -27,6 +27,9 @@ the maintainer to establish private contact without disclosing vulnerability det
 Reports are handled on a best-effort basis. The maintainer will validate impact, coordinate a fix
 and disclosure when possible, and credit reporters who request attribution.
 
+Use the [Support Policy](SUPPORT.md) for public, non-security bug reports and support expectations.
+See [License Scope](LICENSE-SCOPE.md) for the GPL/CC0 path map and treatment of user content.
+
 Do not attach a doctor support report to a public issue when the report concerns a suspected
 security vulnerability. Use private vulnerability reporting and review every diagnostic artifact
 before sharing it.

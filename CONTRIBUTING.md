@@ -71,8 +71,10 @@ from release provenance, and retain the explicit Hatch source-distribution inclu
 
 ## Development setup
 
-BundleWalker requires Python `>=3.13`. Use the locked dependency graph so local results match CI
-and other contributors. Credentials are unnecessary for the default suite.
+BundleWalker requires Python 3.13 and 3.14. Required CI runs on macOS and Linux for both versions;
+Windows is experimental and remains visible without being a supported gate. Use the locked
+dependency graph so local results match CI and other contributors. Credentials are unnecessary for
+the default suite.
 
 ```bash
 git clone https://github.com/HendrikReh/BundleWalker.git
@@ -113,13 +115,17 @@ can provide the current interface.
 Use these checks for normal development:
 
 ```bash
+uv sync --locked
+uv lock --check
 uv run pytest -m 'not eval' -q
-uv run pytest tests/workflows/test_ask.py -q
 uv run ruff format --check .
 uv run ruff check .
 uv run pyright
 git diff --check
 ```
+
+Run the smallest relevant focused test before this standard verification gate; for example,
+`uv run pytest tests/workflows/test_ask.py -q` when changing the ask workflow.
 
 Live quality evaluation is optional. Running
 `BUNDLEWALKER_EVAL_MODEL='<pydantic-ai-model-string>' uv run pytest -m eval -v` uses the named

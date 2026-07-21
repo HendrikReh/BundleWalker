@@ -5,6 +5,36 @@ Production builds fresh artifacts from its reviewed tag: one wheel and one sourc
 The publish, verification, and GitHub release jobs then reuse those exact production bytes without
 rebuilding them.
 
+## Release prerequisites
+
+- [ ] Work from a clean, synchronized `master` checkout and a reviewed pull-request head whose
+  required CI checks are green.
+- [ ] Confirm `pyproject.toml`, installed metadata, `uv.lock`, README, changelog, and the intended
+  tag all identify the same immutable version.
+- [ ] Confirm required macOS/Linux CI passes on Python 3.13 and 3.14 and review the visible,
+  experimental Windows results.
+- [ ] Capture fresh local verification, artifact, dependency-audit, and workspace-lifecycle
+  evidence before creating or pushing any production tag.
+- [ ] Verify the target GitHub environment and matching OIDC trusted publisher: `testpypi` for
+  TestPyPI rehearsal or human-approved, tag-only `pypi` for production.
+- [ ] Use authenticated `git` and GitHub CLI sessions with the repository permissions required by
+  the selected workflow; never create an API-token publishing secret.
+
+## Release overview
+
+1. Prepare the version and release documentation on a focused branch, run the complete local gate,
+   and merge only the reviewed pull-request head into protected `master`.
+2. Attach fresh workspace compatibility, backup/restore, rollback, and abrupt-recovery evidence.
+3. For an alpha rehearsal, dispatch `publish-testpypi.yml` from `master` with the exact declared
+   version and require build, OIDC publish, and TestPyPI verification to pass.
+4. For a production release candidate or final release, revalidate the `pypi` environment and
+   trusted-publisher tuple before creating one annotated version tag at the reviewed merge commit.
+5. Push the tag once so `publish-pypi.yml` builds fresh artifacts, pauses for human environment
+   approval, publishes with OIDC, verifies production PyPI, and creates the GitHub release from the
+   same bytes.
+6. Apply the recovery matrix below to the original run. Never rebuild, republish, move, delete, or
+   reuse an immutable tag or package version.
+
 ## Version policy
 
 - `pyproject.toml` is the only authoritative build/runtime package-version source.
