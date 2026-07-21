@@ -1046,7 +1046,10 @@ Expected: HTTP 404. The pending publisher is account configuration, not a packag
 
 **Interfaces:**
 - Consumes: synchronized reviewed `master`, protected environment `pypi`, and verified pending publisher from Task 4.
-- Produces: one immutable production-PyPI version, one immutable remote tag, one successful workflow run, one GitHub prerelease, and independent clean-install/checksum evidence.
+- Produces: one immutable production-PyPI version, one immutable remote tag, successful build,
+  authoritative verification, and GitHub release jobs, a publish job that either succeeds or is
+  explicitly recorded as authoritatively recovered, one GitHub prerelease, and independent
+  clean-install/checksum evidence.
 
 - [ ] **Step 1: Run the final reversible pre-tag audit**
 
@@ -1246,6 +1249,33 @@ PY
 VERIFY_JOB_ID="$(gh run view "$RUN_ID" --json jobs --jq '.jobs[] | select(.name == "Verify production PyPI installation and checksums") | .databaseId')"
 test -n "$VERIFY_JOB_ID"
 gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"
+gh run watch "$RUN_ID"
+RUN_JSON="$(gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs)"
+test "$(printf '%s' "$RUN_JSON" | jq -r .status)" = completed
+test "$(printf '%s' "$RUN_JSON" | jq -r .headBranch)" = v0.4.0rc1
+test "$(printf '%s' "$RUN_JSON" | jq -r .headSha)" = "$RELEASE_COMMIT"
+job_conclusion() {
+  local name="$1"
+  printf '%s' "$RUN_JSON" | jq -er --arg name "$name" '
+    [.jobs[] | select(.name == $name)] |
+    if length == 1 and .[0].conclusion != null then .[0].conclusion
+    else error("missing or duplicate completed job: \($name)") end
+  '
+}
+BUILD_CONCLUSION="$(job_conclusion "Build and verify exact distributions")"
+PUBLISH_CONCLUSION="$(job_conclusion "Publish exact distributions")"
+VERIFY_CONCLUSION="$(job_conclusion "Verify production PyPI installation and checksums")"
+RELEASE_CONCLUSION="$(job_conclusion "Create GitHub release from exact distributions")"
+test "$BUILD_CONCLUSION" = success
+test "$VERIFY_CONCLUSION" = success
+test "$RELEASE_CONCLUSION" = success
+case "$PUBLISH_CONCLUSION" in
+  success) ;;
+  failure)
+    echo "recovered publication warning: publish failed, but same-run verification and GitHub release succeeded"
+    ;;
+  *) exit 1 ;;
+esac
 ```
 
 Never rerun a failed publish job. If the GitHub release job alone fails, target only that original
@@ -1334,8 +1364,9 @@ gh run view "$RUN_ID" --json conclusion --jq .conclusion
 gh release view v0.4.0rc1 --json url --jq .url
 ```
 
-Expected: synchronized clean `master`, exact immutable tag, successful workflow, converted trusted
-publisher, and public GitHub prerelease.
+Expected: synchronized clean `master`, exact immutable tag, successful build, authoritative
+verification, and GitHub release jobs, publish either successful or explicitly recorded as
+authoritatively recovered, converted trusted publisher, and public GitHub prerelease.
 
 Record the workflow URL, PyPI URL, GitHub release URL, release commit, and both SHA-256 digests in
 the completion report. The next task is a separately designed production-installed lifecycle

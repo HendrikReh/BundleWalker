@@ -663,3 +663,32 @@ def test_release_completion_allows_only_exactly_verified_publish_failure() -> No
         assert assertion in plan
     assert "publish may conclude `failure`" in design
     assert "recovered publication warning" in design
+
+
+def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
+    plan = (
+        PROJECT_ROOT
+        / "docs/superpowers/plans/2026-07-21-bundlewalker-0.4.0rc1-production-release.md"
+    ).read_text(encoding="utf-8")
+
+    assert "successful workflow" not in plan.lower()
+    rerun = plan.index('gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"')
+    independent_verification = plan.index(
+        "- [ ] **Step 7: Independently verify production PyPI", rerun
+    )
+    recovery_audit = plan[rerun:independent_verification]
+    assert 'gh run watch "$RUN_ID"' in recovery_audit
+    assert 'gh run watch "$RUN_ID" --exit-status' not in recovery_audit
+    for assertion in (
+        'RUN_JSON="$(gh run view "$RUN_ID" --json status,conclusion,headBranch,headSha,url,jobs)"',
+        'BUILD_CONCLUSION="$(job_conclusion "Build and verify exact distributions")"',
+        'PUBLISH_CONCLUSION="$(job_conclusion "Publish exact distributions")"',
+        'VERIFY_CONCLUSION="$(job_conclusion "Verify production PyPI installation and checksums")"',
+        'RELEASE_CONCLUSION="$(job_conclusion "Create GitHub release from exact distributions")"',
+        'test "$BUILD_CONCLUSION" = success',
+        'test "$VERIFY_CONCLUSION" = success',
+        'test "$RELEASE_CONCLUSION" = success',
+        'case "$PUBLISH_CONCLUSION" in',
+        "recovered publication warning",
+    ):
+        assert assertion in recovery_audit
