@@ -106,7 +106,10 @@ bundlewalker-mcp --workspace /absolute/path/to/workspace
 It is local `stdio`, not a hosted, remote, HTTP, or web-server transport. See the
 [host-neutral MCP guide](docs/user-guide.md#use-bundlewalker-through-a-local-mcp-host) for its
 resource and tool contract. Hermes Agent users can follow the dedicated
-[Hermes MCP setup guide](docs/hermes-mcp-setup.md).
+[Hermes MCP setup guide](docs/hermes-mcp-setup.md). Visual Studio Code users can follow the
+[VS Code/Copilot MCP setup guide](docs/vscode-copilot-mcp-setup.md); the
+[MCP compatibility record](docs/mcp-compatibility.md) distinguishes observed host evidence from
+documented but untested combinations.
 
 ### Local web UI
 
@@ -171,6 +174,10 @@ Each active document has one canonical job:
   and troubleshooting reference.
 - The [Hermes MCP Setup Guide](docs/hermes-mcp-setup.md) covers portable Hermes-specific MCP
   registration, tool filtering, environment forwarding, verification, and removal.
+- The [VS Code/Copilot MCP Setup Guide](docs/vscode-copilot-mcp-setup.md) covers workspace-scoped
+  registration, secret inputs, tool selection, approvals, resources, logs, and removal.
+- The [MCP Host Compatibility Record](docs/mcp-compatibility.md) publishes the tested host matrix,
+  exact environment, capability evidence, and limits of each certification claim.
 - The [Workspace Compatibility Policy](docs/workspace-compatibility.md) defines workspace formats,
   backup, restore, upgrade, rollback, and portability boundaries.
 - [Performance and Capacity](docs/performance-and-capacity.md) publishes reviewed evidence, the

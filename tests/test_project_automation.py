@@ -365,6 +365,58 @@ def test_doctor_diagnostics_and_redacted_support_reports_are_published() -> None
     assert "owner-only partial support-report target" in changelog
 
 
+def test_mcp_host_documentation_is_published() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    tutorial = (PROJECT_ROOT / "docs/tutorial.md").read_text(encoding="utf-8")
+    setup = (PROJECT_ROOT / "docs/vscode-copilot-mcp-setup.md").read_text(encoding="utf-8")
+    compatibility = (PROJECT_ROOT / "docs/mcp-compatibility.md").read_text(encoding="utf-8")
+
+    for document in (readme, user_guide, tutorial):
+        assert "vscode-copilot-mcp-setup.md" in document
+        assert "mcp-compatibility.md" in document
+
+    for phrase in (
+        ".vscode/mcp.json",
+        "envFile",
+        "${input:",
+        "Configure Tools",
+        "MCP: List Servers",
+        "MCP: Browse Resources",
+        "Show Output",
+    ):
+        assert phrase in setup
+
+    for phrase in (
+        "Visual Studio Code 1.129.1",
+        "GitHub Copilot 0.57.0",
+        "BundleWalker 0.4.0rc2",
+        "MCP Python SDK 1.28.1",
+        "MCP protocol 2025-11-25",
+        "macOS",
+        "resources",
+        "discard",
+        "apply",
+        "restart",
+        "transaction recovery",
+    ):
+        assert phrase in compatibility
+
+    for tool in (
+        "workspace_status",
+        "search_concepts",
+        "ask",
+        "lint",
+        "prepare_ingestion",
+        "prepare_synthesis",
+        "prepare_refresh",
+        "get_pending_review",
+        "apply_review",
+        "discard_review",
+    ):
+        assert f"`{tool}`" in compatibility
+
+
 def test_contributor_documentation_keeps_historical_records_immutable() -> None:
     contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
 

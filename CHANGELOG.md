@@ -6,6 +6,9 @@ All notable BundleWalker releases are recorded here.
 
 - Reorganized active documentation around a newcomer-first README, guided tutorial, canonical
   user reference, focused specialist guides, and consistent project-policy navigation.
+- Added a Visual Studio Code/GitHub Copilot MCP setup guide and an auditable host-compatibility
+  record covering discovery, deterministic tools, exact-ID discard and apply, restart persistence,
+  resources, provider boundaries, and the macOS-only certification scope.
 
 ## [v0.4.0rc2] - 2026-07-21
 
