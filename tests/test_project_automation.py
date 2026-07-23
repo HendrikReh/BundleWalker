@@ -837,6 +837,13 @@ def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only()
     assert artifact_version_overwrite in validate_script
     assert validate_script.index("re.fullmatch") < validate_script.index(artifact_version_overwrite)
 
+    run_script = _step(workflow, "rehearse", "Run production-installed rehearsal")["run"]
+    activate_installed_commands = 'export PATH="$VENV/bin:$PATH"'
+    assert activate_installed_commands in run_script
+    assert run_script.index(activate_installed_commands) < run_script.index(
+        'cp "$GITHUB_WORKSPACE/scripts/rehearse_production_lifecycle.py"'
+    )
+
     upload = _step(workflow, "rehearse", "Upload lifecycle evidence")
     assert upload["if"] == "always()"
     assert upload["with"]["if-no-files-found"] == "error"
