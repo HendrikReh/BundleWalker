@@ -24,6 +24,7 @@ from typing import Any, cast
 RELEASE_CANDIDATE = re.compile(r"0\.4\.0rc[1-9][0-9]*")
 SHA256_LINE = re.compile(r"^SHA-256: ([0-9a-f]{64})$", re.MULTILINE)
 MAX_CAPTURE_CHARACTERS = 20_000
+MAX_DOCTOR_REPORT_BYTES = 1024 * 1024
 TRUNCATION_MARKER = "\n...[truncated by lifecycle rehearsal]"
 PORTABLE_ENTRIES = ("bundlewalker.toml", "conventions.md", "raw", "wiki")
 PORTABLE_FILE_ENTRIES = ("bundlewalker.toml", "conventions.md")
@@ -289,6 +290,11 @@ def new_evidence(version: str) -> dict[str, object]:
     }
 
 
+def _safe_label(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]", "?", value)[:100]
+    return normalized or "unknown"
+
+
 def execute_phases(
     evidence: dict[str, object],
     phases: Sequence[tuple[str, Callable[[], dict[str, object]]]],
@@ -308,6 +314,31 @@ def execute_phases(
                     "status": "failed",
                     "failure_category": exc.category,
                     "message": exc.message,
+                }
+            )
+            if commands is not None:
+                record["commands"] = commands
+            recorded.extend(
+                {
+                    "name": later_name,
+                    "status": "skipped",
+                    "reason": f"blocked by failed phase {name}",
+                }
+                for later_name, _ in phases[index + 1 :]
+            )
+            raise
+        except Exception as exc:
+            commands = record.get("commands")
+            record.clear()
+            record.update(
+                {
+                    "name": name,
+                    "status": "failed",
+                    "failure_category": "harness_internal",
+                    "message": (
+                        "unexpected internal failure in phase "
+                        f"{_safe_label(name)} ({_safe_label(type(exc).__name__)})"
+                    ),
                 }
             )
             if commands is not None:
@@ -402,6 +433,79 @@ def _has_files(directory: Path) -> bool:
     return any(path.is_file() for path in directory.rglob("*"))
 
 
+def _load_raw_doctor_report(
+    raw_report: Path,
+    *,
+    run_root: Path,
+    category: str,
+) -> object:
+    directory_descriptor: int | None = None
+    cleanup_name: str | None = None
+    cleanup_entry = False
+    try:
+        root = run_root.resolve(strict=True)
+        parent = raw_report.parent.resolve(strict=True)
+        if not parent.is_relative_to(root):
+            raise RehearsalFailure(
+                category, "doctor report must be a regular file inside the run root"
+            )
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        directory_descriptor = os.open(parent, directory_flags)
+        cleanup_name = raw_report.name
+        report_stat = os.stat(
+            cleanup_name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        cleanup_entry = not stat.S_ISDIR(report_stat.st_mode)
+        if not stat.S_ISREG(report_stat.st_mode):
+            raise RehearsalFailure(
+                category, "doctor report must be a regular file inside the run root"
+            )
+        if report_stat.st_size > MAX_DOCTOR_REPORT_BYTES:
+            raise RehearsalFailure(category, "raw doctor report exceeds the one-megabyte limit")
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if no_follow == 0:
+            raise RehearsalFailure(category, "doctor report no-follow reads are unavailable")
+        report_descriptor = os.open(
+            cleanup_name,
+            os.O_RDONLY | no_follow,
+            dir_fd=directory_descriptor,
+        )
+        with os.fdopen(report_descriptor, "rb") as stream:
+            opened_stat = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or opened_stat.st_dev != report_stat.st_dev
+                or opened_stat.st_ino != report_stat.st_ino
+            ):
+                raise RehearsalFailure(category, "doctor report changed before it could be read")
+            if opened_stat.st_size > MAX_DOCTOR_REPORT_BYTES:
+                raise RehearsalFailure(category, "raw doctor report exceeds the one-megabyte limit")
+            raw_bytes = stream.read(MAX_DOCTOR_REPORT_BYTES + 1)
+            if len(raw_bytes) > MAX_DOCTOR_REPORT_BYTES:
+                raise RehearsalFailure(category, "raw doctor report exceeds the one-megabyte limit")
+            return json.loads(raw_bytes.decode("utf-8"))
+    except RehearsalFailure:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise RehearsalFailure(category, "doctor report could not be preserved") from None
+    finally:
+        cleanup_failed = False
+        if directory_descriptor is not None:
+            if cleanup_name is not None and cleanup_entry:
+                try:
+                    os.unlink(cleanup_name, dir_fd=directory_descriptor)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    cleanup_failed = True
+            os.close(directory_descriptor)
+        if cleanup_failed:
+            raise RehearsalFailure(category, "raw doctor report could not be deleted")
+
+
 def _preserve_doctor_report(
     raw_report: Path,
     evidence_report: Path,
@@ -409,20 +513,22 @@ def _preserve_doctor_report(
     run_root: Path,
     category: str,
 ) -> None:
-    try:
-        payload: object = json.loads(raw_report.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping):
-            raise RehearsalFailure(category, "doctor report must contain a JSON object")
-        sanitized = sanitize_value(cast(Mapping[object, object], payload), run_root)
-        write_evidence(
-            evidence_report,
-            cast(Mapping[str, object], sanitized),
-            run_root,
-        )
-    except (OSError, json.JSONDecodeError):
-        raise RehearsalFailure(category, "doctor report could not be preserved") from None
-    finally:
-        raw_report.unlink(missing_ok=True)
+    payload = _load_raw_doctor_report(
+        raw_report,
+        run_root=run_root,
+        category=category,
+    )
+    if not isinstance(payload, Mapping):
+        raise RehearsalFailure(category, "doctor report must contain a JSON object")
+    sanitized = sanitize_value(cast(Mapping[object, object], payload), run_root)
+    serialized = json.dumps(sanitized, indent=2, sort_keys=True) + "\n"
+    if len(serialized.encode("utf-8")) > MAX_DOCTOR_REPORT_BYTES:
+        raise RehearsalFailure(category, "sanitized doctor report exceeds the one-megabyte limit")
+    write_evidence(
+        evidence_report,
+        cast(Mapping[str, object], sanitized),
+        run_root,
+    )
 
 
 def _execute_rehearsal(config: RehearsalConfig, evidence: dict[str, object]) -> None:
@@ -859,8 +965,7 @@ def _parse_config(argv: Sequence[str] | None) -> RehearsalConfig:
 
 
 def _internal_failure_message(exc: Exception) -> str:
-    exception_type = re.sub(r"[^A-Za-z0-9_.-]", "?", type(exc).__name__)[:100]
-    return f"unexpected harness failure ({exception_type})"
+    return f"unexpected harness failure ({_safe_label(type(exc).__name__)})"
 
 
 def main(argv: Sequence[str] | None = None) -> int:

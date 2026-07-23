@@ -135,6 +135,96 @@ def test_write_evidence_is_atomic_sanitized_and_newline_terminated(tmp_path: Pat
     }
 
 
+def test_doctor_report_preservation_rejects_external_symlink(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    raw_dir = run_root / "raw-doctor"
+    raw_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"private": "external"}\n', encoding="utf-8")
+    raw_report = raw_dir / "doctor.json"
+    raw_report.symlink_to(outside)
+    evidence_report = run_root / "evidence" / "doctor.json"
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="regular file inside the run root"):
+        HARNESS._preserve_doctor_report(
+            raw_report,
+            evidence_report,
+            run_root=run_root,
+            category="doctor",
+        )
+
+    assert outside.read_text(encoding="utf-8") == '{"private": "external"}\n'
+    assert not raw_report.exists()
+    assert not raw_report.is_symlink()
+    assert not evidence_report.exists()
+
+
+def test_doctor_report_preservation_rejects_nonregular_file(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    raw_report = run_root / "raw-doctor" / "doctor.json"
+    raw_report.mkdir(parents=True)
+    evidence_report = run_root / "evidence" / "doctor.json"
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="regular file inside the run root"):
+        HARNESS._preserve_doctor_report(
+            raw_report,
+            evidence_report,
+            run_root=run_root,
+            category="doctor",
+        )
+
+    assert raw_report.is_dir()
+    assert not evidence_report.exists()
+
+
+def test_doctor_report_preservation_rejects_oversized_raw_report(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    raw_dir = run_root / "raw-doctor"
+    raw_dir.mkdir(parents=True)
+    raw_report = raw_dir / "doctor.json"
+    raw_report.write_bytes(b'{"value":"' + b"x" * HARNESS.MAX_DOCTOR_REPORT_BYTES + b'"}')
+    evidence_report = run_root / "evidence" / "doctor.json"
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="raw doctor report exceeds"):
+        HARNESS._preserve_doctor_report(
+            raw_report,
+            evidence_report,
+            run_root=run_root,
+            category="doctor",
+        )
+
+    assert not raw_report.exists()
+    assert not evidence_report.exists()
+
+
+def test_doctor_report_preservation_rejects_oversized_sanitized_report(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    raw_dir = run_root / "raw-doctor"
+    raw_dir.mkdir(parents=True)
+    raw_report = raw_dir / "doctor.json"
+    raw_report.write_text(
+        json.dumps({"items": [0] * 180_000}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    assert raw_report.stat().st_size < HARNESS.MAX_DOCTOR_REPORT_BYTES
+    evidence_report = run_root / "evidence" / "doctor.json"
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="sanitized doctor report exceeds"):
+        HARNESS._preserve_doctor_report(
+            raw_report,
+            evidence_report,
+            run_root=run_root,
+            category="doctor",
+        )
+
+    assert not raw_report.exists()
+    assert not evidence_report.exists()
+
+
 def test_portable_tree_digest_is_stable_and_excludes_private_state(tmp_path: Path) -> None:
     first = _portable_workspace(tmp_path / "first")
     second = _portable_workspace(tmp_path / "second")
@@ -254,6 +344,34 @@ def test_failed_phase_is_recorded_and_later_phases_are_skipped(tmp_path: Path) -
             "reason": "blocked by failed phase backup",
         },
     ]
+
+
+def test_unexpected_phase_failure_is_safe_and_skips_later_phases() -> None:
+    evidence = HARNESS.new_evidence("0.4.0rc2")
+
+    def fail() -> dict[str, object]:
+        raise RuntimeError("private exception detail")
+
+    with pytest.raises(RuntimeError, match="private exception detail"):
+        HARNESS.execute_phases(
+            evidence,
+            [("backup", fail), ("restore", lambda: {"unreachable": True})],
+        )
+
+    assert evidence["phases"] == [
+        {
+            "name": "backup",
+            "status": "failed",
+            "failure_category": "harness_internal",
+            "message": "unexpected internal failure in phase backup (RuntimeError)",
+        },
+        {
+            "name": "restore",
+            "status": "skipped",
+            "reason": "blocked by failed phase backup",
+        },
+    ]
+    assert "private exception detail" not in json.dumps(evidence)
 
 
 def test_harness_orchestration_passes_in_development_environment(tmp_path: Path) -> None:
