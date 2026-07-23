@@ -787,3 +787,51 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
         "recovered publication warning",
     ):
         assert assertion in post_refresh_audit
+
+
+def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only() -> None:
+    workflow = _yaml(".github/workflows/rehearse-production-lifecycle.yml")
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["env"]["UV_VERSION"] == "0.11.28"
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    version = workflow["on"]["workflow_dispatch"]["inputs"]["version"]
+    assert version == {
+        "description": "Exact production PyPI release candidate (0.4.0rcN)",
+        "required": "true",
+        "type": "string",
+    }
+
+    rehearse = workflow["jobs"]["rehearse"]
+    assert "environment" not in rehearse
+    assert rehearse["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {
+            "os": ["ubuntu-24.04", "macos-15"],
+            "python-version": ["3.13", "3.14"],
+        },
+    }
+    assert rehearse["runs-on"] == "${{ matrix.os }}"
+    commands = _run_commands(workflow, "rehearse")
+    for required in (
+        r"0\.4\.0rc[1-9][0-9]*",
+        "UV_NO_CONFIG=1",
+        "unset PYTHONPATH UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_CONFIG_FILE",
+        "--default-index https://pypi.org/simple",
+        '"bundlewalker==${VERSION}"',
+        "scripts/rehearse_production_lifecycle.py",
+        'cd "$REHEARSAL_ROOT"',
+    ):
+        assert required in commands
+    assert "test.pypi.org" not in commands.lower()
+    assert "dist/" not in commands
+    assert "uv sync" not in commands
+
+    upload = _step(workflow, "rehearse", "Upload lifecycle evidence")
+    assert upload["if"] == "always()"
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["retention-days"] == "90"
+    assert "${{ inputs.version }}" in upload["with"]["name"]
+    assert "${{ matrix.os }}" in upload["with"]["name"]
+    assert "${{ matrix.python-version }}" in upload["with"]["name"]
+    _assert_actions_are_sha_pinned(workflow)
