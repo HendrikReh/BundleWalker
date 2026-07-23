@@ -15,6 +15,18 @@ is a separate boundary from MCP transport and host behavior.
 Certification does not mean that a host can bypass BundleWalker's review, validation, workspace,
 provider, or transaction boundaries.
 
+## Production-installed MCP evidence
+
+The generic production-installed lifecycle rehearsal for `0.4.0rc2` confirmed that the installed
+`bundlewalker-mcp` exposed all 10 MCP tools on macOS 15 and Ubuntu 24.04 with Python 3.13 and 3.14.
+See the independently inspected
+[production lifecycle evidence](maintainers/evidence/2026-07-22-production-lifecycle-0.4.0rc2.md)
+for the workflow, source commit, artifacts, and exact tool inventory.
+
+That matrix verifies package installation, local `stdio` initialization, and tool discovery. It
+does not represent a host-mediated run, provider-backed calls, Windows support, or an expansion of
+the VS Code/Copilot certification below.
+
 ## VS Code certification environment
 
 The observed run took place on 2026-07-21 with these exact components:
