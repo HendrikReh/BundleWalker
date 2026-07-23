@@ -13,6 +13,9 @@ All notable BundleWalker releases are recorded here.
   and Python 3.13/3.14 matrix, with black-box workspace lifecycle and installed MCP discovery plus
   sanitized evidence artifacts. This automation does not itself claim that the live release gate
   has passed.
+- Completed the live production-installed lifecycle rehearsal for `0.4.0rc2` on all four supported
+  macOS/Linux and Python 3.13/3.14 environments, and recorded independently inspected workspace,
+  archive, doctor, and installed MCP evidence.
 
 ## [v0.4.0rc2] - 2026-07-21
 

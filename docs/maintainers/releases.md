@@ -180,9 +180,9 @@ and GitHub release both succeed. Keep that failed job visible and record a recov
 warning in the completion report.
 
 Production `0.4.0` is forbidden until every public-beta exit gate passes. `0.4.0rc2` certifies the
-production clean-install candidate, not final beta readiness. The next gate is a
-production-installed workspace lifecycle rehearsal covering inspection, backup, separate-target
-restore, upgrade behavior, rollback, and post-operation verification.
+production clean-install candidate, not final beta readiness. Its production-installed workspace
+lifecycle gate has now passed as recorded below; that result does not by itself declare final beta
+readiness.
 
 ## Production-installed lifecycle rehearsal
 
@@ -218,6 +218,12 @@ the production installation or rehearsal fails. Classify the failure before acti
 - For a published-package defect, advance to the next release candidate. Fix the package through
   review, then publish and rehearse that new immutable version; do not reuse the failed candidate's
   tag or package version.
+
+The production-installed lifecycle gate for `0.4.0rc2` passed on the complete supported matrix in
+[workflow run 30024736071](https://github.com/HendrikReh/BundleWalker/actions/runs/30024736071).
+The independently inspected environment results, artifact names, archive hashes, portable
+workspace digest, doctor summaries, and installed MCP surface are preserved in the
+[0.4.0rc2 production lifecycle evidence](evidence/2026-07-22-production-lifecycle-0.4.0rc2.md).
 
 ## Failure and rollback
 

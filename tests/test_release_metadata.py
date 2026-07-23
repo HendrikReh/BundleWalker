@@ -807,3 +807,75 @@ def test_lifecycle_rehearsal_metadata_agrees_across_current_workflow_and_guides(
         "Windows remains experimental and is excluded from this certification matrix"
         in normalized_compatibility
     )
+
+
+def test_production_lifecycle_evidence_records_inspected_live_gate() -> None:
+    evidence_path = (
+        PROJECT_ROOT / "docs/maintainers/evidence/2026-07-22-production-lifecycle-0.4.0rc2.md"
+    )
+    assert evidence_path.is_file()
+
+    evidence = evidence_path.read_text(encoding="utf-8")
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    mcp_compatibility = (PROJECT_ROOT / "docs/mcp-compatibility.md").read_text(encoding="utf-8")
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    normalized_mcp_compatibility = " ".join(mcp_compatibility.split())
+
+    for value in (
+        "https://github.com/HendrikReh/BundleWalker/actions/runs/30024736071",
+        "5fe237800c18d334720ac63a361b22946a427940",
+        "0.4.0rc2",
+        "c0c7ea79107c51015b99793994a603c25542c016ca84d53a363ffe48820f7e4b",
+    ):
+        assert value in evidence
+
+    expected_artifact_rows = (
+        "| `production-lifecycle-0.4.0rc2-macos-15-py3.13` | Python 3.13.14; "
+        "Darwin arm64 | Pass | "
+        "`33f6964967b754658a2641dd8f4da349242204990188e6e95d4a9d3d01154118` | 3375 |",
+        "| `production-lifecycle-0.4.0rc2-macos-15-py3.14` | Python 3.14.6; "
+        "Darwin arm64 | Pass | "
+        "`6055b00c5bcf99ce2d047dd48599c46d68111166a542515e35909c4ff5d55115` | 3376 |",
+        "| `production-lifecycle-0.4.0rc2-ubuntu-24.04-py3.13` | Python 3.13.14; "
+        "Linux x86_64 | Pass | "
+        "`84c4462d9af4d9dfa94d7357622f667ca6ae519e061c31bae0c692845629dbf8` | 3376 |",
+        "| `production-lifecycle-0.4.0rc2-ubuntu-24.04-py3.14` | Python 3.14.6; "
+        "Linux x86_64 | Pass | "
+        "`a86986ccf880c2a4ce8c21f31a68d9dc3e5f64799ac8a8837cdf5ca5386b1387` | 3376 |",
+    )
+    for row in expected_artifact_rows:
+        assert row in evidence
+
+    normalized_evidence = " ".join(evidence.split())
+    assert (
+        "all nine recorded phases present in order and passing: `installed_identity`, "
+        "`initialize`, `inspect_original`, `backup`, `restore`, `upgrade_noop`, `rollback`, "
+        "`mcp`, and `final_invariants`"
+    ) in normalized_evidence
+
+    expected_tools = [
+        "apply_review",
+        "ask",
+        "discard_review",
+        "get_pending_review",
+        "lint",
+        "prepare_ingestion",
+        "prepare_refresh",
+        "prepare_synthesis",
+        "search_concepts",
+        "workspace_status",
+    ]
+    tool_section = evidence.split("## Installed MCP surface", maxsplit=1)[1]
+    observed_tools = re.findall(r"^- `([^`]+)`$", tool_section, flags=re.MULTILINE)
+    assert observed_tools == expected_tools
+
+    evidence_link = "evidence/2026-07-22-production-lifecycle-0.4.0rc2.md"
+    assert evidence_link in releases
+    assert "production-installed lifecycle gate for `0.4.0rc2` passed" in releases
+
+    compatibility_evidence_link = "maintainers/evidence/2026-07-22-production-lifecycle-0.4.0rc2.md"
+    assert compatibility_evidence_link in mcp_compatibility
+    assert "installed `bundlewalker-mcp` exposed all 10 MCP tools" in normalized_mcp_compatibility
+    assert "| Installed release path | Not covered |" in mcp_compatibility
+
+    assert "Completed the live production-installed lifecycle rehearsal" in changelog
