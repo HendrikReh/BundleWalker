@@ -68,6 +68,7 @@ jobs:
         run: |
           unset PYTHONPATH BUNDLEWALKER_MODEL UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_CONFIG_FILE
           export PYTHONNOUSERSITE=1 UV_NO_CONFIG=1
+          export PATH="$VENV/bin:$PATH"
           cp "$GITHUB_WORKSPACE/scripts/rehearse_production_lifecycle.py" "$REHEARSAL_ROOT/rehearse_production_lifecycle.py"
           cd "$REHEARSAL_ROOT"
           "$VENV_PYTHON" "$REHEARSAL_ROOT/rehearse_production_lifecycle.py" \
