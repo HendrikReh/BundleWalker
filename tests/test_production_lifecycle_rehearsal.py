@@ -159,6 +159,39 @@ def test_doctor_report_preservation_rejects_external_symlink(tmp_path: Path) -> 
     assert not evidence_report.exists()
 
 
+def test_doctor_report_preservation_keeps_raw_and_publishes_only_sanitized_evidence(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    raw_dir = run_root / "raw-doctor"
+    raw_dir.mkdir(parents=True)
+    raw_report = raw_dir / "original-raw.json"
+    raw_payload = {
+        "workspace": str(run_root / "original"),
+        "nested": [{"path": str(run_root / "original" / "wiki")}],
+    }
+    raw_text = json.dumps(raw_payload) + "\n"
+    raw_report.write_text(raw_text, encoding="utf-8")
+    evidence_dir = run_root / "evidence"
+    evidence_report = evidence_dir / "original-doctor.json"
+
+    HARNESS._preserve_doctor_report(
+        raw_report,
+        evidence_report,
+        run_root=run_root,
+        category="doctor_report",
+    )
+
+    assert raw_report.read_text(encoding="utf-8") == raw_text
+    assert evidence_report.parent == evidence_dir
+    assert not evidence_report.is_relative_to(raw_dir)
+    assert not (evidence_dir / raw_report.name).exists()
+    assert json.loads(evidence_report.read_text(encoding="utf-8")) == {
+        "workspace": "$RUN_ROOT/original",
+        "nested": [{"path": "$RUN_ROOT/original/wiki"}],
+    }
+
+
 def test_doctor_report_preservation_keeps_post_read_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -233,7 +266,8 @@ def test_doctor_report_preservation_rejects_oversized_raw_report(
             category="doctor",
         )
 
-    assert not raw_report.exists()
+    assert raw_report.is_file()
+    assert raw_report.stat().st_size > HARNESS.MAX_DOCTOR_REPORT_BYTES
     assert not evidence_report.exists()
 
 
@@ -259,7 +293,8 @@ def test_doctor_report_preservation_rejects_oversized_sanitized_report(
             category="doctor",
         )
 
-    assert not raw_report.exists()
+    assert raw_report.is_file()
+    assert raw_report.stat().st_size < HARNESS.MAX_DOCTOR_REPORT_BYTES
     assert not evidence_report.exists()
 
 
@@ -449,6 +484,22 @@ def test_harness_orchestration_passes_in_development_environment(tmp_path: Path)
     assert set(evidence["mcp_tools"]) == EXPECTED_TOOLS
     assert evidence["digests"]["original"] == evidence["digests"]["restored"]
     assert evidence["digests"]["original"] == evidence["digests"]["rollback"]
+    raw_doctor_dirs = list(run_root.glob("raw-doctor-*"))
+    assert len(raw_doctor_dirs) == 1
+    raw_reports = list(raw_doctor_dirs[0].iterdir())
+    assert {report.name for report in raw_reports} == {
+        "original.json",
+        "restored.json",
+        "rollback.json",
+    }
+    assert all(report.is_file() for report in raw_reports)
+    assert all(not report.is_relative_to(evidence_dir) for report in raw_reports)
+    assert {path.name for path in evidence_dir.iterdir()} == {
+        "evidence.json",
+        "original-doctor.json",
+        "restored-doctor.json",
+        "rollback-doctor.json",
+    }
 
 
 def test_failed_command_is_retained_in_finalized_phase_evidence(tmp_path: Path) -> None:
