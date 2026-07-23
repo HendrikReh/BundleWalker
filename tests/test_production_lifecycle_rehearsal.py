@@ -143,6 +143,41 @@ def test_portable_tree_digest_is_stable_and_excludes_private_state(tmp_path: Pat
     assert HARNESS.portable_tree_sha256(first) != HARNESS.portable_tree_sha256(second)
 
 
+def test_portable_tree_digest_unambiguously_frames_entries(tmp_path: Path) -> None:
+    single_entry = _portable_workspace(tmp_path / "single-entry")
+    split_entries = _portable_workspace(tmp_path / "split-entries")
+    (single_entry / "raw" / "a").write_bytes(b"alpha\0file\0raw/b\0omega")
+    (split_entries / "raw" / "a").write_bytes(b"alpha")
+    (split_entries / "raw" / "b").write_bytes(b"omega")
+
+    assert HARNESS.portable_tree_sha256(single_entry) != HARNESS.portable_tree_sha256(split_entries)
+
+
+@pytest.mark.parametrize("name", ["bundlewalker.toml", "conventions.md"])
+def test_portable_tree_digest_requires_regular_file_roots(tmp_path: Path, name: str) -> None:
+    workspace = _portable_workspace(tmp_path / name)
+    root = workspace / name
+    root.unlink()
+    root.mkdir()
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="regular file"):
+        HARNESS.portable_tree_sha256(workspace)
+
+
+@pytest.mark.parametrize("name", ["raw", "wiki"])
+def test_portable_tree_digest_requires_directory_roots(tmp_path: Path, name: str) -> None:
+    workspace = _portable_workspace(tmp_path / name)
+    root = workspace / name
+    if name == "wiki":
+        (root / "index.md").unlink()
+        (root / "topics").rmdir()
+    root.rmdir()
+    root.write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="directory"):
+        HARNESS.portable_tree_sha256(workspace)
+
+
 def test_portable_tree_digest_refuses_missing_roots_and_symlinks(tmp_path: Path) -> None:
     incomplete = tmp_path / "incomplete"
     incomplete.mkdir()

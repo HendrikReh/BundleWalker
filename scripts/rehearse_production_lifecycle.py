@@ -19,6 +19,8 @@ SHA256_LINE = re.compile(r"^SHA-256: ([0-9a-f]{64})$", re.MULTILINE)
 MAX_CAPTURE_CHARACTERS = 20_000
 TRUNCATION_MARKER = "\n...[truncated by lifecycle rehearsal]"
 PORTABLE_ENTRIES = ("bundlewalker.toml", "conventions.md", "raw", "wiki")
+PORTABLE_FILE_ENTRIES = ("bundlewalker.toml", "conventions.md")
+PORTABLE_DIRECTORY_ENTRIES = ("raw", "wiki")
 EXPECTED_TOOLS = frozenset(
     {
         "workspace_status",
@@ -52,15 +54,34 @@ def file_sha256(path: Path) -> str:
 
 def portable_tree_sha256(workspace: Path) -> str:
     digest = hashlib.sha256()
+
+    def update_field(value: bytes) -> None:
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
     for name in PORTABLE_ENTRIES:
-        if not (workspace / name).exists():
-            raise RehearsalFailure("workspace_identity", "portable workspace surface is incomplete")
+        path = workspace / name
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            raise RehearsalFailure(
+                "workspace_identity", "portable workspace surface is incomplete"
+            ) from None
+        if stat.S_ISLNK(mode):
+            raise RehearsalFailure(
+                "workspace_identity", f"portable surface contains symlink: {name}"
+            )
+        if name in PORTABLE_FILE_ENTRIES and not stat.S_ISREG(mode):
+            raise RehearsalFailure(
+                "workspace_identity", f"portable root must be a regular file: {name}"
+            )
+        if name in PORTABLE_DIRECTORY_ENTRIES and not stat.S_ISDIR(mode):
+            raise RehearsalFailure(
+                "workspace_identity", f"portable root must be a directory: {name}"
+            )
     paths = [workspace / name for name in PORTABLE_ENTRIES]
     paths.extend(
-        child
-        for name in PORTABLE_ENTRIES
-        if (workspace / name).is_dir()
-        for child in (workspace / name).rglob("*")
+        child for name in PORTABLE_DIRECTORY_ENTRIES for child in (workspace / name).rglob("*")
     )
     for path in sorted(paths, key=lambda item: item.relative_to(workspace).as_posix()):
         relative = PurePosixPath(path.relative_to(workspace).as_posix()).as_posix()
@@ -70,18 +91,16 @@ def portable_tree_sha256(workspace: Path) -> str:
                 "workspace_identity", f"portable surface contains symlink: {relative}"
             )
         if stat.S_ISDIR(mode):
-            kind = b"directory\0"
+            kind = b"directory"
             content = b""
         elif stat.S_ISREG(mode):
-            kind = b"file\0"
+            kind = b"file"
             content = path.read_bytes()
         else:
             raise RehearsalFailure("workspace_identity", f"unsupported portable entry: {relative}")
-        digest.update(kind)
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(content)
-        digest.update(b"\0")
+        update_field(kind)
+        update_field(relative.encode("utf-8"))
+        update_field(content)
     return digest.hexdigest()
 
 
