@@ -9,6 +9,10 @@ All notable BundleWalker releases are recorded here.
 - Added a Visual Studio Code/GitHub Copilot MCP setup guide and an auditable host-compatibility
   record covering discovery, deterministic tools, exact-ID discard and apply, restart persistence,
   resources, provider boundaries, and the macOS-only certification scope.
+- Added a manual, production-installed lifecycle rehearsal workflow for the supported macOS/Linux
+  and Python 3.13/3.14 matrix, with black-box workspace lifecycle and installed MCP discovery plus
+  sanitized evidence artifacts. This automation does not itself claim that the live release gate
+  has passed.
 
 ## [v0.4.0rc2] - 2026-07-21
 

@@ -184,9 +184,46 @@ production clean-install candidate, not final beta readiness. The next gate is a
 production-installed workspace lifecycle rehearsal covering inspection, backup, separate-target
 restore, upgrade behavior, rollback, and post-operation verification.
 
+## Production-installed lifecycle rehearsal
+
+After the production release candidate is available on PyPI and the workflow implementation is
+merged to `master`, dispatch the manual rehearsal with the exact immutable release-candidate shape
+`0.4.0rcN` (where `N` is a positive integer):
+
+```bash
+gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc2
+```
+
+The release gate requires all four supported environments: Ubuntu 24.04 and macOS 15, each with
+Python 3.13 and Python 3.14. Windows remains experimental and is excluded from this certification
+matrix. The workflow artifact for each matrix job is named:
+
+```text
+production-lifecycle-0.4.0rc2-<os>-py<python-version>
+```
+
+Download every artifact and inspect its `evidence.json` and bounded sanitized doctor-report copies
+before recording a result. Raw doctor reports remain only beneath disposable runner storage and are
+never uploaded; only their bounded sanitized copies in `evidence_dir` are workflow artifacts. The
+harness does not import BundleWalker from the checkout: it invokes only the entry points installed
+from production PyPI. The workflow implementation is not live rehearsal evidence. A live result is
+recorded only after all four production-PyPI jobs pass and their artifacts have been independently
+inspected in a separate reviewed commit.
+
+Do not substitute a local wheel, a checkout installation, TestPyPI, or another package index when
+the production installation or rehearsal fails. Classify the failure before acting:
+
+- For a harness or workflow defect, rerun the same immutable release candidate after fixing the
+  reviewed automation, because its published package bytes did not change.
+- For a published-package defect, advance to the next release candidate. Fix the package through
+  review, then publish and rehearse that new immutable version; do not reuse the failed candidate's
+  tag or package version.
+
 ## Failure and rollback
 
-Do not retry by rebuilding the same version. Diagnose the failed job, fix the repository, increment
-the prerelease or patch version, and run the complete verification again. If a production release
-is later found unsafe, stop new installations through the package index's supported yank mechanism,
-publish an advisory, and issue a fixed version; never move, delete, or reuse its Git tag.
+For production publishing failures, do not retry by rebuilding the same version. Diagnose the
+failed job, fix the repository, increment the prerelease or patch version, and run the complete
+verification again. The production-installed lifecycle rehearsal's harness/workflow exception is
+documented above. If a production release is later found unsafe, stop new installations through the
+package index's supported yank mechanism, publish an advisory, and issue a fixed version; never
+move, delete, or reuse its Git tag.

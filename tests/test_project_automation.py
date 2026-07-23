@@ -835,3 +835,27 @@ def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only()
     assert "${{ matrix.os }}" in upload["with"]["name"]
     assert "${{ matrix.python-version }}" in upload["with"]["name"]
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_production_lifecycle_rehearsal_policy_is_published_without_premature_claims() -> None:
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    compatibility = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    for required in (
+        "gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc2",
+        "production-lifecycle-0.4.0rc2-<os>-py<python-version>",
+        "Ubuntu 24.04",
+        "macOS 15",
+        "Python 3.13",
+        "Python 3.14",
+        "does not import BundleWalker from the checkout",
+        "workflow implementation is not live rehearsal evidence",
+    ):
+        assert required in releases
+    assert "advance to the next release candidate" in releases
+    assert "rerun the same immutable release candidate" in releases
+    assert "current format `1`" in compatibility
+    assert "real migration rehearsal" in compatibility
+    assert "production-installed lifecycle rehearsal workflow" in changelog
+    assert "0.4.0rc2 lifecycle rehearsal passed" not in changelog
