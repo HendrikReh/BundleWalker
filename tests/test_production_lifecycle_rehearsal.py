@@ -6,7 +6,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from types import ModuleType
 
@@ -224,3 +227,148 @@ def test_require_success_rejects_nonzero_exit_codes() -> None:
 
     with pytest.raises(HARNESS.RehearsalFailure, match="command failed with exit 7"):
         HARNESS.require_success({"exit_code": 7}, category="archive")
+
+
+def test_failed_phase_is_recorded_and_later_phases_are_skipped(tmp_path: Path) -> None:
+    evidence = HARNESS.new_evidence("0.4.0rc2")
+
+    def fail() -> dict[str, object]:
+        raise HARNESS.RehearsalFailure("backup", "synthetic failure")
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="synthetic failure"):
+        HARNESS.execute_phases(
+            evidence,
+            [("backup", fail), ("restore", lambda: {"unreachable": True})],
+        )
+
+    assert evidence["phases"] == [
+        {
+            "name": "backup",
+            "status": "failed",
+            "failure_category": "backup",
+            "message": "synthetic failure",
+        },
+        {
+            "name": "restore",
+            "status": "skipped",
+            "reason": "blocked by failed phase backup",
+        },
+    ]
+
+
+def test_harness_orchestration_passes_in_development_environment(tmp_path: Path) -> None:
+    bundlewalker = shutil.which("bundlewalker")
+    bundlewalker_mcp = shutil.which("bundlewalker-mcp")
+    assert bundlewalker is not None
+    assert bundlewalker_mcp is not None
+    run_root = tmp_path / "run"
+    evidence_dir = run_root / "evidence"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--version",
+            distribution_version("bundlewalker"),
+            "--run-root",
+            str(run_root),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--bundlewalker",
+            bundlewalker,
+            "--bundlewalker-mcp",
+            bundlewalker_mcp,
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["result"] == "passed"
+    assert [phase["status"] for phase in evidence["phases"]] == ["passed"] * 9
+    assert set(evidence["mcp_tools"]) == EXPECTED_TOOLS
+    assert evidence["digests"]["original"] == evidence["digests"]["restored"]
+    assert evidence["digests"]["original"] == evidence["digests"]["rollback"]
+
+
+def test_failed_command_is_retained_in_finalized_phase_evidence(tmp_path: Path) -> None:
+    failing_cli = shutil.which("ruff")
+    bundlewalker_mcp = shutil.which("bundlewalker-mcp")
+    assert failing_cli is not None
+    assert bundlewalker_mcp is not None
+    run_root = tmp_path / "run"
+    evidence_dir = run_root / "evidence"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--version",
+            distribution_version("bundlewalker"),
+            "--run-root",
+            str(run_root),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--bundlewalker",
+            failing_cli,
+            "--bundlewalker-mcp",
+            bundlewalker_mcp,
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    evidence = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
+    failed = evidence["phases"][1]
+    assert failed["name"] == "initialize"
+    assert failed["status"] == "failed"
+    assert failed["commands"][0]["exit_code"] != 0
+    assert [phase["status"] for phase in evidence["phases"][2:]] == ["skipped"] * 7
+
+
+def test_existing_lifecycle_target_records_failure_and_skips_all_work(
+    tmp_path: Path,
+) -> None:
+    bundlewalker = shutil.which("bundlewalker")
+    bundlewalker_mcp = shutil.which("bundlewalker-mcp")
+    assert bundlewalker is not None
+    assert bundlewalker_mcp is not None
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    (run_root / "original").mkdir()
+    evidence_dir = run_root / "evidence"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--version",
+            distribution_version("bundlewalker"),
+            "--run-root",
+            str(run_root),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--bundlewalker",
+            bundlewalker,
+            "--bundlewalker-mcp",
+            bundlewalker_mcp,
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    evidence = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
+    assert evidence["phases"][0]["status"] == "failed"
+    assert [phase["status"] for phase in evidence["phases"][1:]] == ["skipped"] * 8
