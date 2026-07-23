@@ -12,6 +12,7 @@ permissions:
   contents: read
 
 env:
+  LIFECYCLE_ARTIFACT_VERSION: unvalidated-version
   UV_VERSION: "0.11.28"
 
 jobs:
@@ -50,6 +51,7 @@ jobs:
         run: |
           python -c 'import re, sys; value = sys.argv[1]; assert re.fullmatch(r"0\.4\.0rc[1-9][0-9]*", value)' "$VERSION_INPUT"
           printf 'VERSION=%s\n' "$VERSION_INPUT" >> "$GITHUB_ENV"
+          printf 'LIFECYCLE_ARTIFACT_VERSION=%s\n' "$VERSION_INPUT" >> "$GITHUB_ENV"
       - name: Create isolated production environment
         shell: bash
         run: |
@@ -78,7 +80,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: production-lifecycle-${{ inputs.version }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: production-lifecycle-${{ env.LIFECYCLE_ARTIFACT_VERSION }}-${{ matrix.os }}-py${{ matrix.python-version }}
           path: ${{ runner.temp }}/bundlewalker-lifecycle-${{ github.run_id }}/evidence/
           if-no-files-found: error
           retention-days: 90

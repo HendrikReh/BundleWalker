@@ -794,6 +794,9 @@ def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only()
 
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["env"]["UV_VERSION"] == "0.11.28"
+    artifact_version = workflow["env"]["LIFECYCLE_ARTIFACT_VERSION"]
+    assert artifact_version == "unvalidated-version"
+    assert not re.search(r'[\r\n":<>|*?/\\]', artifact_version)
     assert set(workflow["on"]) == {"workflow_dispatch"}
     version = workflow["on"]["workflow_dispatch"]["inputs"]["version"]
     assert version == {
@@ -827,13 +830,27 @@ def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only()
     assert "dist/" not in commands
     assert "uv sync" not in commands
 
+    validate_script = _step(workflow, "rehearse", "Validate exact release candidate")["run"]
+    artifact_version_overwrite = (
+        'printf \'LIFECYCLE_ARTIFACT_VERSION=%s\\n\' "$VERSION_INPUT" >> "$GITHUB_ENV"'
+    )
+    assert artifact_version_overwrite in validate_script
+    assert validate_script.index("re.fullmatch") < validate_script.index(artifact_version_overwrite)
+
     upload = _step(workflow, "rehearse", "Upload lifecycle evidence")
     assert upload["if"] == "always()"
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["retention-days"] == "90"
-    assert "${{ inputs.version }}" in upload["with"]["name"]
-    assert "${{ matrix.os }}" in upload["with"]["name"]
-    assert "${{ matrix.python-version }}" in upload["with"]["name"]
+    artifact_name = upload["with"]["name"]
+    assert "${{ inputs.version }}" not in artifact_name
+    assert artifact_name == (
+        "production-lifecycle-${{ env.LIFECYCLE_ARTIFACT_VERSION }}-"
+        "${{ matrix.os }}-py${{ matrix.python-version }}"
+    )
+    assert (
+        artifact_name.replace("${{ env.LIFECYCLE_ARTIFACT_VERSION }}", "0.4.0rc2")
+        == "production-lifecycle-0.4.0rc2-${{ matrix.os }}-py${{ matrix.python-version }}"
+    )
     _assert_actions_are_sha_pinned(workflow)
 
 
