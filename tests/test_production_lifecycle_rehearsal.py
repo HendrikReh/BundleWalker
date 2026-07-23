@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -26,6 +27,30 @@ def _load_harness() -> ModuleType:
 
 
 HARNESS = _load_harness()
+
+
+EXPECTED_TOOLS = {
+    "apply_review",
+    "ask",
+    "discard_review",
+    "get_pending_review",
+    "lint",
+    "prepare_ingestion",
+    "prepare_refresh",
+    "prepare_synthesis",
+    "search_concepts",
+    "workspace_status",
+}
+
+
+def _portable_workspace(root: Path) -> Path:
+    root.mkdir()
+    (root / "bundlewalker.toml").write_text("version = 1\n", encoding="utf-8")
+    (root / "conventions.md").write_text("# Conventions\n", encoding="utf-8")
+    (root / "raw").mkdir()
+    (root / "wiki" / "topics").mkdir(parents=True)
+    (root / "wiki" / "index.md").write_text("# Index\n", encoding="utf-8")
+    return root
 
 
 @pytest.mark.parametrize("value", ["0.4.0rc1", "0.4.0rc2", "0.4.0rc19"])
@@ -105,3 +130,62 @@ def test_write_evidence_is_atomic_sanitized_and_newline_terminated(tmp_path: Pat
         "result": "passed",
         "workspace": "$RUN_ROOT/original",
     }
+
+
+def test_portable_tree_digest_is_stable_and_excludes_private_state(tmp_path: Path) -> None:
+    first = _portable_workspace(tmp_path / "first")
+    second = _portable_workspace(tmp_path / "second")
+    (first / ".bundlewalker").mkdir()
+    (first / ".bundlewalker" / "private.json").write_text("private", encoding="utf-8")
+
+    assert HARNESS.portable_tree_sha256(first) == HARNESS.portable_tree_sha256(second)
+    (second / "wiki" / "index.md").write_text("# Changed\n", encoding="utf-8")
+    assert HARNESS.portable_tree_sha256(first) != HARNESS.portable_tree_sha256(second)
+
+
+def test_portable_tree_digest_refuses_missing_roots_and_symlinks(tmp_path: Path) -> None:
+    incomplete = tmp_path / "incomplete"
+    incomplete.mkdir()
+    with pytest.raises(HARNESS.RehearsalFailure, match="portable workspace surface"):
+        HARNESS.portable_tree_sha256(incomplete)
+
+    workspace = _portable_workspace(tmp_path / "linked")
+    target = tmp_path / "outside.txt"
+    target.write_text("outside", encoding="utf-8")
+    (workspace / "raw" / "linked.txt").symlink_to(target)
+    with pytest.raises(HARNESS.RehearsalFailure, match="symlink"):
+        HARNESS.portable_tree_sha256(workspace)
+
+
+def test_digest_parsing_and_independent_file_hashing(tmp_path: Path) -> None:
+    archive = tmp_path / "workspace.zip"
+    archive.write_bytes(b"archive")
+    digest = HARNESS.file_sha256(archive)
+
+    assert len(digest) == 64
+    assert HARNESS.parse_reported_sha256(f"Backup: x\nSHA-256: {digest}\n") == digest
+    with pytest.raises(HARNESS.RehearsalFailure, match="exactly one SHA-256"):
+        HARNESS.parse_reported_sha256("no digest")
+    with pytest.raises(HARNESS.RehearsalFailure, match="exactly one SHA-256"):
+        HARNESS.parse_reported_sha256(f"SHA-256: {digest}\nSHA-256: {digest}\n")
+
+
+def test_entrypoint_and_tool_contracts_are_exact(tmp_path: Path) -> None:
+    environment = tmp_path / "venv"
+    executable = environment / "bin" / "bundlewalker"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("entrypoint", encoding="utf-8")
+
+    assert HARNESS.require_environment_entrypoint(executable, environment) == executable.resolve()
+    with pytest.raises(HARNESS.RehearsalFailure, match="isolated environment"):
+        HARNESS.require_environment_entrypoint(Path(os.devnull), environment)
+    assert set(HARNESS.require_exact_tools(sorted(EXPECTED_TOOLS))) == EXPECTED_TOOLS
+    with pytest.raises(HARNESS.RehearsalFailure, match="MCP tool inventory"):
+        HARNESS.require_exact_tools(sorted(EXPECTED_TOOLS - {"ask"}))
+
+
+def test_require_success_rejects_nonzero_exit_codes() -> None:
+    HARNESS.require_success({"exit_code": 0}, category="archive")
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="command failed with exit 7"):
+        HARNESS.require_success({"exit_code": 7}, category="archive")

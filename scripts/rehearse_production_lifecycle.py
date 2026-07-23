@@ -3,18 +3,36 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 RELEASE_CANDIDATE = re.compile(r"0\.4\.0rc[1-9][0-9]*")
+SHA256_LINE = re.compile(r"^SHA-256: ([0-9a-f]{64})$", re.MULTILINE)
 MAX_CAPTURE_CHARACTERS = 20_000
 TRUNCATION_MARKER = "\n...[truncated by lifecycle rehearsal]"
+PORTABLE_ENTRIES = ("bundlewalker.toml", "conventions.md", "raw", "wiki")
+EXPECTED_TOOLS = frozenset(
+    {
+        "workspace_status",
+        "search_concepts",
+        "ask",
+        "lint",
+        "get_pending_review",
+        "prepare_ingestion",
+        "prepare_synthesis",
+        "prepare_refresh",
+        "apply_review",
+        "discard_review",
+    }
+)
 
 
 class RehearsalFailure(RuntimeError):
@@ -22,6 +40,77 @@ class RehearsalFailure(RuntimeError):
         super().__init__(message)
         self.category = category
         self.message = message
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def portable_tree_sha256(workspace: Path) -> str:
+    digest = hashlib.sha256()
+    for name in PORTABLE_ENTRIES:
+        if not (workspace / name).exists():
+            raise RehearsalFailure("workspace_identity", "portable workspace surface is incomplete")
+    paths = [workspace / name for name in PORTABLE_ENTRIES]
+    paths.extend(
+        child
+        for name in PORTABLE_ENTRIES
+        if (workspace / name).is_dir()
+        for child in (workspace / name).rglob("*")
+    )
+    for path in sorted(paths, key=lambda item: item.relative_to(workspace).as_posix()):
+        relative = PurePosixPath(path.relative_to(workspace).as_posix()).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise RehearsalFailure(
+                "workspace_identity", f"portable surface contains symlink: {relative}"
+            )
+        if stat.S_ISDIR(mode):
+            kind = b"directory\0"
+            content = b""
+        elif stat.S_ISREG(mode):
+            kind = b"file\0"
+            content = path.read_bytes()
+        else:
+            raise RehearsalFailure("workspace_identity", f"unsupported portable entry: {relative}")
+        digest.update(kind)
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def parse_reported_sha256(output: str) -> str:
+    matches = SHA256_LINE.findall(output)
+    if len(matches) != 1:
+        raise RehearsalFailure("archive_identity", "command must report exactly one SHA-256")
+    return matches[0]
+
+
+def require_success(result: Mapping[str, object], *, category: str) -> None:
+    if result["exit_code"] != 0:
+        raise RehearsalFailure(category, f"command failed with exit {result['exit_code']}")
+
+
+def require_environment_entrypoint(path: Path, environment_root: Path) -> Path:
+    resolved = path.resolve(strict=True)
+    if not resolved.is_relative_to(environment_root.resolve(strict=True)):
+        raise RehearsalFailure("installed_identity", "entrypoint is outside isolated environment")
+    return resolved
+
+
+def require_exact_tools(actual: Sequence[str]) -> list[str]:
+    normalized = sorted(actual)
+    if frozenset(normalized) != EXPECTED_TOOLS or len(normalized) != len(EXPECTED_TOOLS):
+        raise RehearsalFailure(
+            "mcp", "installed MCP tool inventory does not match ten-tool contract"
+        )
+    return normalized
 
 
 def validate_release_candidate(value: str) -> str:
