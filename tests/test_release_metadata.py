@@ -620,6 +620,7 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
     python_files = sorted((PROJECT_ROOT / "src").rglob("*.py"))
     python_files.extend(sorted((PROJECT_ROOT / "tests").rglob("*.py")))
     python_files.extend(sorted((PROJECT_ROOT / "benchmarks").rglob("*.py")))
+    python_files.extend(sorted((PROJECT_ROOT / "scripts").rglob("*.py")))
     missing = [
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in python_files
@@ -628,6 +629,17 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
 
     assert python_files
     assert not missing, "missing GPL SPDX header:\n" + "\n".join(missing)
+
+
+def test_operational_python_scripts_are_strictly_type_checked() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["tool"]["pyright"]["include"] == [
+        "src",
+        "tests",
+        "benchmarks",
+        "scripts",
+    ]
 
 
 def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
