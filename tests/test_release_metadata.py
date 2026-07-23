@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
 import pytest
+import yaml
 from markdown_it import MarkdownIt
 
 import bundlewalker
@@ -620,6 +621,7 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
     python_files = sorted((PROJECT_ROOT / "src").rglob("*.py"))
     python_files.extend(sorted((PROJECT_ROOT / "tests").rglob("*.py")))
     python_files.extend(sorted((PROJECT_ROOT / "benchmarks").rglob("*.py")))
+    python_files.extend(sorted((PROJECT_ROOT / "scripts").rglob("*.py")))
     missing = [
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in python_files
@@ -628,6 +630,17 @@ def test_all_python_files_have_gpl_spdx_headers() -> None:
 
     assert python_files
     assert not missing, "missing GPL SPDX header:\n" + "\n".join(missing)
+
+
+def test_operational_python_scripts_are_strictly_type_checked() -> None:
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["tool"]["pyright"]["include"] == [
+        "src",
+        "tests",
+        "benchmarks",
+        "scripts",
+    ]
 
 
 def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
@@ -753,3 +766,44 @@ def test_second_release_candidate_documents_rc1_recovery_without_final_beta_clai
     assert releases.count("advance to `0.4.0rc3`") == 1
     assert releases.count("advance through review to `0.4.0rc3`") == 2
     assert "Production `0.4.0` is forbidden" in releases
+
+
+def test_lifecycle_rehearsal_metadata_agrees_across_current_workflow_and_guides() -> None:
+    workflow = yaml.load(
+        (PROJECT_ROOT / ".github/workflows/rehearse-production-lifecycle.yml").read_text(
+            encoding="utf-8"
+        ),
+        Loader=yaml.BaseLoader,
+    )
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    compatibility = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
+    normalized_releases = " ".join(releases.split())
+    normalized_compatibility = " ".join(compatibility.split())
+
+    version_description = workflow["on"]["workflow_dispatch"]["inputs"]["version"]["description"]
+    version_shape = re.fullmatch(
+        r"Exact production PyPI release candidate \((?P<shape>[^)]+)\)",
+        version_description,
+    )
+    assert version_shape is not None
+    for document in (releases, compatibility):
+        assert f"`{version_shape.group('shape')}`" in document
+
+    workflow_matrix = workflow["jobs"]["rehearse"]["strategy"]["matrix"]
+    os_labels = {
+        "ubuntu-24.04": "Ubuntu 24.04",
+        "macos-15": "macOS 15",
+    }
+    for os_name in workflow_matrix["os"]:
+        assert os_labels[os_name] in compatibility
+    for python_version in workflow_matrix["python-version"]:
+        assert f"Python {python_version}" in compatibility
+
+    assert (
+        "Windows remains experimental and is excluded from this certification matrix"
+        in normalized_releases
+    )
+    assert (
+        "Windows remains experimental and is excluded from this certification matrix"
+        in normalized_compatibility
+    )

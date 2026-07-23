@@ -787,3 +787,92 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
         "recovered publication warning",
     ):
         assert assertion in post_refresh_audit
+
+
+def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only() -> None:
+    workflow = _yaml(".github/workflows/rehearse-production-lifecycle.yml")
+
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["env"]["UV_VERSION"] == "0.11.28"
+    artifact_version = workflow["env"]["LIFECYCLE_ARTIFACT_VERSION"]
+    assert artifact_version == "unvalidated-version"
+    assert not re.search(r'[\r\n":<>|*?/\\]', artifact_version)
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    version = workflow["on"]["workflow_dispatch"]["inputs"]["version"]
+    assert version == {
+        "description": "Exact production PyPI release candidate (0.4.0rcN)",
+        "required": "true",
+        "type": "string",
+    }
+
+    rehearse = workflow["jobs"]["rehearse"]
+    assert "environment" not in rehearse
+    assert rehearse["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {
+            "os": ["ubuntu-24.04", "macos-15"],
+            "python-version": ["3.13", "3.14"],
+        },
+    }
+    assert rehearse["runs-on"] == "${{ matrix.os }}"
+    commands = _run_commands(workflow, "rehearse")
+    for required in (
+        r"0\.4\.0rc[1-9][0-9]*",
+        "UV_NO_CONFIG=1",
+        "unset PYTHONPATH UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_CONFIG_FILE",
+        "--default-index https://pypi.org/simple",
+        '"bundlewalker==${VERSION}"',
+        "scripts/rehearse_production_lifecycle.py",
+        'cd "$REHEARSAL_ROOT"',
+    ):
+        assert required in commands
+    assert "test.pypi.org" not in commands.lower()
+    assert "dist/" not in commands
+    assert "uv sync" not in commands
+
+    validate_script = _step(workflow, "rehearse", "Validate exact release candidate")["run"]
+    artifact_version_overwrite = (
+        'printf \'LIFECYCLE_ARTIFACT_VERSION=%s\\n\' "$VERSION_INPUT" >> "$GITHUB_ENV"'
+    )
+    assert artifact_version_overwrite in validate_script
+    assert validate_script.index("re.fullmatch") < validate_script.index(artifact_version_overwrite)
+
+    upload = _step(workflow, "rehearse", "Upload lifecycle evidence")
+    assert upload["if"] == "always()"
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["retention-days"] == "90"
+    artifact_name = upload["with"]["name"]
+    assert "${{ inputs.version }}" not in artifact_name
+    assert artifact_name == (
+        "production-lifecycle-${{ env.LIFECYCLE_ARTIFACT_VERSION }}-"
+        "${{ matrix.os }}-py${{ matrix.python-version }}"
+    )
+    assert (
+        artifact_name.replace("${{ env.LIFECYCLE_ARTIFACT_VERSION }}", "0.4.0rc2")
+        == "production-lifecycle-0.4.0rc2-${{ matrix.os }}-py${{ matrix.python-version }}"
+    )
+    _assert_actions_are_sha_pinned(workflow)
+
+
+def test_production_lifecycle_rehearsal_policy_is_published_without_premature_claims() -> None:
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    compatibility = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    for required in (
+        "gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc2",
+        "production-lifecycle-0.4.0rc2-<os>-py<python-version>",
+        "Ubuntu 24.04",
+        "macOS 15",
+        "Python 3.13",
+        "Python 3.14",
+        "does not import BundleWalker from the checkout",
+        "workflow implementation is not live rehearsal evidence",
+    ):
+        assert required in releases
+    assert "advance to the next release candidate" in releases
+    assert "rerun the same immutable release candidate" in releases
+    assert "current format `1`" in compatibility
+    assert "real migration rehearsal" in compatibility
+    assert "production-installed lifecycle rehearsal workflow" in changelog
+    assert "0.4.0rc2 lifecycle rehearsal passed" not in changelog

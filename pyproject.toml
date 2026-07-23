@@ -86,6 +86,6 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pyright]
-include = ["src", "tests", "benchmarks"]
+include = ["src", "tests", "benchmarks", "scripts"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"

@@ -53,6 +53,16 @@ Production currently registers none, so workspace format `1` is current and upgr
 no-op that creates no backup. A future format and its recoverable migration require a separate
 reviewed design.
 
+## Production-installed rehearsal boundary
+
+The production-installed lifecycle rehearsal is manually dispatched for an exact `0.4.0rcN`
+candidate on Ubuntu 24.04 and macOS 15 with Python 3.13 and Python 3.14. Windows remains
+experimental and is excluded from this certification matrix. For current format `1`, the rehearsal
+proves that upgrade is a byte-preserving no-op: it leaves the portable workspace tree unchanged
+and creates no upgrade backup. It is not a real migration rehearsal. The first production format
+transition must separately prove backup-before-mutation, migration, failure recovery, and rollback
+from an installed artifact.
+
 ## Backup scope and privacy
 
 A portable backup contains exactly:

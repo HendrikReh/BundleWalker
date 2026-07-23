@@ -1,0 +1,86 @@
+name: Rehearse production-installed lifecycle
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact production PyPI release candidate (0.4.0rcN)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  LIFECYCLE_ARTIFACT_VERSION: unvalidated-version
+  UV_VERSION: "0.11.28"
+
+jobs:
+  rehearse:
+    name: Lifecycle (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python-version: ["3.13", "3.14"]
+    steps:
+      - name: Initialize failure evidence
+        shell: bash
+        run: |
+          REHEARSAL_ROOT="$RUNNER_TEMP/bundlewalker-lifecycle-${GITHUB_RUN_ID}"
+          EVIDENCE_DIR="$REHEARSAL_ROOT/evidence"
+          mkdir -p "$EVIDENCE_DIR"
+          printf '%s\n' '{"schema_version":1,"result":"incomplete","failure_category":"workflow_bootstrap"}' > "$EVIDENCE_DIR/evidence.json"
+          printf 'REHEARSAL_ROOT=%s\n' "$REHEARSAL_ROOT" >> "$GITHUB_ENV"
+          printf 'EVIDENCE_DIR=%s\n' "$EVIDENCE_DIR" >> "$GITHUB_ENV"
+      - name: Check out rehearsal harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python-version }}
+          enable-cache: false
+      - name: Validate exact release candidate
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          python -c 'import re, sys; value = sys.argv[1]; assert re.fullmatch(r"0\.4\.0rc[1-9][0-9]*", value)' "$VERSION_INPUT"
+          printf 'VERSION=%s\n' "$VERSION_INPUT" >> "$GITHUB_ENV"
+          printf 'LIFECYCLE_ARTIFACT_VERSION=%s\n' "$VERSION_INPUT" >> "$GITHUB_ENV"
+      - name: Create isolated production environment
+        shell: bash
+        run: |
+          unset PYTHONPATH UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_CONFIG_FILE
+          export PYTHONNOUSERSITE=1 UV_NO_CONFIG=1
+          VENV="$REHEARSAL_ROOT/venv"
+          uv venv --no-config --python "${{ matrix.python-version }}" "$VENV"
+          VENV_PYTHON="$VENV/bin/python"
+          uv pip install --no-config --python "$VENV_PYTHON" --strict --default-index https://pypi.org/simple "bundlewalker==${VERSION}"
+          printf 'VENV=%s\n' "$VENV" >> "$GITHUB_ENV"
+          printf 'VENV_PYTHON=%s\n' "$VENV_PYTHON" >> "$GITHUB_ENV"
+      - name: Run production-installed rehearsal
+        shell: bash
+        run: |
+          unset PYTHONPATH BUNDLEWALKER_MODEL UV_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_CONFIG_FILE
+          export PYTHONNOUSERSITE=1 UV_NO_CONFIG=1
+          cp "$GITHUB_WORKSPACE/scripts/rehearse_production_lifecycle.py" "$REHEARSAL_ROOT/rehearse_production_lifecycle.py"
+          cd "$REHEARSAL_ROOT"
+          "$VENV_PYTHON" "$REHEARSAL_ROOT/rehearse_production_lifecycle.py" \
+            --version "$VERSION" \
+            --run-root "$REHEARSAL_ROOT" \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --bundlewalker "$VENV/bin/bundlewalker" \
+            --bundlewalker-mcp "$VENV/bin/bundlewalker-mcp"
+      - name: Upload lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-lifecycle-${{ env.LIFECYCLE_ARTIFACT_VERSION }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: ${{ runner.temp }}/bundlewalker-lifecycle-${{ github.run_id }}/evidence/
+          if-no-files-found: error
+          retention-days: 90
