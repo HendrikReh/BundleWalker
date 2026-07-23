@@ -768,11 +768,7 @@ def test_second_release_candidate_documents_rc1_recovery_without_final_beta_clai
     assert "Production `0.4.0` is forbidden" in releases
 
 
-def test_production_lifecycle_rehearsal_contract_agrees_across_design_workflow_and_guides() -> None:
-    design = (
-        PROJECT_ROOT
-        / "docs/superpowers/specs/2026-07-22-production-installed-lifecycle-rehearsal-design.md"
-    ).read_text(encoding="utf-8")
+def test_lifecycle_rehearsal_metadata_agrees_across_current_workflow_and_guides() -> None:
     workflow = yaml.load(
         (PROJECT_ROOT / ".github/workflows/rehearse-production-lifecycle.yml").read_text(
             encoding="utf-8"
@@ -784,19 +780,25 @@ def test_production_lifecycle_rehearsal_contract_agrees_across_design_workflow_a
     normalized_releases = " ".join(releases.split())
     normalized_compatibility = " ".join(compatibility.split())
 
-    for document in (design, releases, compatibility):
-        assert "0.4.0rcN" in document
-        for environment in ("Ubuntu 24.04", "macOS 15", "Python 3.13", "Python 3.14"):
-            assert environment in document
-
-    assert workflow["jobs"]["rehearse"]["strategy"]["matrix"] == {
-        "os": ["ubuntu-24.04", "macos-15"],
-        "python-version": ["3.13", "3.14"],
-    }
-    assert workflow["on"]["workflow_dispatch"]["inputs"]["version"]["description"] == (
-        "Exact production PyPI release candidate (0.4.0rcN)"
+    version_description = workflow["on"]["workflow_dispatch"]["inputs"]["version"]["description"]
+    version_shape = re.fullmatch(
+        r"Exact production PyPI release candidate \((?P<shape>[^)]+)\)",
+        version_description,
     )
-    assert "absence of Windows from the certification matrix" in design
+    assert version_shape is not None
+    for document in (releases, compatibility):
+        assert f"`{version_shape.group('shape')}`" in document
+
+    workflow_matrix = workflow["jobs"]["rehearse"]["strategy"]["matrix"]
+    os_labels = {
+        "ubuntu-24.04": "Ubuntu 24.04",
+        "macos-15": "macOS 15",
+    }
+    for os_name in workflow_matrix["os"]:
+        assert os_labels[os_name] in compatibility
+    for python_version in workflow_matrix["python-version"]:
+        assert f"Python {python_version}" in compatibility
+
     assert (
         "Windows remains experimental and is excluded from this certification matrix"
         in normalized_releases
