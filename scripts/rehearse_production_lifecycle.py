@@ -441,7 +441,7 @@ def _load_raw_doctor_report(
 ) -> object:
     directory_descriptor: int | None = None
     cleanup_name: str | None = None
-    cleanup_entry = False
+    verified_stat: os.stat_result | None = None
     try:
         root = run_root.resolve(strict=True)
         parent = raw_report.parent.resolve(strict=True)
@@ -458,13 +458,10 @@ def _load_raw_doctor_report(
             dir_fd=directory_descriptor,
             follow_symlinks=False,
         )
-        cleanup_entry = not stat.S_ISDIR(report_stat.st_mode)
         if not stat.S_ISREG(report_stat.st_mode):
             raise RehearsalFailure(
                 category, "doctor report must be a regular file inside the run root"
             )
-        if report_stat.st_size > MAX_DOCTOR_REPORT_BYTES:
-            raise RehearsalFailure(category, "raw doctor report exceeds the one-megabyte limit")
         no_follow = getattr(os, "O_NOFOLLOW", 0)
         if no_follow == 0:
             raise RehearsalFailure(category, "doctor report no-follow reads are unavailable")
@@ -481,6 +478,7 @@ def _load_raw_doctor_report(
                 or opened_stat.st_ino != report_stat.st_ino
             ):
                 raise RehearsalFailure(category, "doctor report changed before it could be read")
+            verified_stat = opened_stat
             if opened_stat.st_size > MAX_DOCTOR_REPORT_BYTES:
                 raise RehearsalFailure(category, "raw doctor report exceeds the one-megabyte limit")
             raw_bytes = stream.read(MAX_DOCTOR_REPORT_BYTES + 1)
@@ -492,16 +490,35 @@ def _load_raw_doctor_report(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise RehearsalFailure(category, "doctor report could not be preserved") from None
     finally:
+        cleanup_changed = False
         cleanup_failed = False
         if directory_descriptor is not None:
-            if cleanup_name is not None and cleanup_entry:
+            if cleanup_name is not None and verified_stat is not None:
                 try:
-                    os.unlink(cleanup_name, dir_fd=directory_descriptor)
+                    final_stat = os.stat(
+                        cleanup_name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    )
                 except FileNotFoundError:
-                    pass
+                    cleanup_changed = True
                 except OSError:
-                    cleanup_failed = True
+                    cleanup_changed = True
+                else:
+                    if (
+                        not stat.S_ISREG(final_stat.st_mode)
+                        or final_stat.st_dev != verified_stat.st_dev
+                        or final_stat.st_ino != verified_stat.st_ino
+                    ):
+                        cleanup_changed = True
+                    else:
+                        try:
+                            os.unlink(cleanup_name, dir_fd=directory_descriptor)
+                        except OSError:
+                            cleanup_failed = True
             os.close(directory_descriptor)
+        if cleanup_changed:
+            raise RehearsalFailure(category, "doctor report changed before cleanup")
         if cleanup_failed:
             raise RehearsalFailure(category, "raw doctor report could not be deleted")
 

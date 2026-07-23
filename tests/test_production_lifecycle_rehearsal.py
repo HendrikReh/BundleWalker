@@ -154,8 +154,46 @@ def test_doctor_report_preservation_rejects_external_symlink(tmp_path: Path) -> 
         )
 
     assert outside.read_text(encoding="utf-8") == '{"private": "external"}\n'
-    assert not raw_report.exists()
-    assert not raw_report.is_symlink()
+    assert raw_report.is_symlink()
+    assert raw_report.resolve() == outside.resolve()
+    assert not evidence_report.exists()
+
+
+def test_doctor_report_preservation_keeps_post_read_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    raw_dir = run_root / "raw-doctor"
+    raw_dir.mkdir(parents=True)
+    raw_report = raw_dir / "doctor.json"
+    owned = '{"owned": true}\n'
+    raw_report.write_text(owned, encoding="utf-8")
+    verified_report = raw_dir / "verified.json"
+    replacement = '{"replacement": "must remain"}\n'
+    evidence_report = run_root / "evidence" / "doctor.json"
+    original_loads = HARNESS.json.loads
+
+    def replace_after_read(value: str | bytes | bytearray) -> object:
+        payload: object = original_loads(value)
+        raw_report.rename(verified_report)
+        raw_report.write_text(replacement, encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(HARNESS.json, "loads", replace_after_read)
+
+    with pytest.raises(HARNESS.RehearsalFailure, match="doctor report changed") as failure:
+        HARNESS._preserve_doctor_report(
+            raw_report,
+            evidence_report,
+            run_root=run_root,
+            category="doctor_report",
+        )
+
+    assert failure.value.category == "doctor_report"
+    assert "must remain" not in failure.value.message
+    assert raw_report.read_text(encoding="utf-8") == replacement
+    assert verified_report.read_text(encoding="utf-8") == owned
     assert not evidence_report.exists()
 
 
