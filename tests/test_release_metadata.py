@@ -238,6 +238,20 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
+def test_release_lock_uses_approved_rc3_dependency_versions() -> None:
+    locked = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    versions = {package["name"]: package["version"] for package in locked["package"]}
+
+    assert versions["pydantic-ai"] == "2.16.0"
+    assert versions["typer"] == "0.27.0"
+    assert versions["ruff"] == "0.15.22"
+
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "pydantic-ai>=2.10.0" in project["project"]["dependencies"]
+    assert "typer>=0.16.0" in project["project"]["dependencies"]
+    assert "ruff>=0.12.0" in project["dependency-groups"]["dev"]
+
+
 def test_active_documentation_local_links_and_anchors_resolve() -> None:
     parser = MarkdownIt("commonmark")
     for relative in ACTIVE_DOCUMENTATION:
@@ -680,11 +694,13 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
-def test_development_version_is_second_release_candidate() -> None:
+def test_development_version_is_third_release_candidate() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0rc2"
-    assert bundlewalker.__version__ == "0.4.0rc2"
+    assert project["project"]["version"] == "0.4.0rc3"
+    assert bundlewalker.__version__ == "0.4.0rc3"
+    assert "Development Status :: 3 - Alpha" in project["project"]["classifiers"]
+    assert "Development Status :: 4 - Beta" not in project["project"]["classifiers"]
 
 
 def test_source_distribution_excludes_untracked_superpowers_worker_state(
@@ -727,20 +743,40 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
     assert (
-        "bundlewalker-0.4.0rc2/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+        "bundlewalker-0.4.0rc3/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
 
 
-def test_second_release_candidate_documents_rc1_recovery_without_final_beta_claim() -> None:
+def test_third_release_candidate_documents_rc2_history_without_final_beta_claim() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    vscode_setup = (PROJECT_ROOT / "docs/vscode-copilot-mcp-setup.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
+    normalized_user_guide = " ".join(user_guide.split())
 
-    assert "current production release candidate is `0.4.0rc2`" in readme
-    assert 'uv tool install "bundlewalker==0.4.0rc2"' in readme
-    assert "proof of concept" in readme
+    assert "current production release candidate is `0.4.0rc3`" in readme
+    assert 'uv tool install "bundlewalker==0.4.0rc3"' in readme
+    assert "current production release candidate is `0.4.0rc3`" in user_guide
+    assert 'uv tool install "bundlewalker==0.4.0rc3"' in user_guide
+    assert "not a claim of production stability or a completed beta" in normalized_readme
+    for active_guide in (normalized_readme, normalized_user_guide):
+        assert "proof of concept approaching beta" in active_guide
+        assert "final public beta" not in active_guide.casefold()
+    assert "BundleWalker `0.4.0rc3` installed as a tool" in vscode_setup
+    assert "## [Unreleased]\n\n## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
+    rc3_entry = changelog.split("## [v0.4.0rc3] - 2026-07-24", maxsplit=1)[1].split(
+        "## [v0.4.0rc2] - 2026-07-21", maxsplit=1
+    )[0]
+    assert (
+        "[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...HEAD"
+    ) in changelog
+    assert (
+        "[v0.4.0rc3]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...v0.4.0rc3"
+    ) in changelog
     assert (
         "[v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2"
     ) in changelog
@@ -759,13 +795,46 @@ def test_second_release_candidate_documents_rc1_recovery_without_final_beta_clai
         "fresh artifacts from its reviewed tag",
         'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
         "Never rerun a failed publish job",
+        "For `0.4.0rc3`",
+        "advance through review to `0.4.0rc4`",
     ):
         assert phrase in releases
     assert "advance to `0.4.0rc2`" not in releases
     assert "advance through review to `0.4.0rc2`" not in releases
-    assert releases.count("advance to `0.4.0rc3`") == 1
-    assert releases.count("advance through review to `0.4.0rc3`") == 2
     assert "Production `0.4.0` is forbidden" in releases
+
+    current_rc3_publication = releases.split("### Current rc3 publication", maxsplit=1)[1].split(
+        "## Production-installed lifecycle rehearsal", maxsplit=1
+    )[0]
+    normalized_current_rc3_publication = " ".join(current_rc3_publication.split())
+    for recovery_invariant in (
+        "The exact-set production recovery matrix above also governs `0.4.0rc3`",
+        "If PyPI exposes neither exact artifact after a tag or upload failure",
+        "do not reuse `0.4.0rc3`",
+        "advance through review to `0.4.0rc4`",
+        "If PyPI exposes one artifact or any filename or digest differs",
+        "treat `0.4.0rc3` as unsafe",
+        "yank `0.4.0rc3`",
+        "If PyPI exposes both exact filenames and digests despite an upload-action failure",
+        "the same run's verification may continue",
+        "the GitHub release may reuse the retained bytes",
+        "Only exhaustion of the production-install propagation window may rerun the original "
+        "verification job",
+        'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
+        "Never rerun a failed publish job",
+        "If only GitHub release creation fails",
+        "rerun only that original release job",
+        "retained verified artifacts",
+    ):
+        assert recovery_invariant in normalized_current_rc3_publication
+
+    for resolution in (
+        "pydantic-ai` to `2.16.0",
+        "typer` to `0.27.0",
+        "ruff` to `0.15.22",
+        "pypa/gh-action-pypi-publish` to `v1.14.1",
+    ):
+        assert resolution in rc3_entry
 
 
 def test_lifecycle_rehearsal_metadata_agrees_across_current_workflow_and_guides() -> None:

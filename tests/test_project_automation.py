@@ -263,13 +263,28 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     assert publish["permissions"] == {"id-token": "write"}
     publish_steps = _steps(workflow, "publish")
     assert publish_steps[-1]["uses"].startswith(
-        "pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b"
+        "pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247"
     )
     assert publish_steps[-1]["with"]["repository-url"] == "https://test.pypi.org/legacy/"
     assert workflow["jobs"]["verify"]["needs"] == ["publish"]
     verify_commands = _run_commands(workflow, "verify")
     assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_publishing_workflows_pin_approved_publisher_action() -> None:
+    testpypi_text = (PROJECT_ROOT / ".github/workflows/publish-testpypi.yml").read_text(
+        encoding="utf-8"
+    )
+    production_text = (PROJECT_ROOT / ".github/workflows/publish-pypi.yml").read_text(
+        encoding="utf-8"
+    )
+    publisher = "pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1"
+
+    assert publisher in testpypi_text
+    assert publisher in production_text
+    assert testpypi_text.count(publisher) == 1
+    assert production_text.count(publisher) == 1
 
 
 def test_testpypi_verification_retries_bounded_propagation_delay() -> None:
@@ -578,8 +593,8 @@ def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
     dist.mkdir()
     for name in (
         ".gitignore",
-        "bundlewalker-0.4.0rc2-py3-none-any.whl",
-        "bundlewalker-0.4.0rc2.tar.gz",
+        "bundlewalker-0.4.0rc3-py3-none-any.whl",
+        "bundlewalker-0.4.0rc3.tar.gz",
     ):
         (dist / name).touch()
 
@@ -592,8 +607,8 @@ def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
     ).stdout.splitlines()
 
     assert sorted(selected) == [
-        "dist/bundlewalker-0.4.0rc2-py3-none-any.whl",
-        "dist/bundlewalker-0.4.0rc2.tar.gz",
+        "dist/bundlewalker-0.4.0rc3-py3-none-any.whl",
+        "dist/bundlewalker-0.4.0rc3.tar.gz",
     ]
     assert "dist/.gitignore" not in selected
     assert 'uv run twine check "${artifacts[@]}"' in script
@@ -792,6 +807,7 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
 def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only() -> None:
     workflow = _yaml(".github/workflows/rehearse-production-lifecycle.yml")
 
+    assert workflow["run-name"] == "production-lifecycle-${{ inputs.version }}"
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["env"]["UV_VERSION"] == "0.11.28"
     artifact_version = workflow["env"]["LIFECYCLE_ARTIFACT_VERSION"]
@@ -855,8 +871,8 @@ def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only()
         "${{ matrix.os }}-py${{ matrix.python-version }}"
     )
     assert (
-        artifact_name.replace("${{ env.LIFECYCLE_ARTIFACT_VERSION }}", "0.4.0rc2")
-        == "production-lifecycle-0.4.0rc2-${{ matrix.os }}-py${{ matrix.python-version }}"
+        artifact_name.replace("${{ env.LIFECYCLE_ARTIFACT_VERSION }}", "0.4.0rc3")
+        == "production-lifecycle-0.4.0rc3-${{ matrix.os }}-py${{ matrix.python-version }}"
     )
     _assert_actions_are_sha_pinned(workflow)
 
@@ -867,8 +883,8 @@ def test_production_lifecycle_rehearsal_policy_is_published_without_premature_cl
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     for required in (
-        "gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc2",
-        "production-lifecycle-0.4.0rc2-<os>-py<python-version>",
+        "gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc3",
+        "production-lifecycle-0.4.0rc3-<os>-py<python-version>",
         "Ubuntu 24.04",
         "macOS 15",
         "Python 3.13",

@@ -24,7 +24,7 @@ provider.
 You need:
 
 - Visual Studio Code with GitHub Copilot chat and local Agent mode available;
-- BundleWalker `0.4.0rc2` installed as a tool, or a source checkout prepared with
+- BundleWalker `0.4.0rc3` installed as a tool, or a source checkout prepared with
   `uv sync --locked`;
 - an initialized workspace containing `bundlewalker.toml`; and
 - absolute paths to the MCP executable or source checkout and to the knowledge workspace.

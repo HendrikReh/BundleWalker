@@ -39,9 +39,10 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 def test_ask_help_does_not_require_a_workspace() -> None:
     result = runner.invoke(app, ["ask", "--help"], catch_exceptions=False)
     output = unstyle(result.output)
+    normalized = " ".join(output.split())
 
     assert result.exit_code == 0, result.output
-    assert "QUESTION" in output
+    assert "question <str>" in normalized
     assert "--model" in output
     assert "--save" in output
     assert "--refresh" in output

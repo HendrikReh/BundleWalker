@@ -4,6 +4,8 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+## [v0.4.0rc3] - 2026-07-24
+
 - Reorganized active documentation around a newcomer-first README, guided tutorial, canonical
   user reference, focused specialist guides, and consistent project-policy navigation.
 - Added a Visual Studio Code/GitHub Copilot MCP setup guide and an auditable host-compatibility
@@ -16,6 +18,14 @@ All notable BundleWalker releases are recorded here.
 - Completed the live production-installed lifecycle rehearsal for `0.4.0rc2` on all four supported
   macOS/Linux and Python 3.13/3.14 environments, and recorded independently inspected workspace,
   archive, doctor, and installed MCP evidence.
+
+### Changed
+
+- Resolved direct dependency `pydantic-ai` to `2.16.0`.
+- Resolved direct dependency `typer` to `0.27.0`.
+- Resolved direct development dependency `ruff` to `0.15.22`.
+- Updated the shared publishing-action pin `pypa/gh-action-pypi-publish` to `v1.14.1` in both
+  TestPyPI and production-PyPI workflows.
 
 ## [v0.4.0rc2] - 2026-07-21
 
@@ -122,7 +132,8 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
-[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...HEAD
+[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...HEAD
+[v0.4.0rc3]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...v0.4.0rc3
 [v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2
 [v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1
 [v0.4.0a2]: https://github.com/HendrikReh/BundleWalker/compare/v3...v0.4.0a2

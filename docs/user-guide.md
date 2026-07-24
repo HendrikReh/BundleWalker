@@ -72,6 +72,14 @@ uv sync --locked
 uv run bundlewalker --help
 ```
 
+For the current production candidate without a checkout, install the exact prerelease as an
+isolated tool:
+
+```bash
+uv tool install "bundlewalker==0.4.0rc3"
+bundlewalker --help
+```
+
 Examples in this guide start from the checkout. After changing into a knowledge workspace, they
 pass the checkout through `uv --project "$PROJECT_ROOT"` so `uv` can still find BundleWalker.
 
@@ -787,7 +795,7 @@ content or provider credentials.
 ## Limits and compatibility
 
 BundleWalker remains a proof of concept approaching beta. The latest stable release is **v3**
-(Python package `0.3.0`), while the current production release candidate is `0.4.0rc2`. macOS and
+(Python package `0.3.0`), while the current production release candidate is `0.4.0rc3`. macOS and
 Linux are supported; Windows is experimental. The planned local web UI is not part of either
 release line.
 
