@@ -766,7 +766,6 @@ def test_third_release_candidate_documents_rc2_history_without_final_beta_claim(
         assert "final public beta" not in active_guide.casefold()
     assert "BundleWalker `0.4.0rc3` installed as a tool" in vscode_setup
     assert "## [Unreleased]\n\n## [v0.4.0rc3] - 2026-07-24" in changelog
-    assert "## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
     rc3_entry = changelog.split("## [v0.4.0rc3] - 2026-07-24", maxsplit=1)[1].split(
@@ -803,6 +802,31 @@ def test_third_release_candidate_documents_rc2_history_without_final_beta_claim(
     assert "advance to `0.4.0rc2`" not in releases
     assert "advance through review to `0.4.0rc2`" not in releases
     assert "Production `0.4.0` is forbidden" in releases
+
+    current_rc3_publication = releases.split("### Current rc3 publication", maxsplit=1)[1].split(
+        "## Production-installed lifecycle rehearsal", maxsplit=1
+    )[0]
+    normalized_current_rc3_publication = " ".join(current_rc3_publication.split())
+    for recovery_invariant in (
+        "The exact-set production recovery matrix above also governs `0.4.0rc3`",
+        "If PyPI exposes neither exact artifact after a tag or upload failure",
+        "do not reuse `0.4.0rc3`",
+        "advance through review to `0.4.0rc4`",
+        "If PyPI exposes one artifact or any filename or digest differs",
+        "treat `0.4.0rc3` as unsafe",
+        "yank `0.4.0rc3`",
+        "If PyPI exposes both exact filenames and digests despite an upload-action failure",
+        "the same run's verification may continue",
+        "the GitHub release may reuse the retained bytes",
+        "Only exhaustion of the production-install propagation window may rerun the original "
+        "verification job",
+        'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
+        "Never rerun a failed publish job",
+        "If only GitHub release creation fails",
+        "rerun only that original release job",
+        "retained verified artifacts",
+    ):
+        assert recovery_invariant in normalized_current_rc3_publication
 
     for resolution in (
         "pydantic-ai` to `2.16.0",

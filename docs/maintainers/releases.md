@@ -198,6 +198,23 @@ Never move, delete, or reuse a pushed tag or package version. If a package-affec
 review and advance through review to `0.4.0rc4`; do not reuse the failed candidate's tag or
 package version.
 
+The exact-set production recovery matrix above also governs `0.4.0rc3`:
+
+- If PyPI exposes neither exact artifact after a tag or upload failure, do not reuse `0.4.0rc3`;
+  fix the failure through review and advance through review to `0.4.0rc4`.
+- If PyPI exposes one artifact or any filename or digest differs, treat `0.4.0rc3` as unsafe,
+  yank `0.4.0rc3` through PyPI, and advance through review to `0.4.0rc4`.
+- If PyPI exposes both exact filenames and digests despite an upload-action failure, the same
+  run's verification may continue. After a successful exact-version install, the GitHub release
+  may reuse the retained bytes without rebuilding or republishing.
+
+Only exhaustion of the production-install propagation window may rerun the original verification
+job. First prove that production JSON contains the complete exact filename/digest set from the
+original run, obtain that verification job's database ID, then run
+`gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"`. Never rerun a failed publish job. If only GitHub
+release creation fails, rerun only that original release job; it reuses the retained verified
+artifacts and verifies any existing same-named asset byte-for-byte.
+
 Production `0.4.0` remains forbidden until every public-beta exit gate passes. `0.4.0rc3` is an
 Alpha production candidate and proof of concept approaching public beta, not final beta readiness.
 
