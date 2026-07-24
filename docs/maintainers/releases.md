@@ -218,6 +218,15 @@ artifacts and verifies any existing same-named asset byte-for-byte.
 Production `0.4.0` remains forbidden until every public-beta exit gate passes. `0.4.0rc3` is an
 Alpha production candidate and proof of concept approaching public beta, not final beta readiness.
 
+The production package and GitHub prerelease for `0.4.0rc3` use the immutable artifacts from the
+tag-bound production workflow. The production-installed lifecycle gate for `0.4.0rc3` passed on
+the complete supported matrix in
+[workflow run 30098254437](https://github.com/HendrikReh/BundleWalker/actions/runs/30098254437).
+The inspected environment results, artifact names, archive and evidence-file hashes, portable
+workspace digest, doctor summaries, and installed MCP surface are preserved in the
+[0.4.0rc3 production lifecycle evidence](evidence/2026-07-24-production-lifecycle-0.4.0rc3.md).
+This passing gate does not by itself declare the final public beta ready.
+
 ## Production-installed lifecycle rehearsal
 
 After the production release candidate is available on PyPI and the workflow implementation is

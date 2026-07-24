@@ -4,6 +4,10 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+- Completed the live production-installed lifecycle rehearsal for `0.4.0rc3` on all four
+  supported macOS/Linux and Python 3.13/3.14 environments, and recorded inspected production-PyPI
+  workspace, archive, doctor, and installed MCP evidence.
+
 ## [v0.4.0rc3] - 2026-07-24
 
 - Reorganized active documentation around a newcomer-first README, guided tutorial, canonical

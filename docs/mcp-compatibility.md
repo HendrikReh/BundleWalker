@@ -17,15 +17,17 @@ provider, or transaction boundaries.
 
 ## Production-installed MCP evidence
 
-The generic production-installed lifecycle rehearsal for `0.4.0rc2` confirmed that the installed
+The generic production-installed lifecycle rehearsal for `0.4.0rc3` confirmed that the installed
 `bundlewalker-mcp` exposed all 10 MCP tools on macOS 15 and Ubuntu 24.04 with Python 3.13 and 3.14.
 See the independently inspected
-[production lifecycle evidence](maintainers/evidence/2026-07-22-production-lifecycle-0.4.0rc2.md)
+[0.4.0rc3 production lifecycle evidence](maintainers/evidence/2026-07-24-production-lifecycle-0.4.0rc3.md)
 for the workflow, source commit, artifacts, and exact tool inventory.
 
-That matrix verifies package installation, local `stdio` initialization, and tool discovery. It
-does not represent a host-mediated run, provider-backed calls, Windows support, or an expansion of
-the VS Code/Copilot certification below.
+That matrix installed the immutable candidate from production PyPI and verifies package
+installation, local `stdio` initialization, and tool discovery. It does not represent a
+host-mediated run, provider-backed calls, Windows support, or an expansion of the VS Code/Copilot
+certification below. The preceding rc2 gate remains preserved in the
+[0.4.0rc2 production lifecycle evidence](maintainers/evidence/2026-07-22-production-lifecycle-0.4.0rc2.md).
 
 ## VS Code certification environment
 
