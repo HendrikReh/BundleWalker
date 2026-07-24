@@ -428,12 +428,13 @@ git add pyproject.toml uv.lock \
 git commit -m "release: advance candidate identity to 0.4.0rc3"
 ```
 
-### Task 5: Update rc3 documentation and changelog test-first
+### Task 5: Update rc3 documentation, lifecycle identity, and changelog test-first
 
 **Files:**
 
 - Modify: `tests/test_release_metadata.py`
 - Modify: `tests/test_project_automation.py`
+- Modify: `.github/workflows/rehearse-production-lifecycle.yml`
 - Modify: `README.md`
 - Modify: `CHANGELOG.md`
 - Modify: `docs/user-guide.md`
@@ -443,7 +444,8 @@ git commit -m "release: advance candidate identity to 0.4.0rc3"
 - Preserve: all files under `docs/maintainers/evidence/` describing rc2
 - Preserve: all prior release plans/specifications
 
-**Produces:** Coherent rc3-facing guidance without a premature beta claim.
+**Produces:** Coherent rc3-facing guidance and an unambiguous lifecycle-run identity without a
+premature beta claim.
 
 - [ ] **Step 1: Add active-documentation contracts**
 
@@ -454,6 +456,17 @@ uv tool install "bundlewalker==0.4.0rc3"
 gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc3
 production-lifecycle-0.4.0rc3-<os>-py<python-version>
 ```
+
+Require `tests/test_project_automation.py` to assert that
+`.github/workflows/rehearse-production-lifecycle.yml` has the exact top-level workflow identity:
+
+```yaml
+run-name: production-lifecycle-${{ inputs.version }}
+```
+
+This produces the deterministic GitHub run `displayTitle`
+`production-lifecycle-0.4.0rc3` for the rc3 dispatch and must remain unchanged during final
+promotion.
 
 Require README and user guide still to contain “proof of concept” and not claim the current
 release is the final public beta. Require `docs/maintainers/releases.md` to name rc3 as the
@@ -482,7 +495,8 @@ uv run pytest \
   tests/test_project_automation.py -q
 ```
 
-Expected: FAIL because active guidance still names rc2 and the rc3 changelog entry does not exist.
+Expected: FAIL because active guidance still names rc2, the workflow has no rc3 lifecycle
+`run-name`, and the rc3 changelog entry does not exist.
 
 - [ ] **Step 4: Update active candidate documentation**
 
@@ -497,6 +511,8 @@ current install/release commands. In particular:
   evidence sections as historical facts.
 - Compatibility documentation: add or update the active candidate pointer without rewriting
   host-certification provenance.
+- Lifecycle workflow: add the exact top-level `run-name: production-lifecycle-${{ inputs.version }}`
+  contract; do not change its dispatch inputs, jobs, matrix, or artifact contract.
 - Changelog: cut the current Unreleased material into the dated rc3 entry and restore an empty
   Unreleased heading.
 
@@ -735,7 +751,7 @@ RC3_TAG_SHA="$(git rev-parse 'v0.4.0rc3^{commit}')"
 RC3_RUN_IDS="$(
   gh run list --workflow publish-pypi.yml --branch v0.4.0rc3 \
     --limit 20 --json databaseId,headSha,headBranch,status,conclusion,url,event \
-    --jq --arg sha "$RC3_TAG_SHA" \
+  | jq --arg sha "$RC3_TAG_SHA" \
       '[.[] | select(.event == "push" and .headBranch == "v0.4.0rc3" and .headSha == $sha) | .databaseId]'
 )"
 RC3_RUN_COUNT="$(printf '%s' "$RC3_RUN_IDS" | jq 'length')"
@@ -816,9 +832,11 @@ Expected: installed version is exactly rc3 and both CLI/MCP entry points work.
 
 ```bash
 RC3_LIFECYCLE_SHA="$(git rev-parse origin/master)"
+RC3_LIFECYCLE_TITLE="production-lifecycle-0.4.0rc3"
 RC3_LIFECYCLE_BEFORE_IDS="$(
   gh run list --workflow rehearse-production-lifecycle.yml \
-    --limit 100 --json databaseId --jq '[.[].databaseId]'
+    --limit 100 --json databaseId \
+  | jq '[.[].databaseId]'
 )"
 gh workflow run rehearse-production-lifecycle.yml \
   --ref master -f version=0.4.0rc3
@@ -826,9 +844,10 @@ RC3_LIFECYCLE_RUN_ID=""
 for attempt in {1..30}; do
   RC3_LIFECYCLE_NEW_IDS="$(
     gh run list --workflow rehearse-production-lifecycle.yml \
-      --limit 100 --json databaseId,headSha,status,conclusion,url,event \
-      --jq --arg sha "$RC3_LIFECYCLE_SHA" --argjson before "$RC3_LIFECYCLE_BEFORE_IDS" \
-        '[.[] as $run | select($run.event == "workflow_dispatch" and $run.headSha == $sha and ($before | index($run.databaseId) | not)) | $run.databaseId]'
+      --limit 100 --json databaseId,displayTitle,headSha,status,conclusion,url,event \
+    | jq --arg sha "$RC3_LIFECYCLE_SHA" --arg title "$RC3_LIFECYCLE_TITLE" \
+        --argjson before "$RC3_LIFECYCLE_BEFORE_IDS" \
+        '[.[] as $run | select($run.event == "workflow_dispatch" and $run.headSha == $sha and $run.displayTitle == $title and ($before | index($run.databaseId) | not)) | $run.databaseId]'
   )"
   RC3_LIFECYCLE_RUN_COUNT="$(printf '%s' "$RC3_LIFECYCLE_NEW_IDS" | jq 'length')"
   if test "$RC3_LIFECYCLE_RUN_COUNT" -eq 1; then
@@ -836,22 +855,23 @@ for attempt in {1..30}; do
     break
   fi
   test "$RC3_LIFECYCLE_RUN_COUNT" -eq 0 || {
-    printf 'Refusing to inspect lifecycle run: expected one newly dispatched rc3 run at %s; found %s: %s\\n' \
-      "$RC3_LIFECYCLE_SHA" "$RC3_LIFECYCLE_RUN_COUNT" "$RC3_LIFECYCLE_NEW_IDS" >&2
+    printf 'Refusing to inspect lifecycle run: expected one new %s workflow_dispatch run at %s; found %s: %s\\n' \
+      "$RC3_LIFECYCLE_TITLE" "$RC3_LIFECYCLE_SHA" "$RC3_LIFECYCLE_RUN_COUNT" "$RC3_LIFECYCLE_NEW_IDS" >&2
     exit 1
   }
   sleep 2
 done
 test -n "$RC3_LIFECYCLE_RUN_ID" || {
-  printf 'Refusing to continue: no newly dispatched rc3 lifecycle run appeared at %s\\n' \
-    "$RC3_LIFECYCLE_SHA" >&2
+  printf 'Refusing to continue: no newly dispatched %s lifecycle run appeared at %s\\n' \
+    "$RC3_LIFECYCLE_TITLE" "$RC3_LIFECYCLE_SHA" >&2
   exit 1
 }
 gh run view "$RC3_LIFECYCLE_RUN_ID" \
-  --json headSha,status,conclusion,url,event
+  --json displayTitle,headSha,status,conclusion,url,event
 ```
 
-Expected: one manual run at the synchronized `master` commit.
+Expected: exactly one new manual run at the synchronized `master` commit with display title
+`production-lifecycle-0.4.0rc3`; prior and concurrent dispatches are not eligible.
 
 - [ ] **Step 2: Watch and inspect all jobs**
 
@@ -1043,6 +1063,8 @@ git show HEAD:.github/workflows/publish-pypi.yml \
   > /tmp/bundlewalker-rc3-publish-pypi.yml
 git show HEAD:.github/workflows/publish-testpypi.yml \
   > /tmp/bundlewalker-rc3-publish-testpypi.yml
+git show HEAD:.github/workflows/rehearse-production-lifecycle.yml \
+  > /tmp/bundlewalker-rc3-lifecycle-workflow.yml
 ```
 
 These snapshots form the final promotion's no-product/no-dependency-change proof.
@@ -1170,6 +1192,8 @@ diff -u /tmp/bundlewalker-rc3-publish-pypi.yml \
   .github/workflows/publish-pypi.yml
 diff -u /tmp/bundlewalker-rc3-publish-testpypi.yml \
   .github/workflows/publish-testpypi.yml
+diff -u /tmp/bundlewalker-rc3-lifecycle-workflow.yml \
+  .github/workflows/rehearse-production-lifecycle.yml
 git diff --exit-code -- src .github/workflows
 git diff --exit-code v0.4.0rc3 -- src .github/workflows
 git diff -- pyproject.toml uv.lock
