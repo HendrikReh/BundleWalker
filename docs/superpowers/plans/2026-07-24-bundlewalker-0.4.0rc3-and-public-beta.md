@@ -817,7 +817,8 @@ uv venv --python 3.13 "$RC3_PYPI_ENV"
 uv pip install --python "$RC3_PYPI_ENV/bin/python" \
   --index-url https://pypi.org/simple \
   bundlewalker==0.4.0rc3
-"$RC3_PYPI_ENV/bin/bundlewalker" --version
+"$RC3_PYPI_ENV/bin/python" -c \
+  'from importlib.metadata import version; print(version("bundlewalker"))'
 "$RC3_PYPI_ENV/bin/bundlewalker" --help
 "$RC3_PYPI_ENV/bin/bundlewalker-mcp" --help
 ```
@@ -1276,7 +1277,7 @@ shasum -a 256 \
 Install each artifact into its own clean Python 3.13 environment and run:
 
 ```bash
-bundlewalker --version
+python -c 'from importlib.metadata import version; print(version("bundlewalker"))'
 bundlewalker --help
 bundlewalker-mcp --help
 ```
