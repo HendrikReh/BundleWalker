@@ -1376,9 +1376,38 @@ git push origin v0.4.0
 
 - [ ] **Step 5: Monitor and approve the protected production run**
 
-Identify the exact tag-triggered `publish-pypi.yml` run, inspect its build job and retained
-artifacts, then ask the maintainer to approve only the matching `pypi` deployment. Watch the run
-to completion. Never rerun a failed publish job.
+```bash
+FINAL_TAG_SHA="$(git rev-parse 'v0.4.0^{commit}')"
+FINAL_RUN_IDS="$(
+  gh run list --workflow publish-pypi.yml --branch v0.4.0 \
+    --limit 20 --json databaseId,headSha,headBranch,status,conclusion,url,event \
+  | jq --arg sha "$FINAL_TAG_SHA" \
+      '[.[] | select(.event == "push" and .headBranch == "v0.4.0" and .headSha == $sha) | .databaseId]'
+)"
+FINAL_RUN_COUNT="$(printf '%s' "$FINAL_RUN_IDS" | jq 'length')"
+test "$FINAL_RUN_COUNT" -eq 1 || {
+  printf 'Refusing to inspect final publish run: expected exactly one final tag push at %s; found %s: %s\\n' \
+    "$FINAL_TAG_SHA" "$FINAL_RUN_COUNT" "$FINAL_RUN_IDS" >&2
+  exit 1
+}
+FINAL_RUN_ID="$(printf '%s' "$FINAL_RUN_IDS" | jq -r '.[0]')"
+gh run view "$FINAL_RUN_ID" --json headSha,status,conclusion,url,event
+FINAL_ARTIFACTS="$(mktemp -d -t bundlewalker-final-publish.XXXXXX)"
+gh run download "$FINAL_RUN_ID" --dir "$FINAL_ARTIFACTS"
+find "$FINAL_ARTIFACTS" -type f -print | sort
+```
+
+Only after this identity check passes, inspect the build job and the artifacts downloaded from
+`FINAL_RUN_ID`, then ask the maintainer to approve only that run's matching `pypi` deployment.
+Watch exactly that run to completion:
+
+```bash
+gh run watch "$FINAL_RUN_ID" --exit-status
+gh run view "$FINAL_RUN_ID" --json jobs,headSha,status,conclusion,url,event
+```
+
+Never rerun a failed publish job or approve any run before the selector has produced exactly one
+matching `FINAL_RUN_ID`.
 
 - [ ] **Step 6: Independently verify PyPI and GitHub**
 
@@ -1390,6 +1419,9 @@ Require:
 - the GitHub release contains the same two artifacts;
 - the tag targets the reviewed merge commit; and
 - a clean production-index install reports exact `0.4.0` and passes CLI/MCP smokes.
+
+Cross-check the independently observed package/release artifacts against the exact
+`FINAL_RUN_ID` and `FINAL_TAG_SHA` recorded above; do not substitute a different workflow run.
 
 The final version must not be dispatched through
 `rehearse-production-lifecycle.yml`; its accepted lifecycle evidence is the rc3 gate plus the
