@@ -192,8 +192,15 @@ gh api repos/HendrikReh/BundleWalker/actions/permissions/workflow
 gh api repos/HendrikReh/BundleWalker/dependabot/alerts
 gh api repos/HendrikReh/BundleWalker/code-scanning/alerts
 gh api repos/HendrikReh/BundleWalker/secret-scanning/alerts
-curl -sS -o /dev/null -w '%{http_code}\n' \
-  https://pypi.org/pypi/bundlewalker/0.4.0rc3/json
+RC3_PYPI_STATUS="$(
+  curl -sS -o /dev/null -w '%{http_code}' \
+    https://pypi.org/pypi/bundlewalker/0.4.0rc3/json
+)"
+test "$RC3_PYPI_STATUS" = 404 || {
+  printf 'Refusing to continue: expected PyPI rc3 absence (404), got %s\\n' \
+    "$RC3_PYPI_STATUS" >&2
+  exit 1
+}
 ```
 
 Expected: neither planned tag exists; PyPI returns HTTP 404 for rc3; repository security APIs
@@ -690,8 +697,15 @@ git rev-parse HEAD
 git rev-parse origin/master
 git tag --list v0.4.0rc3
 gh api repos/HendrikReh/BundleWalker/environments/pypi/deployment-branch-policies
-curl -sS -o /dev/null -w '%{http_code}\n' \
-  https://pypi.org/pypi/bundlewalker/0.4.0rc3/json
+RC3_PYPI_STATUS="$(
+  curl -sS -o /dev/null -w '%{http_code}' \
+    https://pypi.org/pypi/bundlewalker/0.4.0rc3/json
+)"
+test "$RC3_PYPI_STATUS" = 404 || {
+  printf 'Refusing to create tag: expected PyPI rc3 absence (404), got %s\\n' \
+    "$RC3_PYPI_STATUS" >&2
+  exit 1
+}
 ```
 
 Expected: clean synchronized revisions, no rc3 tag, trusted `pypi` deployment policy intact, and
@@ -717,12 +731,20 @@ Expected: annotated tag targets the exact synchronized merge commit and is pushe
 - [ ] **Step 1: Identify the tag-triggered production run**
 
 ```bash
-RC3_RUN_ID="$(
+RC3_TAG_SHA="$(git rev-parse 'v0.4.0rc3^{commit}')"
+RC3_RUN_IDS="$(
   gh run list --workflow publish-pypi.yml --branch v0.4.0rc3 \
-    --limit 5 --json databaseId,headSha,status,conclusion,url,event \
-    --jq '.[0].databaseId'
+    --limit 20 --json databaseId,headSha,headBranch,status,conclusion,url,event \
+    --jq --arg sha "$RC3_TAG_SHA" \
+      '[.[] | select(.event == "push" and .headBranch == "v0.4.0rc3" and .headSha == $sha) | .databaseId]'
 )"
-test -n "$RC3_RUN_ID"
+RC3_RUN_COUNT="$(printf '%s' "$RC3_RUN_IDS" | jq 'length')"
+test "$RC3_RUN_COUNT" -eq 1 || {
+  printf 'Refusing to inspect publish run: expected exactly one new rc3 tag push at %s; found %s: %s\\n' \
+    "$RC3_TAG_SHA" "$RC3_RUN_COUNT" "$RC3_RUN_IDS" >&2
+  exit 1
+}
+RC3_RUN_ID="$(printf '%s' "$RC3_RUN_IDS" | jq -r '.[0]')"
 gh run view "$RC3_RUN_ID" --json headSha,status,conclusion,url,event
 ```
 
@@ -793,14 +815,38 @@ Expected: installed version is exactly rc3 and both CLI/MCP entry points work.
 - [ ] **Step 1: Dispatch the exact four-job matrix**
 
 ```bash
+RC3_LIFECYCLE_SHA="$(git rev-parse origin/master)"
+RC3_LIFECYCLE_BEFORE_IDS="$(
+  gh run list --workflow rehearse-production-lifecycle.yml \
+    --limit 100 --json databaseId --jq '[.[].databaseId]'
+)"
 gh workflow run rehearse-production-lifecycle.yml \
   --ref master -f version=0.4.0rc3
-RC3_LIFECYCLE_RUN_ID="$(
-  gh run list --workflow rehearse-production-lifecycle.yml \
-    --limit 5 --json databaseId,headSha,status,conclusion,url,event \
-    --jq '.[0].databaseId'
-)"
-test -n "$RC3_LIFECYCLE_RUN_ID"
+RC3_LIFECYCLE_RUN_ID=""
+for attempt in {1..30}; do
+  RC3_LIFECYCLE_NEW_IDS="$(
+    gh run list --workflow rehearse-production-lifecycle.yml \
+      --limit 100 --json databaseId,headSha,status,conclusion,url,event \
+      --jq --arg sha "$RC3_LIFECYCLE_SHA" --argjson before "$RC3_LIFECYCLE_BEFORE_IDS" \
+        '[.[] as $run | select($run.event == "workflow_dispatch" and $run.headSha == $sha and ($before | index($run.databaseId) | not)) | $run.databaseId]'
+  )"
+  RC3_LIFECYCLE_RUN_COUNT="$(printf '%s' "$RC3_LIFECYCLE_NEW_IDS" | jq 'length')"
+  if test "$RC3_LIFECYCLE_RUN_COUNT" -eq 1; then
+    RC3_LIFECYCLE_RUN_ID="$(printf '%s' "$RC3_LIFECYCLE_NEW_IDS" | jq -r '.[0]')"
+    break
+  fi
+  test "$RC3_LIFECYCLE_RUN_COUNT" -eq 0 || {
+    printf 'Refusing to inspect lifecycle run: expected one newly dispatched rc3 run at %s; found %s: %s\\n' \
+      "$RC3_LIFECYCLE_SHA" "$RC3_LIFECYCLE_RUN_COUNT" "$RC3_LIFECYCLE_NEW_IDS" >&2
+    exit 1
+  }
+  sleep 2
+done
+test -n "$RC3_LIFECYCLE_RUN_ID" || {
+  printf 'Refusing to continue: no newly dispatched rc3 lifecycle run appeared at %s\\n' \
+    "$RC3_LIFECYCLE_SHA" >&2
+  exit 1
+}
 gh run view "$RC3_LIFECYCLE_RUN_ID" \
   --json headSha,status,conclusion,url,event
 ```
@@ -1276,8 +1322,15 @@ git rev-parse HEAD
 git rev-parse origin/master
 git status --short --branch
 git tag --list v0.4.0
-curl -sS -o /dev/null -w '%{http_code}\n' \
-  https://pypi.org/pypi/bundlewalker/0.4.0/json
+FINAL_PYPI_STATUS="$(
+  curl -sS -o /dev/null -w '%{http_code}' \
+    https://pypi.org/pypi/bundlewalker/0.4.0/json
+)"
+test "$FINAL_PYPI_STATUS" = 404 || {
+  printf 'Refusing to create final tag: expected PyPI 0.4.0 absence (404), got %s\\n' \
+    "$FINAL_PYPI_STATUS" >&2
+  exit 1
+}
 gh api repos/HendrikReh/BundleWalker/environments/pypi/deployment-branch-policies
 ```
 
