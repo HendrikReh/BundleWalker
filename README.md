@@ -29,7 +29,7 @@ of every accepted source as immutable evidence.
 
 BundleWalker remains a proof of concept approaching beta; it is not a claim of production
 stability or a completed beta. The latest stable release is **v3** (Python package `0.3.0`), and the
-current production release candidate is `0.4.0rc2`. See the [Changelog](CHANGELOG.md) for the
+current production release candidate is `0.4.0rc3`. See the [Changelog](CHANGELOG.md) for the
 immutable release history.
 
 macOS and Linux are supported; Windows is experimental.
@@ -41,7 +41,7 @@ BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/)
 Install the exact prerelease as an isolated command-line tool:
 
 ```bash
-uv tool install "bundlewalker==0.4.0rc2"
+uv tool install "bundlewalker==0.4.0rc3"
 bundlewalker --help
 bundlewalker-mcp --help
 ```

@@ -807,6 +807,7 @@ def test_release_plan_reaudits_named_jobs_after_verification_rerun() -> None:
 def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only() -> None:
     workflow = _yaml(".github/workflows/rehearse-production-lifecycle.yml")
 
+    assert workflow["run-name"] == "production-lifecycle-${{ inputs.version }}"
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["env"]["UV_VERSION"] == "0.11.28"
     artifact_version = workflow["env"]["LIFECYCLE_ARTIFACT_VERSION"]
@@ -882,8 +883,8 @@ def test_production_lifecycle_rehearsal_policy_is_published_without_premature_cl
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     for required in (
-        "gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc2",
-        "production-lifecycle-0.4.0rc2-<os>-py<python-version>",
+        "gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc3",
+        "production-lifecycle-0.4.0rc3-<os>-py<python-version>",
         "Ubuntu 24.04",
         "macOS 15",
         "Python 3.13",

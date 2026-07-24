@@ -747,16 +747,37 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
     ) in packaged_paths
 
 
-def test_second_release_candidate_documents_rc1_recovery_without_final_beta_claim() -> None:
+def test_third_release_candidate_documents_rc2_history_without_final_beta_claim() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    vscode_setup = (PROJECT_ROOT / "docs/vscode-copilot-mcp-setup.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
+    normalized_user_guide = " ".join(user_guide.split())
 
-    assert "current production release candidate is `0.4.0rc2`" in readme
-    assert 'uv tool install "bundlewalker==0.4.0rc2"' in readme
-    assert "proof of concept" in readme
+    assert "current production release candidate is `0.4.0rc3`" in readme
+    assert 'uv tool install "bundlewalker==0.4.0rc3"' in readme
+    assert "current production release candidate is `0.4.0rc3`" in user_guide
+    assert 'uv tool install "bundlewalker==0.4.0rc3"' in user_guide
+    assert "not a claim of production stability or a completed beta" in normalized_readme
+    for active_guide in (normalized_readme, normalized_user_guide):
+        assert "proof of concept approaching beta" in active_guide
+        assert "final public beta" not in active_guide.casefold()
+    assert "BundleWalker `0.4.0rc3` installed as a tool" in vscode_setup
+    assert "## [Unreleased]\n\n## [v0.4.0rc3] - 2026-07-24" in changelog
+    assert "## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
+    rc3_entry = changelog.split("## [v0.4.0rc3] - 2026-07-24", maxsplit=1)[1].split(
+        "## [v0.4.0rc2] - 2026-07-21", maxsplit=1
+    )[0]
+    assert (
+        "[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...HEAD"
+    ) in changelog
+    assert (
+        "[v0.4.0rc3]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...v0.4.0rc3"
+    ) in changelog
     assert (
         "[v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2"
     ) in changelog
@@ -775,13 +796,21 @@ def test_second_release_candidate_documents_rc1_recovery_without_final_beta_clai
         "fresh artifacts from its reviewed tag",
         'gh run rerun "$RUN_ID" --job "$VERIFY_JOB_ID"',
         "Never rerun a failed publish job",
+        "For `0.4.0rc3`",
+        "advance through review to `0.4.0rc4`",
     ):
         assert phrase in releases
     assert "advance to `0.4.0rc2`" not in releases
     assert "advance through review to `0.4.0rc2`" not in releases
-    assert releases.count("advance to `0.4.0rc3`") == 1
-    assert releases.count("advance through review to `0.4.0rc3`") == 2
     assert "Production `0.4.0` is forbidden" in releases
+
+    for resolution in (
+        "pydantic-ai` to `2.16.0",
+        "typer` to `0.27.0",
+        "ruff` to `0.15.22",
+        "pypa/gh-action-pypi-publish` to `v1.14.1",
+    ):
+        assert resolution in rc3_entry
 
 
 def test_lifecycle_rehearsal_metadata_agrees_across_current_workflow_and_guides() -> None:

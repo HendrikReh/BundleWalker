@@ -142,6 +142,8 @@ step counted every regular file. It produced no retained workflow artifact, depl
 OIDC upload, PyPI version, or GitHub release. Never rerun that workflow or move, delete, or reuse
 the rc1 tag.
 
+### Historical rc2 recovery record
+
 For `0.4.0rc2`, merge the protected recovery pull request first, binding the merge to its recorded
 head commit. Immediately before tagging, fetch fresh `origin/master` and tags; require local
 `master`, fresh `origin/master`, and the pull request's actual merge OID to agree. Re-read the
@@ -184,6 +186,21 @@ production clean-install candidate, not final beta readiness. Its production-ins
 lifecycle gate has now passed as recorded below; that result does not by itself declare final beta
 readiness.
 
+### Current rc3 publication
+
+For `0.4.0rc3`, it is the operative production release candidate. Confirm production `0.4.0rc3`
+is unavailable, then create and verify annotated tag `v0.4.0rc3` at the reviewed `master` commit
+and push it once for `publish-pypi.yml`. Inspect the build evidence before approving only the
+exact `pypi` deployment for that tag and commit.
+
+Never move, delete, or reuse a pushed tag or package version. If a package-affecting
+`0.4.0rc3` build, upload, verification, or published-package failure occurs, fix it through
+review and advance through review to `0.4.0rc4`; do not reuse the failed candidate's tag or
+package version.
+
+Production `0.4.0` remains forbidden until every public-beta exit gate passes. `0.4.0rc3` is an
+Alpha production candidate and proof of concept approaching public beta, not final beta readiness.
+
 ## Production-installed lifecycle rehearsal
 
 After the production release candidate is available on PyPI and the workflow implementation is
@@ -191,7 +208,7 @@ merged to `master`, dispatch the manual rehearsal with the exact immutable relea
 `0.4.0rcN` (where `N` is a positive integer):
 
 ```bash
-gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc2
+gh workflow run rehearse-production-lifecycle.yml --ref master -f version=0.4.0rc3
 ```
 
 The release gate requires all four supported environments: Ubuntu 24.04 and macOS 15, each with
@@ -199,7 +216,7 @@ Python 3.13 and Python 3.14. Windows remains experimental and is excluded from t
 matrix. The workflow artifact for each matrix job is named:
 
 ```text
-production-lifecycle-0.4.0rc2-<os>-py<python-version>
+production-lifecycle-0.4.0rc3-<os>-py<python-version>
 ```
 
 Download every artifact and inspect its `evidence.json` and bounded sanitized doctor-report copies
