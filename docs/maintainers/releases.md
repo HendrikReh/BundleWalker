@@ -186,12 +186,32 @@ production clean-install candidate, not final beta readiness. Its production-ins
 lifecycle gate has now passed as recorded below; that result does not by itself declare final beta
 readiness.
 
-### Current rc3 publication
+### Prepared 0.4.0 public-beta promotion
 
-For `0.4.0rc3`, it is the operative production release candidate. Confirm production `0.4.0rc3`
-is unavailable, then create and verify annotated tag `v0.4.0rc3` at the reviewed `master` commit
-and push it once for `publish-pypi.yml`. Inspect the build evidence before approving only the
-exact `pypi` deployment for that tag and commit.
+Production `0.4.0` is the prepared public-beta identity. It becomes the current public beta only
+after the complete final gate passes and the reviewed commit is merged, tagged, published to PyPI,
+verified, and released on GitHub. This is a first-party identity and documentation promotion of the
+verified `0.4.0rc3` state: product code, third-party dependencies, publishing workflows, platform
+support, and workspace formats remain unchanged.
+
+Create annotated tag `v0.4.0` only at the exact reviewed and merged promotion commit after the
+complete final gate passes, local `master` equals fresh `origin/master`, Git and production PyPI
+both lack `0.4.0`, and the maintainer explicitly approves the irreversible tag boundary. Push the
+tag once for `publish-pypi.yml`, inspect the retained build evidence, and approve only the exact
+protected `pypi` deployment for that tag and commit. The workflow must publish the verified wheel
+and source archive and create a non-prerelease GitHub release from those same bytes.
+
+Do not dispatch `rehearse-production-lifecycle.yml` with `0.4.0`: that workflow remains an
+`0.4.0rcN` candidate gate, and the final promotion inherits the completed `0.4.0rc3` lifecycle
+evidence. If the final package requires any product-code, dependency, or workflow change before
+tagging, stop this promotion and prepare a later release candidate instead.
+
+### Historical rc3 publication
+
+For `0.4.0rc3`, this was the operative production release-candidate procedure: confirm production
+`0.4.0rc3` is unavailable, create and verify annotated tag `v0.4.0rc3` at the reviewed `master`
+commit, and push it once for `publish-pypi.yml`. The build evidence had to be inspected before
+approving only the exact `pypi` deployment for that tag and commit.
 
 Never move, delete, or reuse a pushed tag or package version. If a package-affecting
 `0.4.0rc3` build, upload, verification, or published-package failure occurs, fix it through

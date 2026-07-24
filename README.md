@@ -1,7 +1,7 @@
 # BundleWalker
 
 [![CI](https://github.com/HendrikReh/BundleWalker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/HendrikReh/BundleWalker/actions/workflows/ci.yml)
-[![PyPI prerelease](https://img.shields.io/pypi/v/bundlewalker?include_prereleases&label=PyPI)](https://pypi.org/project/bundlewalker/)
+[![PyPI](https://img.shields.io/pypi/v/bundlewalker?label=PyPI)](https://pypi.org/project/bundlewalker/)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later%20%2B%20CC0--1.0-blue)](LICENSE-SCOPE.md)
 
 BundleWalker is a local-first tool that turns a source bundle into a navigable knowledge workspace for people and AI agents.
@@ -27,10 +27,9 @@ of every accepted source as immutable evidence.
 
 ## Project status
 
-BundleWalker remains a proof of concept approaching beta; it is not a claim of production
-stability or a completed beta. The latest stable release is **v3** (Python package `0.3.0`), and the
-current production release candidate is `0.4.0rc3`. See the [Changelog](CHANGELOG.md) for the
-immutable release history.
+BundleWalker is a public beta for technical solo users; it is not a claim of production stability
+or a service-level commitment. The current public beta is `0.4.0`. See the
+[Changelog](CHANGELOG.md) for the immutable release history.
 
 macOS and Linux are supported; Windows is experimental.
 
@@ -38,16 +37,16 @@ macOS and Linux are supported; Windows is experimental.
 
 BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/).
 
-Install the exact prerelease as an isolated command-line tool:
+Install the exact public beta as an isolated command-line tool:
 
 ```bash
-uv tool install "bundlewalker==0.4.0rc3"
+uv tool install "bundlewalker==0.4.0"
 bundlewalker --help
 bundlewalker-mcp --help
 ```
 
-Final `0.4.0` is not published, so keep the exact prerelease version in the install command. If you
-want to contribute or run from a source checkout, use the separate
+Keep the exact version in the install command for reproducible setup. If you want to contribute or
+run from a source checkout, use the separate
 [development setup](CONTRIBUTING.md#development-setup).
 
 ## Create your first workspace

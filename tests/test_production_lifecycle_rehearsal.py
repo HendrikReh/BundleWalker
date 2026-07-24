@@ -7,9 +7,7 @@ import importlib.util
 import json
 import os
 import shutil
-import subprocess
 import sys
-from importlib.metadata import version as distribution_version
 from pathlib import Path
 from types import ModuleType
 
@@ -44,6 +42,11 @@ EXPECTED_TOOLS = {
     "search_concepts",
     "workspace_status",
 }
+REHEARSAL_VERSION = "0.4.0rc3"
+
+
+def _rehearsal_distribution_version(_: str) -> str:
+    return REHEARSAL_VERSION
 
 
 def _portable_workspace(root: Path) -> Path:
@@ -447,7 +450,10 @@ def test_unexpected_phase_failure_is_safe_and_skips_later_phases() -> None:
     assert "private exception detail" not in json.dumps(evidence)
 
 
-def test_harness_orchestration_passes_in_development_environment(tmp_path: Path) -> None:
+def test_harness_orchestration_passes_in_development_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bundlewalker = shutil.which("bundlewalker")
     bundlewalker_mcp = shutil.which("bundlewalker-mcp")
     assert bundlewalker is not None
@@ -455,12 +461,11 @@ def test_harness_orchestration_passes_in_development_environment(tmp_path: Path)
     run_root = tmp_path / "run"
     evidence_dir = run_root / "evidence"
 
-    completed = subprocess.run(
+    monkeypatch.setattr(HARNESS, "distribution_version", _rehearsal_distribution_version)
+    exit_code = HARNESS.main(
         [
-            sys.executable,
-            str(SCRIPT),
             "--version",
-            distribution_version("bundlewalker"),
+            REHEARSAL_VERSION,
             "--run-root",
             str(run_root),
             "--evidence-dir",
@@ -469,15 +474,10 @@ def test_harness_orchestration_passes_in_development_environment(tmp_path: Path)
             bundlewalker,
             "--bundlewalker-mcp",
             bundlewalker_mcp,
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
+        ]
     )
 
-    assert completed.returncode == 0, completed.stderr
+    assert exit_code == 0
     evidence = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
     assert evidence["result"] == "passed"
     assert [phase["status"] for phase in evidence["phases"]] == ["passed"] * 9
@@ -502,7 +502,10 @@ def test_harness_orchestration_passes_in_development_environment(tmp_path: Path)
     }
 
 
-def test_failed_command_is_retained_in_finalized_phase_evidence(tmp_path: Path) -> None:
+def test_failed_command_is_retained_in_finalized_phase_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     failing_cli = shutil.which("ruff")
     bundlewalker_mcp = shutil.which("bundlewalker-mcp")
     assert failing_cli is not None
@@ -510,12 +513,11 @@ def test_failed_command_is_retained_in_finalized_phase_evidence(tmp_path: Path) 
     run_root = tmp_path / "run"
     evidence_dir = run_root / "evidence"
 
-    completed = subprocess.run(
+    monkeypatch.setattr(HARNESS, "distribution_version", _rehearsal_distribution_version)
+    exit_code = HARNESS.main(
         [
-            sys.executable,
-            str(SCRIPT),
             "--version",
-            distribution_version("bundlewalker"),
+            REHEARSAL_VERSION,
             "--run-root",
             str(run_root),
             "--evidence-dir",
@@ -524,15 +526,10 @@ def test_failed_command_is_retained_in_finalized_phase_evidence(tmp_path: Path) 
             failing_cli,
             "--bundlewalker-mcp",
             bundlewalker_mcp,
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
+        ]
     )
 
-    assert completed.returncode == 1
+    assert exit_code == 1
     evidence = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
     failed = evidence["phases"][1]
     assert failed["name"] == "initialize"
@@ -543,6 +540,7 @@ def test_failed_command_is_retained_in_finalized_phase_evidence(tmp_path: Path) 
 
 def test_existing_lifecycle_target_records_failure_and_skips_all_work(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundlewalker = shutil.which("bundlewalker")
     bundlewalker_mcp = shutil.which("bundlewalker-mcp")
@@ -553,12 +551,11 @@ def test_existing_lifecycle_target_records_failure_and_skips_all_work(
     (run_root / "original").mkdir()
     evidence_dir = run_root / "evidence"
 
-    completed = subprocess.run(
+    monkeypatch.setattr(HARNESS, "distribution_version", _rehearsal_distribution_version)
+    exit_code = HARNESS.main(
         [
-            sys.executable,
-            str(SCRIPT),
             "--version",
-            distribution_version("bundlewalker"),
+            REHEARSAL_VERSION,
             "--run-root",
             str(run_root),
             "--evidence-dir",
@@ -567,15 +564,10 @@ def test_existing_lifecycle_target_records_failure_and_skips_all_work(
             bundlewalker,
             "--bundlewalker-mcp",
             bundlewalker_mcp,
-        ],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
+        ]
     )
 
-    assert completed.returncode == 1
+    assert exit_code == 1
     evidence = json.loads((evidence_dir / "evidence.json").read_text(encoding="utf-8"))
     assert evidence["phases"][0]["status"] == "failed"
     assert [phase["status"] for phase in evidence["phases"][1:]] == ["skipped"] * 8

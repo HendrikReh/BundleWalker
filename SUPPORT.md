@@ -1,6 +1,6 @@
 # BundleWalker Support
 
-BundleWalker is moving from proof of concept toward a public beta for technical solo users.
+BundleWalker is a public beta for technical solo users.
 Support is community-based and has no guaranteed response time or service-level agreement.
 
 ## Supported scope

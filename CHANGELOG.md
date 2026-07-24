@@ -4,6 +4,16 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-07-25
+
+- Promoted the verified `0.4.0rc3` candidate to the `0.4.0` public beta without changing product
+  behavior or third-party dependencies.
+- Updated first-party package identity, the development-status classifier, installation examples,
+  and active project documentation for the public-beta boundary.
+- Preserved the production-installed rc3 lifecycle evidence and all earlier release provenance.
+
+### Validation
+
 - Completed the live production-installed lifecycle rehearsal for `0.4.0rc3` on all four
   supported macOS/Linux and Python 3.13/3.14 environments, and recorded inspected production-PyPI
   workspace, archive, doctor, and installed MCP evidence.
@@ -136,7 +146,8 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
-[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...HEAD
+[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0...HEAD
+[v0.4.0]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...v0.4.0
 [v0.4.0rc3]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...v0.4.0rc3
 [v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2
 [v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1
