@@ -765,7 +765,8 @@ def test_third_release_candidate_documents_rc2_history_without_final_beta_claim(
         assert "proof of concept approaching beta" in active_guide
         assert "final public beta" not in active_guide.casefold()
     assert "BundleWalker `0.4.0rc3` installed as a tool" in vscode_setup
-    assert "## [Unreleased]\n\n## [v0.4.0rc3] - 2026-07-24" in changelog
+    assert "## [Unreleased]" in changelog
+    assert "## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
     rc3_entry = changelog.split("## [v0.4.0rc3] - 2026-07-24", maxsplit=1)[1].split(
@@ -948,3 +949,102 @@ def test_production_lifecycle_evidence_records_inspected_live_gate() -> None:
     assert "| Installed release path | Not covered |" in mcp_compatibility
 
     assert "Completed the live production-installed lifecycle rehearsal" in changelog
+
+
+def test_rc3_production_lifecycle_evidence_records_inspected_live_gate() -> None:
+    evidence_path = (
+        PROJECT_ROOT / "docs/maintainers/evidence/2026-07-24-production-lifecycle-0.4.0rc3.md"
+    )
+    assert evidence_path.is_file()
+
+    evidence = evidence_path.read_text(encoding="utf-8")
+    releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
+    mcp_compatibility = (PROJECT_ROOT / "docs/mcp-compatibility.md").read_text(encoding="utf-8")
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    release_plan = (
+        PROJECT_ROOT / "docs/superpowers/plans/2026-07-24-bundlewalker-0.4.0rc3-and-public-beta.md"
+    ).read_text(encoding="utf-8")
+    normalized_evidence = " ".join(evidence.split())
+    normalized_mcp_compatibility = " ".join(mcp_compatibility.split())
+
+    for value in (
+        "https://github.com/HendrikReh/BundleWalker/actions/runs/30098254437",
+        "v0.4.0rc3",
+        "1d38c96d9531a05c99b67b14b0e7d2615045877e",
+        "0.4.0rc3",
+        "b903b396e8df3e9bfbecfb24e628e0fe7ab8dafefdaf86a59d1d262b05413b53",
+    ):
+        assert value in evidence
+
+    expected_artifact_rows = (
+        "| `production-lifecycle-0.4.0rc3-macos-15-py3.13` | Python 3.13.14; "
+        "Darwin arm64 | Passed | "
+        "`93ec0bc7fce9b4a2d9fb6c8609e8cac3115a95833b9155ee0e3145c8666b740a` | "
+        "3372 | `99074e4009aa1666da2752be75a3fa1db6772ffb92bd3fd91b47064555e74c7d` | "
+        "14584 |",
+        "| `production-lifecycle-0.4.0rc3-macos-15-py3.14` | Python 3.14.6; "
+        "Darwin arm64 | Passed | "
+        "`aed46653fa0aae9fa73b2698286cc290519553686e8d9f6b800194317fb36fbe` | "
+        "3372 | `127e8a34d175f56905769e8b79d56e9dbcc93530cbee5b0601ec50522769fc33` | "
+        "14577 |",
+        "| `production-lifecycle-0.4.0rc3-ubuntu-24.04-py3.13` | Python 3.13.14; "
+        "Linux x86_64 | Passed | "
+        "`ddee5e0252c715b07c468c0359581d0fc92f6c4357d651513c0948f6cd26ab50` | "
+        "3372 | `1960ddd88183b2ca9bab5dacfeff8163fa15a2ab7b871fc135a04fb2f8f930a2` | "
+        "14583 |",
+        "| `production-lifecycle-0.4.0rc3-ubuntu-24.04-py3.14` | Python 3.14.6; "
+        "Linux x86_64 | Passed | "
+        "`34b06d86a1f56b7b40fd6ec133c7c538101e714b6eede75d7f7a35318db0e894` | "
+        "3369 | `ad802e204676231484fe3c97ea61c5272dd226cb5a75ffa8426f0378f0cfb622` | "
+        "14581 |",
+    )
+    for row in expected_artifact_rows:
+        assert row in evidence
+
+    assert (
+        "all nine recorded phases present in order and passing: `installed_identity`, "
+        "`initialize`, `inspect_original`, `backup`, `restore`, `upgrade_noop`, `rollback`, "
+        "`mcp`, and `final_invariants`"
+    ) in normalized_evidence
+    assert "installed exclusively from production PyPI" in normalized_evidence
+    assert (
+        "No local wheel, source checkout, TestPyPI package, or alternate package index was used "
+        "to install BundleWalker."
+    ) in normalized_evidence
+    assert "overall result `passed`" in normalized_evidence
+
+    expected_tools = [
+        "apply_review",
+        "ask",
+        "discard_review",
+        "get_pending_review",
+        "lint",
+        "prepare_ingestion",
+        "prepare_refresh",
+        "prepare_synthesis",
+        "search_concepts",
+        "workspace_status",
+    ]
+    tool_section = evidence.split("## Installed MCP surface", maxsplit=1)[1]
+    observed_tools = re.findall(r"^- `([^`]+)`$", tool_section, flags=re.MULTILINE)
+    assert observed_tools == expected_tools
+
+    evidence_link = "evidence/2026-07-24-production-lifecycle-0.4.0rc3.md"
+    assert evidence_link in releases
+    assert "production-installed lifecycle gate for `0.4.0rc3` passed" in releases
+
+    compatibility_evidence_link = "maintainers/evidence/2026-07-24-production-lifecycle-0.4.0rc3.md"
+    assert compatibility_evidence_link in mcp_compatibility
+    assert "installed `bundlewalker-mcp` exposed all 10 MCP tools" in normalized_mcp_compatibility
+    assert "production PyPI" in normalized_mcp_compatibility
+
+    unreleased = changelog.split("## [Unreleased]", maxsplit=1)[1].split(
+        "## [v0.4.0rc3]", maxsplit=1
+    )[0]
+    assert (
+        "Completed the live production-installed lifecycle rehearsal for `0.4.0rc3`" in unreleased
+    )
+
+    assert '"$RC3_PYPI_ENV/bin/bundlewalker" --version' not in release_plan
+    assert "\nbundlewalker --version\n" not in release_plan
+    assert release_plan.count("from importlib.metadata import version") == 2
