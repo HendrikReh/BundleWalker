@@ -623,8 +623,9 @@ def test_doctor_report_close_failure_is_safe_and_returns_one(
 def test_doctor_help_shows_path_and_report_option() -> None:
     result = runner.invoke(app, ["doctor", "--help"])
     output = unstyle(result.output)
+    normalized = " ".join(output.split())
 
     assert result.exit_code == 0, result.output
-    assert "PATH" in output
+    assert "path <path>" in normalized
     assert "--report" in output
     assert "REPORT.json" in output

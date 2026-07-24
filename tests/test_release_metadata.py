@@ -238,6 +238,20 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
+def test_release_lock_uses_approved_rc3_dependency_versions() -> None:
+    locked = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    versions = {package["name"]: package["version"] for package in locked["package"]}
+
+    assert versions["pydantic-ai"] == "2.16.0"
+    assert versions["typer"] == "0.27.0"
+    assert versions["ruff"] == "0.15.22"
+
+    project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "pydantic-ai>=2.10.0" in project["project"]["dependencies"]
+    assert "typer>=0.16.0" in project["project"]["dependencies"]
+    assert "ruff>=0.12.0" in project["dependency-groups"]["dev"]
+
+
 def test_active_documentation_local_links_and_anchors_resolve() -> None:
     parser = MarkdownIt("commonmark")
     for relative in ACTIVE_DOCUMENTATION:

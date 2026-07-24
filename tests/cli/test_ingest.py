@@ -31,9 +31,10 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 def test_ingest_help_does_not_require_a_workspace() -> None:
     result = runner.invoke(app, ["ingest", "--help"], catch_exceptions=False)
     output = unstyle(result.output)
+    normalized = " ".join(output.split())
 
     assert result.exit_code == 0, result.output
-    assert "FILE" in output
+    assert "file <path>" in normalized
     assert "--model" in output
 
 
