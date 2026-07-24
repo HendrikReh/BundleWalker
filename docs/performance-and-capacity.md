@@ -7,8 +7,8 @@ understand the measured local envelope and the limits around that evidence.
 
 Status: reviewed evidence.
 
-BundleWalker remains a proof of concept for technical solo users. The reviewed, reproducible
-evidence establishes one conservative envelope for the local CLI and workspace-bound MCP server.
+BundleWalker is a public beta for technical solo users. The reviewed, reproducible evidence
+establishes one conservative envelope for the local CLI and workspace-bound MCP server.
 
 Supported capacity is 1,000 knowledge documents, approximately 10 MiB of wiki content, and a 50,000-character ingestion source.
 

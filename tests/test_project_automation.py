@@ -593,8 +593,8 @@ def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
     dist.mkdir()
     for name in (
         ".gitignore",
-        "bundlewalker-0.4.0rc3-py3-none-any.whl",
-        "bundlewalker-0.4.0rc3.tar.gz",
+        "bundlewalker-0.4.0-py3-none-any.whl",
+        "bundlewalker-0.4.0.tar.gz",
     ):
         (dist / name).touch()
 
@@ -607,8 +607,8 @@ def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
     ).stdout.splitlines()
 
     assert sorted(selected) == [
-        "dist/bundlewalker-0.4.0rc3-py3-none-any.whl",
-        "dist/bundlewalker-0.4.0rc3.tar.gz",
+        "dist/bundlewalker-0.4.0-py3-none-any.whl",
+        "dist/bundlewalker-0.4.0.tar.gz",
     ]
     assert "dist/.gitignore" not in selected
     assert 'uv run twine check "${artifacts[@]}"' in script

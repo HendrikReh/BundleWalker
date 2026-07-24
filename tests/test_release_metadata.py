@@ -291,7 +291,9 @@ def test_performance_document_publishes_reviewed_capacity_derived_from_evidence_
     assert "1-GiB free-space advisory" in performance
     assert "remote model-provider latency is excluded" in performance
     assert "Windows remains experimental" in performance
-    assert "proof of concept" in performance
+    assert "public beta" in performance
+    assert "proof of concept" not in performance.casefold()
+    assert "release candidate" not in performance.casefold()
 
     _assert_published_capacity_claim(performance, capacity)
     assert "Supported capacity is not yet published." not in performance
@@ -510,7 +512,7 @@ def test_public_package_metadata_is_complete() -> None:
         "pydantic-ai",
     ]
     assert project["classifiers"] == [
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 4 - Beta",
         "Environment :: Console",
         "Intended Audience :: Developers",
         "Operating System :: MacOS",
@@ -694,13 +696,13 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
-def test_development_version_is_third_release_candidate() -> None:
+def test_development_version_is_public_beta() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0rc3"
-    assert bundlewalker.__version__ == "0.4.0rc3"
-    assert "Development Status :: 3 - Alpha" in project["project"]["classifiers"]
-    assert "Development Status :: 4 - Beta" not in project["project"]["classifiers"]
+    assert project["project"]["version"] == "0.4.0"
+    assert bundlewalker.__version__ == "0.4.0"
+    assert "Development Status :: 4 - Beta" in project["project"]["classifiers"]
+    assert "Development Status :: 3 - Alpha" not in project["project"]["classifiers"]
 
 
 def test_source_distribution_excludes_untracked_superpowers_worker_state(
@@ -743,37 +745,55 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
     assert (
-        "bundlewalker-0.4.0rc3/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+        "bundlewalker-0.4.0/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
 
 
-def test_third_release_candidate_documents_rc2_history_without_final_beta_claim() -> None:
+def test_public_beta_documents_preserve_release_candidate_history() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    support = (PROJECT_ROOT / "SUPPORT.md").read_text(encoding="utf-8")
     user_guide = (PROJECT_ROOT / "docs/user-guide.md").read_text(encoding="utf-8")
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
     vscode_setup = (PROJECT_ROOT / "docs/vscode-copilot-mcp-setup.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
     normalized_readme = " ".join(readme.split())
+    normalized_support = " ".join(support.split())
     normalized_user_guide = " ".join(user_guide.split())
+    normalized_performance = " ".join(performance.split())
 
-    assert "current production release candidate is `0.4.0rc3`" in readme
-    assert 'uv tool install "bundlewalker==0.4.0rc3"' in readme
-    assert "current production release candidate is `0.4.0rc3`" in user_guide
-    assert 'uv tool install "bundlewalker==0.4.0rc3"' in user_guide
-    assert "not a claim of production stability or a completed beta" in normalized_readme
-    for active_guide in (normalized_readme, normalized_user_guide):
-        assert "proof of concept approaching beta" in active_guide
-        assert "final public beta" not in active_guide.casefold()
-    assert "BundleWalker `0.4.0rc3` installed as a tool" in vscode_setup
+    assert "current public beta is `0.4.0`" in readme
+    assert 'uv tool install "bundlewalker==0.4.0"' in readme
+    assert "current public beta is `0.4.0`" in user_guide
+    assert 'uv tool install "bundlewalker==0.4.0"' in user_guide
+    for active_guide in (
+        normalized_readme,
+        normalized_support,
+        normalized_user_guide,
+        normalized_performance,
+    ):
+        assert "public beta" in active_guide.casefold()
+        assert "proof of concept" not in active_guide.casefold()
+        assert "approaching beta" not in active_guide.casefold()
+        assert "release candidate" not in active_guide.casefold()
+    assert "BundleWalker `0.4.0` installed as a tool" in vscode_setup
     assert "## [Unreleased]" in changelog
+    assert "## [v0.4.0] - 2026-07-25" in changelog
     assert "## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
+    final_entry = changelog.split("## [v0.4.0] - 2026-07-25", maxsplit=1)[1].split(
+        "## [v0.4.0rc3] - 2026-07-24", maxsplit=1
+    )[0]
+    normalized_final_entry = " ".join(final_entry.split())
     rc3_entry = changelog.split("## [v0.4.0rc3] - 2026-07-24", maxsplit=1)[1].split(
         "## [v0.4.0rc2] - 2026-07-21", maxsplit=1
     )[0]
     assert (
-        "[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...HEAD"
+        "[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0...HEAD"
+    ) in changelog
+    assert (
+        "[v0.4.0]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...v0.4.0"
     ) in changelog
     assert (
         "[v0.4.0rc3]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...v0.4.0rc3"
@@ -804,10 +824,11 @@ def test_third_release_candidate_documents_rc2_history_without_final_beta_claim(
     assert "advance through review to `0.4.0rc2`" not in releases
     assert "Production `0.4.0` is forbidden" in releases
 
-    current_rc3_publication = releases.split("### Current rc3 publication", maxsplit=1)[1].split(
-        "## Production-installed lifecycle rehearsal", maxsplit=1
-    )[0]
-    normalized_current_rc3_publication = " ".join(current_rc3_publication.split())
+    assert "### Current rc3 publication" not in releases
+    historical_rc3_publication = releases.split("### Historical rc3 publication", maxsplit=1)[
+        1
+    ].split("## Production-installed lifecycle rehearsal", maxsplit=1)[0]
+    normalized_historical_rc3_publication = " ".join(historical_rc3_publication.split())
     for recovery_invariant in (
         "The exact-set production recovery matrix above also governs `0.4.0rc3`",
         "If PyPI exposes neither exact artifact after a tag or upload failure",
@@ -827,7 +848,7 @@ def test_third_release_candidate_documents_rc2_history_without_final_beta_claim(
         "rerun only that original release job",
         "retained verified artifacts",
     ):
-        assert recovery_invariant in normalized_current_rc3_publication
+        assert recovery_invariant in normalized_historical_rc3_publication
 
     for resolution in (
         "pydantic-ai` to `2.16.0",
@@ -836,6 +857,23 @@ def test_third_release_candidate_documents_rc2_history_without_final_beta_claim(
         "pypa/gh-action-pypi-publish` to `v1.14.1",
     ):
         assert resolution in rc3_entry
+    assert (
+        "Promoted the verified `0.4.0rc3` candidate to the `0.4.0` public beta"
+        in normalized_final_entry
+    )
+    assert "without changing product behavior or third-party dependencies" in normalized_final_entry
+    assert "### Prepared 0.4.0 public-beta promotion" in releases
+    prepared_beta = releases.split("### Prepared 0.4.0 public-beta promotion", maxsplit=1)[1].split(
+        "### Historical rc3 publication", maxsplit=1
+    )[0]
+    normalized_prepared_beta = " ".join(prepared_beta.split())
+    assert "Production `0.4.0` is the prepared public-beta identity" in normalized_prepared_beta
+    assert "It becomes the current public beta only after the complete final gate passes" in (
+        normalized_prepared_beta
+    )
+    assert "published to PyPI" in normalized_prepared_beta
+    assert "released on GitHub" in normalized_prepared_beta
+    assert "v0.4.0" in normalized_prepared_beta
 
 
 def test_lifecycle_rehearsal_metadata_agrees_across_current_workflow_and_guides() -> None:
