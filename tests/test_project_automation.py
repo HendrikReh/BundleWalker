@@ -593,8 +593,8 @@ def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
     dist.mkdir()
     for name in (
         ".gitignore",
-        "bundlewalker-0.4.0rc2-py3-none-any.whl",
-        "bundlewalker-0.4.0rc2.tar.gz",
+        "bundlewalker-0.4.0rc3-py3-none-any.whl",
+        "bundlewalker-0.4.0rc3.tar.gz",
     ):
         (dist / name).touch()
 
@@ -607,8 +607,8 @@ def test_pypi_workflow_does_not_count_uv_gitignore_as_distribution(
     ).stdout.splitlines()
 
     assert sorted(selected) == [
-        "dist/bundlewalker-0.4.0rc2-py3-none-any.whl",
-        "dist/bundlewalker-0.4.0rc2.tar.gz",
+        "dist/bundlewalker-0.4.0rc3-py3-none-any.whl",
+        "dist/bundlewalker-0.4.0rc3.tar.gz",
     ]
     assert "dist/.gitignore" not in selected
     assert 'uv run twine check "${artifacts[@]}"' in script
@@ -870,8 +870,8 @@ def test_production_lifecycle_rehearsal_is_manual_read_only_and_supported_only()
         "${{ matrix.os }}-py${{ matrix.python-version }}"
     )
     assert (
-        artifact_name.replace("${{ env.LIFECYCLE_ARTIFACT_VERSION }}", "0.4.0rc2")
-        == "production-lifecycle-0.4.0rc2-${{ matrix.os }}-py${{ matrix.python-version }}"
+        artifact_name.replace("${{ env.LIFECYCLE_ARTIFACT_VERSION }}", "0.4.0rc3")
+        == "production-lifecycle-0.4.0rc3-${{ matrix.os }}-py${{ matrix.python-version }}"
     )
     _assert_actions_are_sha_pinned(workflow)
 

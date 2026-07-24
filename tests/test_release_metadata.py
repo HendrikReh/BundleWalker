@@ -694,11 +694,13 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
-def test_development_version_is_second_release_candidate() -> None:
+def test_development_version_is_third_release_candidate() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0rc2"
-    assert bundlewalker.__version__ == "0.4.0rc2"
+    assert project["project"]["version"] == "0.4.0rc3"
+    assert bundlewalker.__version__ == "0.4.0rc3"
+    assert "Development Status :: 3 - Alpha" in project["project"]["classifiers"]
+    assert "Development Status :: 4 - Beta" not in project["project"]["classifiers"]
 
 
 def test_source_distribution_excludes_untracked_superpowers_worker_state(
@@ -741,7 +743,7 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
     assert (
-        "bundlewalker-0.4.0rc2/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+        "bundlewalker-0.4.0rc3/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
 
 
