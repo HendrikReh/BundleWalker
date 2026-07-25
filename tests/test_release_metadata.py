@@ -749,6 +749,40 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
     ) in packaged_paths
 
 
+def test_source_distribution_contains_exact_tracked_historical_fixtures(
+    tmp_path: Path,
+) -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "tests/fixtures/historical"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected = set(tracked.stdout.splitlines())
+    assert expected
+
+    subprocess.run(
+        ["uv", "build", "--sdist", "--out-dir", str(tmp_path), "--no-sources"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sdist = next(tmp_path.glob("bundlewalker-*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        packaged = {
+            PurePosixPath(*PurePosixPath(member.name).parts[1:]).as_posix()
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+
+    actual = {
+        path for path in packaged if path.startswith("tests/fixtures/historical/")
+    }
+    assert actual == expected
+
+
 def test_public_beta_documents_preserve_release_candidate_history() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     support = (PROJECT_ROOT / "SUPPORT.md").read_text(encoding="utf-8")

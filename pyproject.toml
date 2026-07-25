@@ -69,6 +69,8 @@ exclude = [".superpowers/**", "benchmarks/**"]
 
 [tool.hatch.build.targets.sdist.force-include]
 "tests/fixtures/historical/empty-directories.json" = "tests/fixtures/historical/empty-directories.json"
+"tests/fixtures/historical/v1-schema1-swapping/.bundlewalker" = "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker"
+"tests/fixtures/historical/v3-schema2-pending/.bundlewalker" = "tests/fixtures/historical/v3-schema2-pending/.bundlewalker"
 
 [tool.pytest.ini_options]
 addopts = "-q"
