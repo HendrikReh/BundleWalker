@@ -156,14 +156,26 @@ def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
     _assert_actions_are_sha_pinned(workflow)
 
 
-def test_sdist_includes_historical_empty_directory_representation() -> None:
+def test_sdist_force_includes_ignored_historical_fixture_representation() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "tests/fixtures/historical"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    hidden_fixture_files = {
+        path for path in tracked.stdout.splitlines() if ".bundlewalker" in Path(path).parts
+    }
+    assert len(hidden_fixture_files) == 28
 
     force_include = project["tool"]["hatch"]["build"]["targets"]["sdist"]["force-include"]
     assert force_include == {
         "tests/fixtures/historical/empty-directories.json": (
             "tests/fixtures/historical/empty-directories.json"
-        )
+        ),
+        **{path: path for path in hidden_fixture_files},
     }
 
 

@@ -4,6 +4,11 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+- Included all tracked historical `.bundlewalker` fixture data in source distributions while
+  excluding untracked fixture files.
+- Separated current dependency-floor validation from the immutable `0.4.0rc3` lock-resolution
+  evidence so compatible post-release dependency updates can pass CI.
+
 ## [v0.4.0] - 2026-07-25
 
 - Promoted the verified `0.4.0rc3` candidate to the `0.4.0` public beta without changing product

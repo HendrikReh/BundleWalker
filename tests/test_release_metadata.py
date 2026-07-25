@@ -238,13 +238,10 @@ def test_release_versions_are_consistent() -> None:
     assert editable_package["version"] == expected
 
 
-def test_release_lock_uses_approved_rc3_dependency_versions() -> None:
+def test_current_dependency_policy_declares_supported_floors() -> None:
     locked = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
-    versions = {package["name"]: package["version"] for package in locked["package"]}
-
-    assert versions["pydantic-ai"] == "2.16.0"
-    assert versions["typer"] == "0.27.0"
-    assert versions["ruff"] == "0.15.22"
+    locked_names = {package["name"] for package in locked["package"]}
+    assert {"pydantic-ai", "typer", "ruff"} <= locked_names
 
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "pydantic-ai>=2.10.0" in project["project"]["dependencies"]
@@ -747,6 +744,66 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
     assert (
         "bundlewalker-0.4.0/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
+
+
+def test_source_distribution_contains_exact_tracked_historical_fixtures(
+    tmp_path: Path,
+) -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "tests/fixtures/historical"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected = set(tracked.stdout.splitlines())
+    assert expected
+
+    source = tmp_path / "source"
+    artifacts = tmp_path / "dist"
+    shutil.copytree(
+        PROJECT_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".direnv",
+            ".env",
+            ".env.*",
+            ".git",
+            ".mypy_cache",
+            ".nox",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".superpowers",
+            ".tox",
+            ".venv",
+            "__pycache__",
+            "dist",
+            "venv",
+        ),
+    )
+    sentinel = (
+        source
+        / "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/untracked-sentinel.txt"
+    )
+    sentinel.write_text("must not be packaged\n", encoding="utf-8")
+
+    subprocess.run(
+        ["uv", "build", "--sdist", "--out-dir", str(artifacts), "--no-sources"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sdist = next(artifacts.glob("bundlewalker-*.tar.gz"))
+    with tarfile.open(sdist, "r:gz") as archive:
+        packaged = {
+            PurePosixPath(*PurePosixPath(member.name).parts[1:]).as_posix()
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+
+    actual = {path for path in packaged if path.startswith("tests/fixtures/historical/")}
+    assert actual == expected
 
 
 def test_public_beta_documents_preserve_release_candidate_history() -> None:
