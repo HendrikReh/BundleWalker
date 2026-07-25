@@ -9,8 +9,9 @@ every sdist contain exactly the Git-tracked historical fixture files.
 
 **Architecture:** Current dependency policy will validate declared floors and resolved-package
 presence while immutable release records retain exact `rc3` versions. Hatch will explicitly
-force-include only the two ignored historical `.bundlewalker` subtrees, and a built-archive test
-will compare historical fixture members exactly with `git ls-files`.
+force-include only the 28 Git-tracked files below the two ignored historical `.bundlewalker` roots,
+and a disposable-copy archive test with an ignored untracked sentinel will compare historical
+fixture members exactly with `git ls-files`.
 
 **Tech Stack:** Python 3.13/3.14, pytest, Hatchling, uv, TOML, tarfile, Git, Ruff, Pyright,
 pip-audit, Twine
@@ -42,7 +43,7 @@ pip-audit, Twine
 - Consumes: Git's authoritative tracked-file list below `tests/fixtures/historical/`
 - Produces: an sdist whose normalized historical fixture file set equals that tracked-file list
 
-- [ ] **Step 1: Add the failing archive-content regression test**
+- [ ] **Step 1: Update the failing archive-content regression test**
 
 Add this test near the existing source-distribution tests in `tests/test_release_metadata.py`:
 
@@ -60,14 +61,42 @@ def test_source_distribution_contains_exact_tracked_historical_fixtures(
     expected = set(tracked.stdout.splitlines())
     assert expected
 
+    source = tmp_path / "source"
+    artifacts = tmp_path / "dist"
+    shutil.copytree(
+        PROJECT_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".direnv",
+            ".env",
+            ".env.*",
+            ".git",
+            ".mypy_cache",
+            ".nox",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".superpowers",
+            ".tox",
+            ".venv",
+            "__pycache__",
+            "dist",
+            "venv",
+        ),
+    )
+    sentinel = (
+        source
+        / "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/untracked-sentinel.txt"
+    )
+    sentinel.write_text("must not be packaged\n", encoding="utf-8")
+
     subprocess.run(
-        ["uv", "build", "--sdist", "--out-dir", str(tmp_path), "--no-sources"],
-        cwd=PROJECT_ROOT,
+        ["uv", "build", "--sdist", "--out-dir", str(artifacts), "--no-sources"],
+        cwd=source,
         check=True,
         capture_output=True,
         text=True,
     )
-    sdist = next(tmp_path.glob("bundlewalker-*.tar.gz"))
+    sdist = next(artifacts.glob("bundlewalker-*.tar.gz"))
     with tarfile.open(sdist, "r:gz") as archive:
         packaged = {
             PurePosixPath(*PurePosixPath(member.name).parts[1:]).as_posix()
@@ -91,37 +120,47 @@ uv run pytest \
   -q
 ```
 
-Expected: FAIL. The `expected - actual` difference contains the 28 tracked paths below the two
-historical `.bundlewalker/` subtrees.
+Expected: FAIL. The archive has exactly one extra historical fixture member:
+`tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/untracked-sentinel.txt`.
 
 - [ ] **Step 3: Add focused Hatch force-inclusion mappings**
 
-Change the existing table in `pyproject.toml` to:
+Replace both directory sources in the existing table with one source-to-same-destination mapping
+for every path returned by:
 
-```toml
-[tool.hatch.build.targets.sdist.force-include]
-"tests/fixtures/historical/empty-directories.json" = "tests/fixtures/historical/empty-directories.json"
-"tests/fixtures/historical/v1-schema1-swapping/.bundlewalker" = "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker"
-"tests/fixtures/historical/v3-schema2-pending/.bundlewalker" = "tests/fixtures/historical/v3-schema2-pending/.bundlewalker"
+```bash
+git ls-files -- tests/fixtures/historical \
+  | rg '/\.bundlewalker/' \
+  | sort
 ```
+
+Keep the existing `empty-directories.json` file mapping. The result is a 29-entry table: the
+sidecar plus exactly 28 tracked hidden files. Every source must be a file, every destination must be
+the identical archive path, and neither `.bundlewalker` directory may appear as a source.
 
 - [ ] **Step 4: Update the configuration contract**
 
-Change `test_sdist_includes_historical_empty_directory_representation` in
-`tests/test_project_automation.py` to
-`test_sdist_force_includes_ignored_historical_fixture_representation` and assert:
+Make `test_sdist_force_includes_ignored_historical_fixture_representation` derive the tracked hidden
+file set from Git and assert:
 
 ```python
+tracked = subprocess.run(
+    ["git", "ls-files", "--", "tests/fixtures/historical"],
+    cwd=PROJECT_ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+)
+hidden_fixture_files = {
+    path for path in tracked.stdout.splitlines() if ".bundlewalker" in Path(path).parts
+}
+assert len(hidden_fixture_files) == 28
+
 assert force_include == {
     "tests/fixtures/historical/empty-directories.json": (
         "tests/fixtures/historical/empty-directories.json"
     ),
-    "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker": (
-        "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker"
-    ),
-    "tests/fixtures/historical/v3-schema2-pending/.bundlewalker": (
-        "tests/fixtures/historical/v3-schema2-pending/.bundlewalker"
-    ),
+    **{path: path for path in hidden_fixture_files},
 }
 ```
 
@@ -166,7 +205,8 @@ printf '%s\n' "$BW_HIDDEN_MEMBERS"
 ```
 
 Expected: 28 file paths, all below `v1-schema1-swapping/.bundlewalker/` or
-`v3-schema2-pending/.bundlewalker/`.
+`v3-schema2-pending/.bundlewalker/`. The archive regression separately proves that the seeded
+untracked sentinel is absent.
 
 - [ ] **Step 8: Commit the packaging fix**
 
@@ -360,7 +400,8 @@ Expected: both isolated installs and all four entry-point probes pass.
 - [ ] **Step 6: Verify repository-layout-independent archive contents**
 
 Verify the behavior once from the linked implementation worktree and once from a fresh normal Git
-clone, whose `.git` entry is a directory:
+clone, whose `.git` entry is a directory. The test itself creates a disposable project copy and
+seeds the ignored untracked sentinel before each build:
 
 ```bash
 uv run pytest \
@@ -442,8 +483,9 @@ post-release Dependabot resolutions failed supported CI. Exact rc3 versions rema
 the annotated tag, changelog, accepted release records, and release-history tests.
 
 Hatch respected the repository-wide `.bundlewalker/` ignore rule in a normal checkout, omitting 28
-tracked historical fixture files from sdists. Targeted force-inclusion mappings now restore those
-files without admitting arbitrary untracked fixture data.
+tracked historical fixture files from sdists. Exact file-to-same-path force-inclusion mappings now
+restore those files without recursively admitting arbitrary untracked fixture data; a disposable
+copy regression seeds an ignored sentinel to enforce that boundary.
 
 ## Validation
 

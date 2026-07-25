@@ -759,14 +759,42 @@ def test_source_distribution_contains_exact_tracked_historical_fixtures(
     expected = set(tracked.stdout.splitlines())
     assert expected
 
+    source = tmp_path / "source"
+    artifacts = tmp_path / "dist"
+    shutil.copytree(
+        PROJECT_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".direnv",
+            ".env",
+            ".env.*",
+            ".git",
+            ".mypy_cache",
+            ".nox",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".superpowers",
+            ".tox",
+            ".venv",
+            "__pycache__",
+            "dist",
+            "venv",
+        ),
+    )
+    sentinel = (
+        source
+        / "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/untracked-sentinel.txt"
+    )
+    sentinel.write_text("must not be packaged\n", encoding="utf-8")
+
     subprocess.run(
-        ["uv", "build", "--sdist", "--out-dir", str(tmp_path), "--no-sources"],
-        cwd=PROJECT_ROOT,
+        ["uv", "build", "--sdist", "--out-dir", str(artifacts), "--no-sources"],
+        cwd=source,
         check=True,
         capture_output=True,
         text=True,
     )
-    sdist = next(tmp_path.glob("bundlewalker-*.tar.gz"))
+    sdist = next(artifacts.glob("bundlewalker-*.tar.gz"))
     with tarfile.open(sdist, "r:gz") as archive:
         packaged = {
             PurePosixPath(*PurePosixPath(member.name).parts[1:]).as_posix()
