@@ -171,7 +171,14 @@ def test_sdist_force_includes_ignored_historical_fixture_representation() -> Non
     assert len(hidden_fixture_files) == 28
 
     force_include = project["tool"]["hatch"]["build"]["targets"]["sdist"]["force-include"]
-    assert force_include == {
+    web_static = "src/bundlewalker/interfaces/web/static"
+    assert {source: target for source, target in force_include.items() if source == web_static} == {
+        web_static: web_static
+    }
+    historical_force_include = {
+        source: target for source, target in force_include.items() if source != web_static
+    }
+    assert historical_force_include == {
         "tests/fixtures/historical/empty-directories.json": (
             "tests/fixtures/historical/empty-directories.json"
         ),
