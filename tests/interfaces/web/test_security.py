@@ -11,9 +11,14 @@ from typing import Protocol
 import pytest
 from httpx2 import Response
 from starlette.testclient import TestClient
+from starlette.types import Message, Receive, Scope, Send
 
 from bundlewalker.application import WorkspaceApplication
-from bundlewalker.interfaces.web.app import MAX_WEB_REQUEST_BYTES, create_web_app
+from bundlewalker.interfaces.web.app import (
+    MAX_WEB_REQUEST_BYTES,
+    WebSecurityMiddleware,
+    create_web_app,
+)
 from bundlewalker.interfaces.web.security import BrowserSessionStore
 
 EXPECTED_HOST = "127.0.0.1:43123"
@@ -170,6 +175,61 @@ def test_mutation_rejects_excessive_request_body(
     )
 
     assert response.status_code == 413
+
+
+async def test_mutation_disconnect_does_not_dispatch_downstream() -> None:
+    sessions = BrowserSessionStore("correct-secret")
+    session = sessions.exchange("correct-secret")
+    assert session is not None
+    downstream_called = False
+
+    async def downstream(_: Scope, __: Receive, ___: Send) -> None:
+        nonlocal downstream_called
+        downstream_called = True
+
+    middleware = WebSecurityMiddleware(
+        downstream,
+        expected_host=EXPECTED_HOST,
+        sessions=sessions,
+    )
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "server": ("127.0.0.1", 43123),
+        "client": ("127.0.0.1", 50000),
+        "scheme": "http",
+        "method": "POST",
+        "root_path": "",
+        "path": "/api/v1/probe",
+        "raw_path": b"/api/v1/probe",
+        "query_string": b"",
+        "headers": [
+            (b"host", EXPECTED_HOST.encode("ascii")),
+            (b"origin", f"http://{EXPECTED_HOST}".encode("ascii")),
+            (b"x-bundlewalker-csrf", session.csrf_token.encode("ascii")),
+            (b"content-type", b"application/json"),
+            (b"content-length", b"2"),
+            (b"cookie", f"bundlewalker_session={session.session_id}".encode("ascii")),
+        ],
+        "state": {},
+    }
+    incoming: list[Message] = [
+        {"type": "http.request", "body": b"{", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return incoming.pop(0)
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await middleware(scope, receive, send)
+
+    assert downstream_called is False
+    assert sent == []
 
 
 def test_responses_include_browser_security_headers(client: TestClient) -> None:

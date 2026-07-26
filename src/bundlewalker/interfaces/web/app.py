@@ -12,7 +12,7 @@ from typing import Final
 
 from starlette.applications import Starlette
 from starlette.datastructures import Headers, MutableHeaders
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -166,7 +166,10 @@ class WebSecurityMiddleware:
                 except ValueError:
                     await _error_response(400, scope, receive, send_hardened)
                     return
-            body = await _read_bounded_body(receive)
+            try:
+                body = await _read_bounded_body(receive)
+            except ClientDisconnect:
+                return
             if body is None:
                 await _error_response(413, scope, receive, send_hardened)
                 return
@@ -215,7 +218,7 @@ async def _read_bounded_body(receive: Receive) -> bytes | None:
     while True:
         message = await receive()
         if message["type"] == "http.disconnect":
-            return b""
+            raise ClientDisconnect
         body = message.get("body", b"")
         size += len(body)
         if size > MAX_WEB_REQUEST_BYTES:
