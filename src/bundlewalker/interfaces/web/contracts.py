@@ -4,6 +4,7 @@
 """Explicit, browser-safe contracts for the local web interface."""
 
 import re
+import unicodedata
 from pathlib import PurePosixPath
 from typing import Annotated, Final, Literal, Self
 
@@ -50,6 +51,9 @@ MAX_WEB_REQUEST_BYTES: Final = 4_100_000
 MAX_WEB_MODEL_NAME_CHARACTERS: Final = 255
 _REVIEW_ID_PATTERN = r"^[0-9a-f]{32}$"
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+_WINDOWS_UNC_PATH_TEXT = re.compile(r"(?<![\\A-Za-z0-9])\\\\[^\\\s]+\\[^\\\s]+")
+_UNIX_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![:A-Za-z0-9])/(?!/)[^\s\"'<>`]+")
 
 ModelName = Annotated[
     str,
@@ -160,9 +164,26 @@ class WebIngestionRequest(_WebModel):
     content: str = Field(max_length=MAX_INLINE_SOURCE_CHARACTERS)
     model: ModelName | None = None
 
+    @field_validator("source_name")
+    @classmethod
+    def validate_source_name(cls, value: str) -> str:
+        if (
+            value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or ":" in value
+            or any(unicodedata.category(character) == "Cc" for character in value)
+        ):
+            raise ValueError("source_name must be one safe filename")
+        if not value.endswith((".md", ".txt")):
+            raise ValueError("source_name must end in .md or .txt")
+        return value
+
     @field_validator("content")
     @classmethod
     def validate_content_bytes(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
         if len(value.encode("utf-8")) > MAX_WEB_SOURCE_BYTES:
             raise ValueError("source content exceeds the UTF-8 byte limit")
         return value
@@ -183,6 +204,13 @@ class WebReviewResponse(_WebModel):
         for value in values:
             _require_safe_relative_path(value)
         return values
+
+    @field_validator("summary", "diff")
+    @classmethod
+    def reject_absolute_paths(cls, value: str) -> str:
+        if _contains_absolute_path(value):
+            raise ValueError("review metadata must not contain absolute paths")
+        return value
 
 
 class WebIngestionResponse(_WebModel):
@@ -375,3 +403,15 @@ def _require_safe_relative_path(value: str) -> None:
         or any(part in {"", ".", ".."} for part in path.parts)
     ):
         raise ValueError("web paths must be safe relative paths")
+
+
+def _contains_absolute_path(value: str) -> bool:
+    if (
+        _WINDOWS_ABSOLUTE_PATH_TEXT.search(value) is not None
+        or _WINDOWS_UNC_PATH_TEXT.search(value) is not None
+    ):
+        return True
+    return any(
+        match.group().rstrip(".,);]}") != "/dev/null"
+        for match in _UNIX_ABSOLUTE_PATH_TEXT.finditer(value)
+    )

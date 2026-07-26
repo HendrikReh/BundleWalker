@@ -210,6 +210,49 @@ def test_ingestion_rejects_source_over_character_or_utf8_byte_limit() -> None:
     assert len(byte_boundary.content.encode("utf-8")) == MAX_WEB_SOURCE_BYTES
 
 
+@pytest.mark.parametrize("content", ["", " ", "\t\r\n"])
+def test_ingestion_rejects_empty_or_whitespace_only_content(content: str) -> None:
+    with pytest.raises(ValidationError, match="content"):
+        WebIngestionRequest(source_name="notes.md", content=content)
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        "notes",
+        "notes.markdown",
+        "notes.pdf",
+        "notes.MD",
+        "folder/notes.md",
+        r"folder\notes.md",
+        "/tmp/notes.md",
+        r"C:\temp\notes.md",
+        "C:notes.md",
+        ".",
+        "..",
+        "../notes.md",
+        "..\\notes.md",
+        "notes\nprivate.md",
+        "notes\x00.md",
+    ],
+)
+def test_ingestion_rejects_unsafe_or_unsupported_source_names(
+    source_name: str,
+) -> None:
+    with pytest.raises(ValidationError, match="source_name"):
+        WebIngestionRequest(source_name=source_name, content="Evidence.")
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    ["notes.md", "meeting notes.txt", "2026-07-26_agents.md"],
+)
+def test_ingestion_accepts_safe_supported_source_names(source_name: str) -> None:
+    request = WebIngestionRequest(source_name=source_name, content="Evidence.")
+
+    assert request.source_name == source_name
+
+
 def test_web_model_limit_matches_the_existing_adapter_contract() -> None:
     assert MAX_WEB_MODEL_NAME_CHARACTERS == MAX_MODEL_NAME_CHARACTERS
 
@@ -231,6 +274,58 @@ def test_review_mapper_omits_resource_uri_and_rejects_absolute_paths() -> None:
     unsafe = _review().model_copy(update={"changed_paths": ("/Users/private/notes.md",)})
     with pytest.raises(ValueError, match="relative"):
         to_web_review(unsafe)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("summary", "Review /Users/private/workspace/wiki/topics/agents.md"),
+        ("summary", r"Review C:\Users\private\workspace\wiki\topics\agents.md"),
+        ("summary", r"Review \\server\share\workspace\wiki\topics\agents.md"),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- /Users/private/workspace/wiki/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                r"+++ C:\Users\private\workspace\wiki\topics\agents.md"
+                "\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                r"+++ \\server\share\workspace\wiki\topics\agents.md"
+                "\n"
+            ),
+        ),
+    ],
+)
+def test_review_mapper_rejects_absolute_paths_in_summary_or_diff(
+    field: str,
+    value: str,
+) -> None:
+    unsafe = _review().model_copy(update={field: value})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(unsafe)
+
+
+def test_review_mapper_preserves_valid_exact_diff_text() -> None:
+    review = _review()
+
+    response = to_web_review(review)
+
+    assert response.diff == review.diff
 
 
 def test_explicit_result_mappers_publish_only_web_fields() -> None:
