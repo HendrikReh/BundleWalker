@@ -82,7 +82,7 @@ def test_routes_reject_unsupported_methods_without_server_errors(
     authenticated_client: AuthenticatedClient,
 ) -> None:
     assert client.post("/bootstrap").status_code == 405
-    assert authenticated_client.get("/api/v1/probe").status_code == 405
+    assert authenticated_client.post_json("/api/v1/workspace", {}).status_code == 405
 
 
 def test_every_request_requires_the_exact_host_and_port(client: TestClient) -> None:
@@ -110,17 +110,17 @@ def test_protected_routes_require_a_browser_session(client: TestClient) -> None:
     )
 
     assert client.get("/browse").status_code == 403
-    assert client.get("/api/v1/probe").status_code == 403
+    assert client.get("/api/v1/workspace").status_code == 403
     assert client.get(f"/assets/{asset_name}").status_code == 403
 
 
 def test_mutation_requires_exact_origin_and_csrf(
     authenticated_client: AuthenticatedClient,
 ) -> None:
-    assert authenticated_client.post("/api/v1/probe").status_code == 403
+    assert authenticated_client.post("/api/v1/workspace").status_code == 403
     assert (
         authenticated_client.post(
-            "/api/v1/probe",
+            "/api/v1/workspace",
             headers={
                 "Origin": authenticated_client.expected_origin,
                 "X-BundleWalker-CSRF": "wrong-token",
@@ -132,7 +132,7 @@ def test_mutation_requires_exact_origin_and_csrf(
     )
     assert (
         authenticated_client.post(
-            "/api/v1/probe",
+            "/api/v1/workspace",
             headers={
                 "Origin": "http://localhost:43123",
                 "X-BundleWalker-CSRF": authenticated_client.csrf_token,
@@ -142,14 +142,14 @@ def test_mutation_requires_exact_origin_and_csrf(
         ).status_code
         == 403
     )
-    assert authenticated_client.post_json("/api/v1/probe", {}).status_code == 204
+    assert authenticated_client.post_json("/api/v1/workspace", {}).status_code == 405
 
 
 def test_mutation_rejects_unsupported_content_type(
     authenticated_client: AuthenticatedClient,
 ) -> None:
     response = authenticated_client.post(
-        "/api/v1/probe",
+        "/api/v1/workspace",
         headers={
             "Origin": authenticated_client.expected_origin,
             "X-BundleWalker-CSRF": authenticated_client.csrf_token,
@@ -165,7 +165,7 @@ def test_mutation_rejects_excessive_request_body(
     authenticated_client: AuthenticatedClient,
 ) -> None:
     response = authenticated_client.post(
-        "/api/v1/probe",
+        "/api/v1/workspace",
         headers={
             "Origin": authenticated_client.expected_origin,
             "X-BundleWalker-CSRF": authenticated_client.csrf_token,
@@ -201,8 +201,8 @@ async def test_mutation_disconnect_does_not_dispatch_downstream() -> None:
         "scheme": "http",
         "method": "POST",
         "root_path": "",
-        "path": "/api/v1/probe",
-        "raw_path": b"/api/v1/probe",
+        "path": "/api/v1/workspace",
+        "raw_path": b"/api/v1/workspace",
         "query_string": b"",
         "headers": [
             (b"host", EXPECTED_HOST.encode("ascii")),
@@ -291,12 +291,12 @@ def test_html_and_api_are_not_cached_but_hashed_assets_are_immutable(
     )
 
     html = authenticated_client.get("/browse")
-    api = authenticated_client.post_json("/api/v1/probe", {})
+    api = authenticated_client.get("/api/v1/workspace")
     asset = authenticated_client.get(f"/assets/{asset_name}")
 
     assert html.status_code == 200
     assert html.headers["cache-control"] == "no-store"
-    assert api.status_code == 204
+    assert api.status_code == 200
     assert api.headers["cache-control"] == "no-store"
     assert asset.status_code == 200
     assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"

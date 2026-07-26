@@ -18,6 +18,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from bundlewalker.application import WorkspaceApplication
+from bundlewalker.interfaces.web.api import create_api_routes
 from bundlewalker.interfaces.web.contracts import MAX_WEB_REQUEST_BYTES
 from bundlewalker.interfaces.web.errors import unexpected_exception_handler
 from bundlewalker.interfaces.web.security import BrowserSessionStore
@@ -60,9 +61,6 @@ def create_web_app(
         )
         return response
 
-    async def probe(_: Request) -> Response:
-        return Response(status_code=204)
-
     async def asset(request: Request) -> Response:
         asset_path = request.path_params["asset_path"]
         if not isinstance(asset_path, str) or _HASHED_ASSET.fullmatch(asset_path) is None:
@@ -90,7 +88,7 @@ def create_web_app(
 
     routes = [
         Route("/bootstrap", bootstrap, methods=["GET"]),
-        Route("/api/v1/probe", probe, methods=["POST"]),
+        *create_api_routes(application),
         Route("/assets/{asset_path:path}", asset, methods=["GET"]),
         Route("/browse", spa_shell, methods=["GET"]),
         Route("/browse/{concept_id:path}", spa_shell, methods=["GET"]),

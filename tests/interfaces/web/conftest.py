@@ -4,6 +4,7 @@
 """Shared fixtures for the local web interface."""
 
 from collections.abc import Generator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,13 +12,17 @@ from httpx2 import Response
 from starlette.testclient import TestClient
 
 from bundlewalker.application import WorkspaceApplication
+from bundlewalker.domain import OkfMetadata
 from bundlewalker.interfaces.web.app import create_web_app
 from bundlewalker.interfaces.web.security import BrowserSessionStore
+from bundlewalker.okf.derived import regenerate_indexes
+from bundlewalker.okf.documents import render_document
 from bundlewalker.workspace import initialize_workspace
 
 BOOTSTRAP_SECRET = "correct-secret"
 EXPECTED_HOST = "127.0.0.1:43123"
 EXPECTED_ORIGIN = f"http://{EXPECTED_HOST}"
+NOW = datetime(2026, 7, 25, 12, tzinfo=UTC)
 
 
 class AuthenticatedWebClient:
@@ -72,7 +77,35 @@ def sessions() -> BrowserSessionStore:
 
 @pytest.fixture
 def application(tmp_path: Path) -> WorkspaceApplication:
-    return WorkspaceApplication(initialize_workspace(tmp_path / "workspace"))
+    workspace = initialize_workspace(tmp_path / "knowledge", occurred_at=NOW)
+    (workspace.wiki_dir / "topics" / "agents.md").write_text(
+        render_document(
+            OkfMetadata(
+                type="Topic",
+                title="Agents",
+                description="Knowledge about agents.",
+                tags=["agents"],
+                timestamp=NOW,
+            ),
+            "# Agents\n\nAgents can use tools.\n",
+        ),
+        encoding="utf-8",
+    )
+    (workspace.wiki_dir / "entities" / "tools.md").write_text(
+        render_document(
+            OkfMetadata(
+                type="Entity",
+                title="Tools",
+                description="Tools support agent workflows.",
+                tags=["tools"],
+                timestamp=NOW,
+            ),
+            "# Tools\n\nTools support agent workflows.\n",
+        ),
+        encoding="utf-8",
+    )
+    regenerate_indexes(workspace.wiki_dir)
+    return WorkspaceApplication(workspace)
 
 
 @pytest.fixture
