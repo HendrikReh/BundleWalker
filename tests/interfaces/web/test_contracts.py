@@ -285,6 +285,7 @@ def test_review_mapper_omits_resource_uri_and_rejects_absolute_paths() -> None:
         ("summary", "Review /etc/passwd"),
         ("summary", "Review /workspace/wiki/topics/agents.md"),
         ("summary", "Review [Source](/sources/source-evidence.md)"),
+        ("summary", "Review [Agents](/topics/agents.md)"),
         ("summary", r"Review C:\Users\private\workspace\wiki\topics\agents.md"),
         ("summary", r"Review \\server\share\workspace\wiki\topics\agents.md"),
         (
@@ -350,6 +351,24 @@ def test_review_mapper_omits_resource_uri_and_rejects_absolute_paths() -> None:
         (
             "diff",
             (
+                "diff --git a/syntheses/agents.md b/syntheses/agents.md\n"
+                "--- a/syntheses/agents.md\n"
+                "+++ b/syntheses/agents.md\n"
+                "+See /topics/agents.md.\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/syntheses/agents.md b/syntheses/agents.md\n"
+                "--- a/syntheses/agents.md\n"
+                "+++ b/syntheses/agents.md\n"
+                "+[Agents](/topics/agents.md\n"
+            ),
+        ),
+        (
+            "diff",
+            (
                 "diff --git a/topics/agents.md b/topics/agents.md\n"
                 "--- a/topics/agents.md\n"
                 r"+++ C:\Users\private\workspace\wiki\topics\agents.md"
@@ -399,6 +418,76 @@ def test_review_mapper_preserves_safe_root_relative_source_citation_in_exact_dif
     response = to_web_review(review)
 
     assert response.diff == diff
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "/topics/agents.md",
+        "/topics/agents/tools.md",
+        "/entities/agent%20tools.md",
+        "/syntheses/agent-tools.md#citations",
+    ],
+)
+def test_review_mapper_preserves_safe_root_relative_concept_links_in_exact_diff(
+    destination: str,
+) -> None:
+    diff = (
+        "diff --git a/syntheses/agents.md b/syntheses/agents.md\n"
+        "--- a/syntheses/agents.md\n"
+        "+++ b/syntheses/agents.md\n"
+        f"+[1] [Agents]({destination})\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    response = to_web_review(review)
+
+    assert response.diff == diff
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "/Users/private/agents.md",
+        "/home/private/agents.md",
+        "/etc/passwd.md",
+        "/var/log/agents.md",
+        "/tmp/agents.md",
+        "/private/agents.md",
+        "/Volumes/private/agents.md",
+        "/topics/../agents.md",
+        "/topics/%2e%2e/agents.md",
+        "/topics/%2E/agents.md",
+        "/topics/%2Fetc.md",
+        "/topics/%5cprivate.md",
+        "/topics/%00private.md",
+        "/topics/%252e%252e/agents.md",
+        "/topics/%252Fetc.md",
+        r"/topics\agents.md",
+        "/topics/agent tools.md",
+        "/topics//agents.md",
+        "/topics/.md",
+        "/unknown/agents.md",
+        "/topics/agents%2.md",
+        "/topics/agents%GG.md",
+        "/topics/agents.md?next=/etc/passwd",
+        "/topics/agents.md#/%2e%2e/etc",
+        "file:///topics/agents.md",
+    ],
+)
+def test_review_mapper_rejects_unsafe_internal_concept_link_destinations(
+    destination: str,
+) -> None:
+    diff = (
+        "diff --git a/syntheses/agents.md b/syntheses/agents.md\n"
+        "--- a/syntheses/agents.md\n"
+        "+++ b/syntheses/agents.md\n"
+        f"+[Agents]({destination})\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
 
 
 @pytest.mark.parametrize(

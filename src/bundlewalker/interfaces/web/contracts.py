@@ -7,6 +7,7 @@ import re
 import unicodedata
 from pathlib import PurePosixPath
 from typing import Annotated, Final, Literal, Self
+from urllib.parse import unquote_to_bytes
 
 from pydantic import (
     AwareDatetime,
@@ -54,11 +55,13 @@ _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _WINDOWS_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
 _WINDOWS_UNC_PATH_TEXT = re.compile(r"(?<![\\A-Za-z0-9])\\\\[^\\\s]+\\[^\\\s]+")
 _UNIX_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![:A-Za-z0-9])/(?!/)[^\s\"'<>`]+")
-_SAFE_SOURCE_MARKDOWN_DESTINATION = re.compile(
+_MARKDOWN_LINK_DESTINATION = re.compile(
     r"(?P<prefix>(?<!!)\[[^\]\r\n]+\]\()"
-    r"/sources/[a-z0-9]+(?:-[a-z0-9]+)*\.md"
+    r"(?P<destination>[^)\r\n]+)"
     r"(?P<close>\))"
 )
+_MALFORMED_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_OKF_CONCEPT_CATEGORIES = frozenset({"sources", "topics", "entities", "syntheses"})
 
 ModelName = Annotated[
     str,
@@ -226,7 +229,7 @@ class WebReviewResponse(_WebModel):
     @field_validator("diff")
     @classmethod
     def reject_diff_absolute_paths(cls, value: str) -> str:
-        if _contains_absolute_path(value, allow_source_markdown_links=True):
+        if _contains_absolute_path(value, allow_concept_markdown_links=True):
             raise ValueError("review metadata must not contain absolute paths")
         return value
 
@@ -426,16 +429,9 @@ def _require_safe_relative_path(value: str) -> None:
 def _contains_absolute_path(
     value: str,
     *,
-    allow_source_markdown_links: bool = False,
+    allow_concept_markdown_links: bool = False,
 ) -> bool:
-    inspected = (
-        _SAFE_SOURCE_MARKDOWN_DESTINATION.sub(
-            r"\g<prefix>bundlewalker-source\g<close>",
-            value,
-        )
-        if allow_source_markdown_links
-        else value
-    )
+    inspected = _mask_safe_concept_destinations(value) if allow_concept_markdown_links else value
     if (
         _WINDOWS_ABSOLUTE_PATH_TEXT.search(inspected) is not None
         or _WINDOWS_UNC_PATH_TEXT.search(inspected) is not None
@@ -444,4 +440,92 @@ def _contains_absolute_path(
     return any(
         match.group().rstrip(".,);]}") != "/dev/null"
         for match in _UNIX_ABSOLUTE_PATH_TEXT.finditer(inspected)
+    )
+
+
+def _mask_safe_concept_destinations(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if not _is_safe_concept_destination(match.group("destination")):
+            return match.group()
+        return f"{match.group('prefix')}bundlewalker-concept{match.group('close')}"
+
+    return _MARKDOWN_LINK_DESTINATION.sub(replace, value)
+
+
+def _is_safe_concept_destination(destination: str) -> bool:
+    if (
+        not destination.startswith("/")
+        or destination.startswith("//")
+        or "\\" in destination
+        or any(character.isspace() for character in destination)
+        or _contains_control_character(destination)
+        or _MALFORMED_PERCENT_ESCAPE.search(destination) is not None
+    ):
+        return False
+
+    suffix_start = min(
+        (index for marker in ("?", "#") if (index := destination.find(marker)) >= 0),
+        default=len(destination),
+    )
+    raw_path = destination[:suffix_start]
+    suffix = destination[suffix_start:]
+    raw_segments = raw_path[1:].split("/")
+    if len(raw_segments) < 2 or any(not segment for segment in raw_segments):
+        return False
+
+    decoded_segments: list[str] = []
+    try:
+        for segment in raw_segments:
+            decoded = unquote_to_bytes(segment).decode("utf-8")
+            if _decoded_path_segment_is_unsafe(decoded):
+                return False
+            decoded_segments.append(decoded)
+        decoded_suffix = unquote_to_bytes(suffix).decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+
+    if (
+        "/" in decoded_suffix
+        or "\\" in decoded_suffix
+        or _contains_control_character(decoded_suffix)
+    ):
+        return False
+    last_segment = decoded_segments[-1]
+    return (
+        decoded_segments[0] in _OKF_CONCEPT_CATEGORIES
+        and last_segment.endswith(".md")
+        and bool(last_segment[: -len(".md")])
+    )
+
+
+def _contains_control_character(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def _decoded_path_segment_is_unsafe(value: str) -> bool:
+    inspected = value
+    for _ in range(2):
+        if (
+            inspected in {".", ".."}
+            or "/" in inspected
+            or "\\" in inspected
+            or _contains_control_character(inspected)
+        ):
+            return True
+        if "%" not in inspected:
+            return False
+        if _MALFORMED_PERCENT_ESCAPE.search(inspected) is not None:
+            return True
+        try:
+            decoded = unquote_to_bytes(inspected).decode("utf-8")
+        except UnicodeDecodeError:
+            return True
+        if decoded == inspected:
+            return False
+        inspected = decoded
+    return (
+        inspected in {".", ".."}
+        or "/" in inspected
+        or "\\" in inspected
+        or _contains_control_character(inspected)
     )
