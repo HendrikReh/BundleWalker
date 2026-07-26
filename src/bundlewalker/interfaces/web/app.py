@@ -96,6 +96,7 @@ def create_web_app(
         Route("/lint", spa_shell, methods=["GET"]),
         Route("/ingest", spa_shell, methods=["GET"]),
         Route("/review/{review_id}", spa_shell, methods=["GET"]),
+        Route("/refresh/{concept_id:path}", spa_shell, methods=["GET"]),
     ]
     app = Starlette(
         routes=routes,

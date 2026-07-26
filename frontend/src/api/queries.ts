@@ -15,6 +15,8 @@ export const queryKeys = {
     ["concept-search", query, conceptType ?? null] as const,
   lint: ["lint"] as const,
   ingestion: ["ingestion"] as const,
+  synthesis: ["synthesis"] as const,
+  refresh: (conceptId: string) => ["refresh", conceptId] as const,
   review: ["review"] as const,
 };
 
@@ -77,6 +79,27 @@ export function usePrepareIngestion() {
       readonly content: string;
       readonly model?: string | null;
     }) => apiClient.prepareIngestion(options),
+  });
+}
+
+export function usePrepareSynthesis() {
+  return useMutation({
+    mutationKey: queryKeys.synthesis,
+    mutationFn: (options: {
+      readonly question: string;
+      readonly model?: string | null;
+    }) => apiClient.prepareSynthesis(options),
+  });
+}
+
+export function usePrepareRefresh(conceptId: string) {
+  return useMutation({
+    mutationKey: queryKeys.refresh(conceptId),
+    mutationFn: (options: {
+      readonly instruction: string;
+      readonly concept_id: string;
+      readonly model?: string | null;
+    }) => apiClient.prepareRefresh(options),
   });
 }
 

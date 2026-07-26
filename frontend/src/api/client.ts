@@ -12,8 +12,12 @@ import type {
   WebLintRequest,
   WebLintResponse,
   WebMutationResponse,
+  WebRefreshRequest,
+  WebRefreshResponse,
   WebReviewResponse,
   WebSearchResponse,
+  WebSynthesisRequest,
+  WebSynthesisResponse,
   WebWorkspaceResponse,
 } from "./types";
 
@@ -92,6 +96,18 @@ export class ApiClient {
     options: WebIngestionRequest,
   ): Promise<WebIngestionResponse> {
     return this.#post("/api/v1/ingestions", options, parseIngestion);
+  }
+
+  async prepareSynthesis(
+    options: WebSynthesisRequest,
+  ): Promise<WebSynthesisResponse> {
+    return this.#post("/api/v1/syntheses", options, parseSynthesis);
+  }
+
+  async prepareRefresh(
+    options: WebRefreshRequest,
+  ): Promise<WebRefreshResponse> {
+    return this.#post("/api/v1/refreshes", options, parseRefresh);
   }
 
   async review(): Promise<WebReviewResponse | null> {
@@ -306,6 +322,38 @@ function parseIngestion(value: unknown): WebIngestionResponse {
   }
   if (record.status === "pending") {
     return { status: "pending", review: parseReview(record.review) };
+  }
+  throw new Error("Invalid API response");
+}
+
+function parseSynthesis(value: unknown): WebSynthesisResponse {
+  const record = requireRecord(value);
+  return {
+    answer: parseAnswer(record.answer),
+    review: parseReview(record.review),
+  };
+}
+
+function parseRefresh(value: unknown): WebRefreshResponse {
+  const record = requireRecord(value);
+  const conceptId = requireString(record.concept_id);
+  const answer = parseAnswer(record.answer);
+  if (record.status === "current") {
+    if (record.review !== null) throw new Error("Invalid API response");
+    return {
+      status: "current",
+      concept_id: conceptId,
+      answer,
+      review: null,
+    };
+  }
+  if (record.status === "pending") {
+    return {
+      status: "pending",
+      concept_id: conceptId,
+      answer,
+      review: parseReview(record.review),
+    };
   }
   throw new Error("Invalid API response");
 }

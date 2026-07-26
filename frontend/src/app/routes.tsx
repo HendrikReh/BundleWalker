@@ -7,6 +7,7 @@ import { RequestError } from "../components/RequestError";
 import { AskPage } from "../features/ask/AskPage";
 import { BrowsePage } from "../features/browse/BrowsePage";
 import { ConceptPage } from "../features/browse/ConceptPage";
+import { RefreshPage } from "../features/browse/RefreshPage";
 import { LintPage } from "../features/lint/LintPage";
 import { IngestionPage } from "../features/ingestion/IngestionPage";
 import { ReviewPage } from "../features/review/ReviewPage";
@@ -20,6 +21,7 @@ export function AppRoutes() {
         <Route index element={<DefaultRoute />} />
         <Route path="browse" element={<BrowsePage />} />
         <Route path="browse/*" element={<ConceptPage />} />
+        <Route path="refresh/*" element={<RefreshPage />} />
         <Route path="ask" element={<AskPage />} />
         <Route path="lint" element={<LintPage />} />
         <Route path="ingest" element={<IngestionPage />} />

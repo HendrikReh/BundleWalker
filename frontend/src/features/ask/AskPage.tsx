@@ -8,6 +8,7 @@ import { useAsk } from "../../api/queries";
 import { MarkdownContent } from "../../components/MarkdownContent";
 import { OperationProgress } from "../../components/OperationProgress";
 import { RequestError } from "../../components/RequestError";
+import { SynthesisAction } from "./SynthesisAction";
 
 const MAX_QUESTION_CHARACTERS = 20_000;
 const MAX_MODEL_CHARACTERS = 255;
@@ -61,8 +62,9 @@ export function AskPage() {
         <button type="submit" disabled={ask.isPending}>
           Ask
         </button>
+        <SynthesisAction question={question} model={model} />
       </form>
-      <OperationProgress message={status} />
+      {status ? <OperationProgress message={status} /> : null}
       {ask.error ? <RequestError error={ask.error} /> : null}
       {ask.data ? (
         <article aria-labelledby="ask-answer-title">

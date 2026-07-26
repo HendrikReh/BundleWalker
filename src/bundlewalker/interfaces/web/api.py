@@ -24,14 +24,18 @@ from bundlewalker.interfaces.web.contracts import (
     WebAskRequest,
     WebIngestionRequest,
     WebLintRequest,
+    WebRefreshRequest,
+    WebSynthesisRequest,
     to_web_answer,
     to_web_concept,
     to_web_concept_page,
     to_web_ingestion,
     to_web_lint,
     to_web_mutation,
+    to_web_refresh,
     to_web_review,
     to_web_search,
+    to_web_synthesis,
     to_web_workspace,
 )
 from bundlewalker.interfaces.web.errors import map_application_error
@@ -155,6 +159,35 @@ def create_api_routes(application: WorkspaceApplication) -> tuple[Route, ...]:
         except ApplicationError as error:
             return _application_error(error)
 
+    async def synthesis(request: Request) -> Response:
+        try:
+            payload = WebSynthesisRequest.model_validate(await request.json())
+        except (JSONDecodeError, ValidationError, UnicodeDecodeError) as error:
+            return _application_error(_invalid_json_request(error))
+        try:
+            result = await application.prepare_synthesis(
+                payload.question,
+                explicit_model=payload.model,
+            )
+            return _json_response(to_web_synthesis(result))
+        except ApplicationError as error:
+            return _application_error(error)
+
+    async def refresh(request: Request) -> Response:
+        try:
+            payload = WebRefreshRequest.model_validate(await request.json())
+        except (JSONDecodeError, ValidationError, UnicodeDecodeError) as error:
+            return _application_error(_invalid_json_request(error))
+        try:
+            result = await application.prepare_refresh(
+                payload.instruction,
+                payload.concept_id,
+                explicit_model=payload.model,
+            )
+            return _json_response(to_web_refresh(result))
+        except ApplicationError as error:
+            return _application_error(error)
+
     async def review(_: Request) -> Response:
         try:
             pending = await application.get_pending_review()
@@ -195,6 +228,8 @@ def create_api_routes(application: WorkspaceApplication) -> tuple[Route, ...]:
         Route("/api/v1/ask", ask, methods=["POST"]),
         Route("/api/v1/lint", lint, methods=["POST"]),
         Route("/api/v1/ingestions", ingestion, methods=["POST"]),
+        Route("/api/v1/syntheses", synthesis, methods=["POST"]),
+        Route("/api/v1/refreshes", refresh, methods=["POST"]),
     )
 
 
