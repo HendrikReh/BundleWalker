@@ -54,8 +54,10 @@ _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _WINDOWS_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
 _WINDOWS_UNC_PATH_TEXT = re.compile(r"(?<![\\A-Za-z0-9])\\\\[^\\\s]+\\[^\\\s]+")
 _UNIX_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![:A-Za-z0-9])/(?!/)[^\s\"'<>`]+")
-_SAFE_SOURCE_MARKDOWN_LINK = re.compile(
-    r"(?<!!)\[[^\]\r\n]+\]\(/sources/[a-z0-9]+(?:-[a-z0-9]+)*\.md\)"
+_SAFE_SOURCE_MARKDOWN_DESTINATION = re.compile(
+    r"(?P<prefix>(?<!!)\[[^\]\r\n]+\]\()"
+    r"/sources/[a-z0-9]+(?:-[a-z0-9]+)*\.md"
+    r"(?P<close>\))"
 )
 
 ModelName = Annotated[
@@ -427,7 +429,10 @@ def _contains_absolute_path(
     allow_source_markdown_links: bool = False,
 ) -> bool:
     inspected = (
-        _SAFE_SOURCE_MARKDOWN_LINK.sub("[source](bundlewalker-source)", value)
+        _SAFE_SOURCE_MARKDOWN_DESTINATION.sub(
+            r"\g<prefix>bundlewalker-source\g<close>",
+            value,
+        )
         if allow_source_markdown_links
         else value
     )

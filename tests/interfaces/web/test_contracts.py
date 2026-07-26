@@ -401,6 +401,43 @@ def test_review_mapper_preserves_safe_root_relative_source_citation_in_exact_dif
     assert response.diff == diff
 
 
+@pytest.mark.parametrize(
+    "label",
+    [
+        "/etc/passwd",
+        r"C:\Users\private",
+        r"\\server\share\secret",
+    ],
+)
+def test_review_mapper_rejects_absolute_paths_in_safe_source_link_labels(
+    label: str,
+) -> None:
+    diff = (
+        "diff --git a/topics/agents.md b/topics/agents.md\n"
+        "--- a/topics/agents.md\n"
+        "+++ b/topics/agents.md\n"
+        f"+[{label}](/sources/source-evidence.md)\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
+
+
+def test_review_mapper_preserves_arbitrary_non_path_source_link_label() -> None:
+    diff = (
+        "diff --git a/topics/agents.md b/topics/agents.md\n"
+        "--- a/topics/agents.md\n"
+        "+++ b/topics/agents.md\n"
+        "+[Primary evidence: source #1](/sources/source-evidence.md)\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    response = to_web_review(review)
+
+    assert response.diff == diff
+
+
 def test_explicit_result_mappers_publish_only_web_fields() -> None:
     summary = _summary()
     content = ConceptContent(
