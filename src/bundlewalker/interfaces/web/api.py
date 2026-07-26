@@ -4,10 +4,11 @@
 """Capability-shaped JSON routes for the local web interface."""
 
 import unicodedata
+from json import JSONDecodeError
 from pathlib import PurePosixPath
 from typing import Final
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -19,8 +20,12 @@ from bundlewalker.application import (
     WorkspaceApplication,
 )
 from bundlewalker.interfaces.web.contracts import (
+    WebAskRequest,
+    WebLintRequest,
+    to_web_answer,
     to_web_concept,
     to_web_concept_page,
+    to_web_lint,
     to_web_search,
     to_web_workspace,
 )
@@ -97,11 +102,39 @@ def create_api_routes(application: WorkspaceApplication) -> tuple[Route, ...]:
         except ApplicationError as error:
             return _application_error(error)
 
+    async def ask(request: Request) -> Response:
+        try:
+            payload = WebAskRequest.model_validate(await request.json())
+            result = await application.ask(
+                payload.question,
+                explicit_model=payload.model,
+            )
+            return _json_response(to_web_answer(result))
+        except (JSONDecodeError, ValidationError, UnicodeDecodeError) as error:
+            return _application_error(_invalid_json_request(error))
+        except ApplicationError as error:
+            return _application_error(error)
+
+    async def lint(request: Request) -> Response:
+        try:
+            payload = WebLintRequest.model_validate(await request.json())
+            result = await application.lint(
+                semantic=payload.semantic,
+                explicit_model=payload.model,
+            )
+            return _json_response(to_web_lint(result))
+        except (JSONDecodeError, ValidationError, UnicodeDecodeError) as error:
+            return _application_error(_invalid_json_request(error))
+        except ApplicationError as error:
+            return _application_error(error)
+
     return (
         Route("/api/v1/workspace", workspace, methods=["GET"]),
         Route("/api/v1/concepts", concepts, methods=["GET"]),
         Route("/api/v1/concepts/search", search, methods=["GET"]),
         Route("/api/v1/concepts/{concept_id:path}", concept, methods=["GET"]),
+        Route("/api/v1/ask", ask, methods=["POST"]),
+        Route("/api/v1/lint", lint, methods=["POST"]),
     )
 
 
@@ -148,6 +181,13 @@ def _invalid_concept_id() -> ApplicationError:
     return ApplicationError(
         ApplicationErrorCode.INVALID_INPUT,
         "concept ID must be a normalized relative path",
+    )
+
+
+def _invalid_json_request(_error: Exception) -> ApplicationError:
+    return ApplicationError(
+        ApplicationErrorCode.INVALID_INPUT,
+        "request body does not match the expected JSON contract",
     )
 
 

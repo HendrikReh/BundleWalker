@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import type {
+  WebAnswerResponse,
   WebConceptPageResponse,
   WebConceptResponse,
   WebConceptSummary,
   WebErrorDetail,
+  WebLintRequest,
+  WebLintResponse,
   WebSearchResponse,
   WebWorkspaceResponse,
 } from "./types";
@@ -70,8 +73,27 @@ export class ApiClient {
     return this.#get(`/api/v1/concepts/${encodedId}`, parseConcept);
   }
 
+  async ask(options: {
+    readonly question: string;
+    readonly model?: string | null;
+  }): Promise<WebAnswerResponse> {
+    return this.#post("/api/v1/ask", options, parseAnswer);
+  }
+
+  async lint(options: WebLintRequest): Promise<WebLintResponse> {
+    return this.#post("/api/v1/lint", options, parseLint);
+  }
+
   async #get<T>(path: string, parse: (value: unknown) => T): Promise<T> {
     return this.#request(path, parse, false);
+  }
+
+  async #post<T>(
+    path: string,
+    body: unknown,
+    parse: (value: unknown) => T,
+  ): Promise<T> {
+    return this.#request(path, parse, true, body);
   }
 
   async #request<T>(
@@ -200,6 +222,50 @@ function parseConceptSummary(value: unknown): WebConceptSummary {
   };
 }
 
+function parseAnswer(value: unknown): WebAnswerResponse {
+  const record = requireRecord(value);
+  return {
+    title: requireString(record.title),
+    markdown: requireString(record.markdown),
+    citations: requireArray(record.citations).map((citation) => {
+      const parsed = requireRecord(citation);
+      return {
+        number: requireNumber(parsed.number),
+        concept_id: requireString(parsed.concept_id),
+      };
+    }),
+  };
+}
+
+function parseLint(value: unknown): WebLintResponse {
+  const record = requireRecord(value);
+  return {
+    findings: requireArray(record.findings).map((finding) => {
+      const parsed = requireRecord(finding);
+      const path = parsed.path;
+      const remediation = parsed.remediation;
+      const origin = requireString(parsed.origin);
+      const severity = requireString(parsed.severity);
+      if (origin !== "deterministic" && origin !== "semantic") {
+        throw new Error("Invalid API response");
+      }
+      if (!["error", "warning", "info"].includes(severity)) {
+        throw new Error("Invalid API response");
+      }
+      return {
+        origin,
+        severity: severity as "error" | "warning" | "info",
+        code: requireString(parsed.code),
+        message: requireString(parsed.message),
+        path: path === null ? null : requireString(path),
+        evidence_paths: requireArray(parsed.evidence_paths).map(requireString),
+        remediation: remediation === null ? null : requireString(remediation),
+      };
+    }),
+    deterministic_has_errors: requireBoolean(record.deterministic_has_errors),
+  };
+}
+
 function parseErrorDetail(
   value: Record<string, unknown>,
 ): WebErrorDetail | null {
@@ -247,5 +313,10 @@ function requireNumber(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error("Invalid API response");
   }
+  return value;
+}
+
+function requireBoolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("Invalid API response");
   return value;
 }

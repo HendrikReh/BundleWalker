@@ -4,8 +4,10 @@
 import { Navigate, Route, Routes, useParams } from "react-router";
 
 import { RequestError } from "../components/RequestError";
+import { AskPage } from "../features/ask/AskPage";
 import { BrowsePage } from "../features/browse/BrowsePage";
 import { ConceptPage } from "../features/browse/ConceptPage";
+import { LintPage } from "../features/lint/LintPage";
 import { useWorkspace } from "../api/queries";
 import { App } from "./App";
 
@@ -16,8 +18,8 @@ export function AppRoutes() {
         <Route index element={<DefaultRoute />} />
         <Route path="browse" element={<BrowsePage />} />
         <Route path="browse/*" element={<ConceptPage />} />
-        <Route path="ask" element={<Placeholder title="Ask" />} />
-        <Route path="lint" element={<Placeholder title="Lint" />} />
+        <Route path="ask" element={<AskPage />} />
+        <Route path="lint" element={<LintPage />} />
         <Route path="ingest" element={<Placeholder title="New ingestion" />} />
         <Route path="review/:reviewId" element={<ReviewPlaceholder />} />
       </Route>

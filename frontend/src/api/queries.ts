@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Hendrik Reh
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 
 import { ApiClient } from "./client";
 
@@ -13,6 +13,7 @@ export const queryKeys = {
   concept: (conceptId: string) => ["concept", conceptId] as const,
   search: (query: string, conceptType?: string) =>
     ["concept-search", query, conceptType ?? null] as const,
+  lint: ["lint"] as const,
 };
 
 export function useWorkspace() {
@@ -44,5 +45,24 @@ export function useConcept(conceptId: string) {
     queryKey: queryKeys.concept(conceptId),
     queryFn: () => apiClient.concept(conceptId),
     enabled: conceptId.length > 0,
+  });
+}
+
+export function useAsk() {
+  return useMutation({
+    mutationFn: (options: {
+      readonly question: string;
+      readonly model?: string | null;
+    }) => apiClient.ask(options),
+  });
+}
+
+export function useLint() {
+  return useMutation({
+    mutationKey: queryKeys.lint,
+    mutationFn: (options: {
+      readonly semantic: boolean;
+      readonly model?: string | null;
+    }) => apiClient.lint(options),
   });
 }

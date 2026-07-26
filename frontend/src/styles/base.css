@@ -63,6 +63,38 @@ form[role="search"] label {
   border: 2px solid #8b1a1a;
 }
 
+.knowledge-workbench form {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 44rem;
+}
+
+.knowledge-workbench textarea {
+  min-height: 8rem;
+}
+
+.operation-progress {
+  display: block;
+  min-height: 1.5rem;
+  margin-block: 1rem;
+}
+
+.lint-findings {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+
+.lint-findings li {
+  padding: 1rem;
+  border: 1px solid #d9d9d9;
+}
+
+.lint-findings li > span {
+  display: block;
+}
+
 .markdown-content {
   max-width: 70ch;
 }
