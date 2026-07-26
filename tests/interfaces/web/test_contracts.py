@@ -282,6 +282,9 @@ def test_review_mapper_omits_resource_uri_and_rejects_absolute_paths() -> None:
     ("field", "value"),
     [
         ("summary", "Review /Users/private/workspace/wiki/topics/agents.md"),
+        ("summary", "Review /etc/passwd"),
+        ("summary", "Review /workspace/wiki/topics/agents.md"),
+        ("summary", "Review [Source](/sources/source-evidence.md)"),
         ("summary", r"Review C:\Users\private\workspace\wiki\topics\agents.md"),
         ("summary", r"Review \\server\share\workspace\wiki\topics\agents.md"),
         (
@@ -290,6 +293,58 @@ def test_review_mapper_omits_resource_uri_and_rejects_absolute_paths() -> None:
                 "diff --git a/topics/agents.md b/topics/agents.md\n"
                 "--- /Users/private/workspace/wiki/topics/agents.md\n"
                 "+++ b/topics/agents.md\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ /etc/passwd\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ /workspace/wiki/topics/agents.md\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+                "+See /sources/source-evidence.md.\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+                "+[Source](/sources/../private.md)\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+                "+[Source](/sources/source-evidence.md\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+                "+[Source](/sources/source-evidence.txt)\n"
             ),
         ),
         (
@@ -328,6 +383,22 @@ def test_review_mapper_preserves_valid_exact_diff_text() -> None:
     response = to_web_review(review)
 
     assert response.diff == review.diff
+
+
+def test_review_mapper_preserves_safe_root_relative_source_citation_in_exact_diff() -> None:
+    diff = (
+        "diff --git a/topics/agents.md b/topics/agents.md\n"
+        "--- a/topics/agents.md\n"
+        "+++ b/topics/agents.md\n"
+        "@@ -1,2 +1,4 @@\n"
+        "+Claim supported by source [1].\n"
+        "+[1] [Source](/sources/source-evidence.md) — raw lines 1\N{EN DASH}2\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    response = to_web_review(review)
+
+    assert response.diff == diff
 
 
 def test_explicit_result_mappers_publish_only_web_fields() -> None:

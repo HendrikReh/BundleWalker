@@ -54,6 +54,9 @@ _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _WINDOWS_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
 _WINDOWS_UNC_PATH_TEXT = re.compile(r"(?<![\\A-Za-z0-9])\\\\[^\\\s]+\\[^\\\s]+")
 _UNIX_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![:A-Za-z0-9])/(?!/)[^\s\"'<>`]+")
+_SAFE_SOURCE_MARKDOWN_LINK = re.compile(
+    r"(?<!!)\[[^\]\r\n]+\]\(/sources/[a-z0-9]+(?:-[a-z0-9]+)*\.md\)"
+)
 
 ModelName = Annotated[
     str,
@@ -211,10 +214,17 @@ class WebReviewResponse(_WebModel):
             _require_safe_relative_path(value)
         return values
 
-    @field_validator("summary", "diff")
+    @field_validator("summary")
     @classmethod
-    def reject_absolute_paths(cls, value: str) -> str:
+    def reject_summary_absolute_paths(cls, value: str) -> str:
         if _contains_absolute_path(value):
+            raise ValueError("review metadata must not contain absolute paths")
+        return value
+
+    @field_validator("diff")
+    @classmethod
+    def reject_diff_absolute_paths(cls, value: str) -> str:
+        if _contains_absolute_path(value, allow_source_markdown_links=True):
             raise ValueError("review metadata must not contain absolute paths")
         return value
 
@@ -411,13 +421,22 @@ def _require_safe_relative_path(value: str) -> None:
         raise ValueError("web paths must be safe relative paths")
 
 
-def _contains_absolute_path(value: str) -> bool:
+def _contains_absolute_path(
+    value: str,
+    *,
+    allow_source_markdown_links: bool = False,
+) -> bool:
+    inspected = (
+        _SAFE_SOURCE_MARKDOWN_LINK.sub("[source](bundlewalker-source)", value)
+        if allow_source_markdown_links
+        else value
+    )
     if (
-        _WINDOWS_ABSOLUTE_PATH_TEXT.search(value) is not None
-        or _WINDOWS_UNC_PATH_TEXT.search(value) is not None
+        _WINDOWS_ABSOLUTE_PATH_TEXT.search(inspected) is not None
+        or _WINDOWS_UNC_PATH_TEXT.search(inspected) is not None
     ):
         return True
     return any(
         match.group().rstrip(".,);]}") != "/dev/null"
-        for match in _UNIX_ABSOLUTE_PATH_TEXT.finditer(value)
+        for match in _UNIX_ABSOLUTE_PATH_TEXT.finditer(inspected)
     )
