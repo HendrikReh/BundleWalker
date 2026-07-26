@@ -223,6 +223,8 @@ def test_ingestion_rejects_empty_or_whitespace_only_content(content: str) -> Non
         "notes.markdown",
         "notes.pdf",
         "notes.MD",
+        ".md",
+        ".txt",
         "folder/notes.md",
         r"folder\notes.md",
         "/tmp/notes.md",
@@ -245,7 +247,7 @@ def test_ingestion_rejects_unsafe_or_unsupported_source_names(
 
 @pytest.mark.parametrize(
     "source_name",
-    ["notes.md", "meeting notes.txt", "2026-07-26_agents.md"],
+    ["notes.md", "meeting notes.txt", "2026-07-26_agents.md", ".notes.md"],
 )
 def test_ingestion_accepts_safe_supported_source_names(source_name: str) -> None:
     request = WebIngestionRequest(source_name=source_name, content="Evidence.")

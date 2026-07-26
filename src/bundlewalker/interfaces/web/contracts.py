@@ -175,8 +175,14 @@ class WebIngestionRequest(_WebModel):
             or any(unicodedata.category(character) == "Cc" for character in value)
         ):
             raise ValueError("source_name must be one safe filename")
-        if not value.endswith((".md", ".txt")):
+        suffix = next(
+            (candidate for candidate in (".md", ".txt") if value.endswith(candidate)),
+            None,
+        )
+        if suffix is None:
             raise ValueError("source_name must end in .md or .txt")
+        if not value[: -len(suffix)].strip():
+            raise ValueError("source_name must contain a usable filename stem")
         return value
 
     @field_validator("content")
