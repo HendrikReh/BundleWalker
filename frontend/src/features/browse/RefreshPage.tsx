@@ -4,9 +4,10 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
 import { queryKeys, useConcept, usePrepareRefresh } from "../../api/queries";
+import type { WebRefreshResponse } from "../../api/types";
 import { MarkdownContent } from "../../components/MarkdownContent";
 import { OperationProgress } from "../../components/OperationProgress";
 import { RequestError } from "../../components/RequestError";
@@ -19,15 +20,38 @@ export function RefreshPage() {
   const conceptId = useParams()["*"] ?? "";
   const [instruction, setInstruction] = useState("");
   const [model, setModel] = useState("");
+  const [prepared, setPrepared] = useState<WebRefreshResponse | null>(null);
+  const [reconciliation, setReconciliation] = useState<
+    "idle" | "loading" | "failed"
+  >("idle");
   const concept = useConcept(conceptId);
   const refresh = usePrepareRefresh(conceptId);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
+  async function reconcilePendingReview(reviewId: string) {
+    try {
+      await Promise.all([
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.workspace },
+          { throwOnError: true },
+        ),
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.review },
+          { throwOnError: true },
+        ),
+      ]);
+      navigate(`/review/${encodeURIComponent(reviewId)}`);
+    } catch {
+      setReconciliation("failed");
+    }
+  }
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (
       refresh.isPending ||
+      prepared !== null ||
       !instruction.trim() ||
       concept.data === undefined ||
       !isRefreshEligibleConcept(concept.data)
@@ -41,19 +65,11 @@ export function RefreshPage() {
         model: model.trim() || null,
       },
       {
-        onSuccess: async (result) => {
+        onSuccess: (result) => {
+          setPrepared(result);
           if (result.status === "current") return;
-          await Promise.all([
-            queryClient.invalidateQueries(
-              { queryKey: queryKeys.workspace },
-              { throwOnError: true },
-            ),
-            queryClient.invalidateQueries(
-              { queryKey: queryKeys.review },
-              { throwOnError: true },
-            ),
-          ]);
-          navigate(`/review/${encodeURIComponent(result.review.review_id)}`);
+          setReconciliation("loading");
+          void reconcilePendingReview(result.review.review_id);
         },
       },
     );
@@ -76,11 +92,18 @@ export function RefreshPage() {
     ? "Preparing refresh proposal…"
     : refresh.isError
       ? "Refresh preparation failed"
-      : refresh.data?.status === "current"
+      : prepared?.status === "current"
         ? "Synthesis is already current; no review was created"
-        : refresh.data?.status === "pending"
-          ? "Refresh proposal ready"
+        : prepared?.status === "pending"
+          ? reconciliation === "loading"
+            ? "Refresh proposal ready; refreshing workspace status…"
+            : "Refresh proposal ready"
           : "";
+
+  const reconciliationWarning =
+    reconciliation === "failed"
+      ? "Refresh preparation succeeded, but workspace status could not refresh. The proposal remains ready for review."
+      : "";
 
   return (
     <section className="knowledge-workbench">
@@ -108,16 +131,33 @@ export function RefreshPage() {
             setModel(event.currentTarget.value);
           }}
         />
-        <button type="submit" disabled={refresh.isPending}>
+        <button type="submit" disabled={refresh.isPending || prepared !== null}>
           Prepare refresh
         </button>
       </form>
-      {status ? <OperationProgress message={status} /> : null}
+      {reconciliationWarning ? (
+        <p
+          aria-label="Refresh reconciliation warning"
+          aria-live="polite"
+          role="status"
+        >
+          {reconciliationWarning}
+        </p>
+      ) : status ? (
+        <OperationProgress message={status} />
+      ) : null}
       {refresh.error ? <RequestError error={refresh.error} /> : null}
-      {refresh.data?.status === "current" ? (
+      {prepared ? (
         <article aria-labelledby="refresh-answer-title">
-          <h2 id="refresh-answer-title">{refresh.data.answer.title}</h2>
-          <MarkdownContent markdown={refresh.data.answer.markdown} />
+          <h2 id="refresh-answer-title">{prepared.answer.title}</h2>
+          <MarkdownContent markdown={prepared.answer.markdown} />
+          {prepared.status === "pending" ? (
+            <p>
+              <Link to={`/review/${prepared.review.review_id}`}>
+                Review the refresh proposal
+              </Link>
+            </p>
+          ) : null}
         </article>
       ) : null}
     </section>

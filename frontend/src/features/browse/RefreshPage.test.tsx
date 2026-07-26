@@ -258,3 +258,69 @@ test("preserves refresh input and model after a bounded failure", async () => {
     "status",
   );
 });
+
+test("retains a pending refresh when workspace reconciliation fails", async () => {
+  let workspaceCalls = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      workspaceCalls += 1;
+      return workspaceCalls === 1
+        ? Promise.resolve(jsonResponse(workspace))
+        : Promise.reject(new Error("workspace reload failed"));
+    }
+    if (path === "/api/v1/concepts/syntheses/agent-framework") {
+      return Promise.resolve(jsonResponse(synthesisConcept));
+    }
+    if (path === "/api/v1/refreshes") {
+      return Promise.resolve(
+        jsonResponse({
+          status: "pending",
+          concept_id: synthesisConcept.concept_id,
+          answer,
+          review: pendingReview,
+        }),
+      );
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const user = userEvent.setup();
+  renderRoute("/refresh/syntheses/agent-framework");
+
+  await user.type(
+    await screen.findByRole("textbox", { name: "Refresh instruction" }),
+    "Add current evidence",
+  );
+  await user.click(screen.getByRole("button", { name: "Prepare refresh" }));
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Updated agent framework",
+      level: 2,
+    }),
+  ).toBeTruthy();
+  expect(
+    screen
+      .getByRole("link", { name: "Review the refresh proposal" })
+      .getAttribute("href"),
+  ).toBe(`/review/${reviewId}`);
+  expect(
+    (
+      await screen.findByRole("status", {
+        name: "Refresh reconciliation warning",
+      })
+    ).textContent,
+  ).toContain(
+    "Refresh preparation succeeded, but workspace status could not refresh",
+  );
+  expect(screen.queryByText("Refresh preparation failed")).toBeNull();
+  expect(screen.getByTestId("location").textContent).toBe(
+    "/refresh/syntheses/agent-framework",
+  );
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/refreshes"),
+  ).toHaveLength(1);
+  expect(
+    screen.getByRole("button", { name: "Prepare refresh" }),
+  ).toHaveProperty("disabled", true);
+});

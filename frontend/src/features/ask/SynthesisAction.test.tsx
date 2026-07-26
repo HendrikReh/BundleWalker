@@ -160,3 +160,56 @@ test("preserves the question and model after a bounded synthesis failure", async
     "Synthesis preparation failed",
   );
 });
+
+test("retains a successful synthesis when workspace reconciliation fails", async () => {
+  let workspaceCalls = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      workspaceCalls += 1;
+      return workspaceCalls === 1
+        ? Promise.resolve(jsonResponse(workspace))
+        : Promise.reject(new Error("workspace reload failed"));
+    }
+    if (path === "/api/v1/syntheses") {
+      return Promise.resolve(jsonResponse(synthesis));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const user = userEvent.setup();
+  renderAsk();
+
+  await user.type(
+    await screen.findByRole("textbox", { name: "Question" }),
+    "What do agents use?",
+  );
+  await user.click(screen.getByRole("button", { name: "Prepare synthesis" }));
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Agent tools synthesis",
+      level: 2,
+    }),
+  ).toBeTruthy();
+  expect(
+    screen
+      .getByRole("link", { name: "Review the synthesis proposal" })
+      .getAttribute("href"),
+  ).toBe(`/review/${reviewId}`);
+  expect(
+    (
+      await screen.findByRole("status", {
+        name: "Synthesis reconciliation warning",
+      })
+    ).textContent,
+  ).toContain(
+    "Synthesis preparation succeeded, but workspace status could not refresh",
+  );
+  expect(screen.queryByText("Synthesis preparation failed")).toBeNull();
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/syntheses"),
+  ).toHaveLength(1);
+  expect(
+    screen.getByRole("button", { name: "Prepare synthesis" }),
+  ).toHaveProperty("disabled", true);
+});
