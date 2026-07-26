@@ -321,6 +321,153 @@ test("reloads and announces the current proposal after a resolution conflict wit
   ).toHaveLength(1);
 });
 
+test("keeps resolution blocked and does not navigate when success reconciliation fails", async () => {
+  let workspaceCalls = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      workspaceCalls += 1;
+      return workspaceCalls === 1
+        ? Promise.resolve(jsonResponse(workspace))
+        : Promise.reject(new Error("workspace reload failed"));
+    }
+    if (path === "/api/v1/review") return Promise.resolve(jsonResponse(review));
+    if (path === `/api/v1/reviews/${reviewId}/apply`) {
+      return Promise.resolve(
+        jsonResponse({ review_id: reviewId, status: "applied" }),
+      );
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const user = userEvent.setup();
+  renderReview();
+  await user.click(
+    await screen.findByRole("button", { name: "Apply proposal" }),
+  );
+
+  expect(
+    await screen.findByRole("status", {
+      name: "Review reconciliation failed",
+    }),
+  ).toBeTruthy();
+  expect(screen.getByTestId("location").textContent).toBe(
+    `/review/${reviewId}`,
+  );
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Apply proposal",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Discard proposal",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+});
+
+test("does not reuse stale cached review or retry when conflict reconciliation fails", async () => {
+  let reviewCalls = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      return Promise.resolve(jsonResponse(workspace));
+    }
+    if (path === "/api/v1/review") {
+      reviewCalls += 1;
+      return reviewCalls === 1
+        ? Promise.resolve(jsonResponse(review))
+        : Promise.reject(new Error("review reload failed"));
+    }
+    if (path === `/api/v1/reviews/${reviewId}/apply`) {
+      return Promise.resolve(
+        errorResponse(
+          "review_id_mismatch",
+          "review ID does not match the pending review",
+          replacementId,
+        ),
+      );
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const user = userEvent.setup();
+  renderReview();
+  await user.click(
+    await screen.findByRole("button", { name: "Apply proposal" }),
+  );
+
+  expect(
+    await screen.findByRole("status", {
+      name: "Review reconciliation failed",
+    }),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Current proposal:/)).toBeNull();
+  expect(screen.getByTestId("location").textContent).toBe(
+    `/review/${reviewId}`,
+  );
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Apply proposal",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(true);
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(
+        ([path]) => String(path) === `/api/v1/reviews/${reviewId}/apply`,
+      ),
+  ).toHaveLength(1);
+});
+
+test("keeps the no-longer-pending conflict announcement in the live region", async () => {
+  let workspaceCalls = 0;
+  let reviewCalls = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      workspaceCalls += 1;
+      return Promise.resolve(
+        jsonResponse(
+          workspaceCalls === 1
+            ? workspace
+            : { ...workspace, pending_review: null },
+        ),
+      );
+    }
+    if (path === "/api/v1/review") {
+      reviewCalls += 1;
+      return Promise.resolve(jsonResponse(reviewCalls === 1 ? review : null));
+    }
+    if (path === `/api/v1/reviews/${reviewId}/discard`) {
+      return Promise.resolve(
+        errorResponse("review_not_found", "review was not found"),
+      );
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const user = userEvent.setup();
+  renderReview();
+  await user.click(
+    await screen.findByRole("button", { name: "Discard proposal" }),
+  );
+
+  expect(
+    (
+      await screen.findByRole("status", {
+        name: "Review state changed",
+      })
+    ).textContent,
+  ).toContain("The proposal is no longer pending.");
+  expect(
+    screen.getByRole("heading", { name: "No pending review" }),
+  ).toBeTruthy();
+});
+
 test("does not mutate when confirmation is declined", async () => {
   vi.mocked(fetch)
     .mockResolvedValueOnce(jsonResponse(workspace))

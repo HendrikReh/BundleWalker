@@ -7,6 +7,7 @@ import { useNavigate, useParams } from "react-router";
 
 import { ApiError } from "../../api/client";
 import {
+  apiClient,
   queryKeys,
   useApplyReview,
   useDiscardReview,
@@ -33,6 +34,7 @@ export function ReviewPage() {
   const navigate = useNavigate();
   const [reconciling, setReconciling] = useState(false);
   const [announcement, setAnnouncement] = useState<string | null>(null);
+  const [reconciliationError, setReconciliationError] = useState<unknown>(null);
   const review = reviewQuery.data;
 
   useEffect(() => {
@@ -47,7 +49,14 @@ export function ReviewPage() {
   }, [navigate, reconciling, review, routeReviewId]);
 
   async function resolve(resolution: Resolution) {
-    if (review === undefined || review === null || reconciling) return;
+    if (
+      review === undefined ||
+      review === null ||
+      reconciling ||
+      reconciliationError !== null
+    ) {
+      return;
+    }
     const confirmed = window.confirm(
       `${resolution === "apply" ? "Apply" : "Discard"} the entire proposal?`,
     );
@@ -56,60 +65,105 @@ export function ReviewPage() {
     const mutation = resolution === "apply" ? apply : discard;
     try {
       await mutation.mutateAsync(review.review_id);
-      setReconciling(true);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.workspace }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.review }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.concepts }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.lint }),
-      ]);
-      navigate("/browse");
     } catch (error) {
       if (!(error instanceof ApiError) || !REVIEW_CONFLICTS.has(error.code)) {
         return;
       }
-      setReconciling(true);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.workspace }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.review }),
-      ]);
-      const current = queryClient.getQueryData<WebReviewResponse | null>(
-        queryKeys.review,
-      );
       mutation.reset();
-      if (current === undefined || current === null) {
-        setAnnouncement("The proposal is no longer pending.");
-      } else {
-        setAnnouncement(`Current proposal: ${current.summary}`);
-        navigate(`/review/${current.review_id}`, { replace: true });
-      }
+      await reconcileConflict();
+      return;
+    }
+
+    setReconciling(true);
+    try {
+      await Promise.all([
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.workspace },
+          { throwOnError: true },
+        ),
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.review },
+          { throwOnError: true },
+        ),
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.concepts },
+          { throwOnError: true },
+        ),
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.lint },
+          { throwOnError: true },
+        ),
+      ]);
+      navigate("/browse");
+    } catch (error) {
+      setReconciliationError(error);
     } finally {
       setReconciling(false);
     }
   }
 
-  if (reviewQuery.error) return <RequestError error={reviewQuery.error} />;
+  async function reconcileConflict() {
+    setReconciling(true);
+    try {
+      await Promise.all([
+        queryClient.invalidateQueries(
+          { queryKey: queryKeys.workspace },
+          { throwOnError: true },
+        ),
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.review,
+          refetchType: "none",
+        }),
+      ]);
+      const current = await queryClient.fetchQuery<WebReviewResponse | null>({
+        queryKey: queryKeys.review,
+        queryFn: () => apiClient.review(),
+        staleTime: 0,
+      });
+      if (current === null) {
+        setAnnouncement("The proposal is no longer pending.");
+      } else {
+        setAnnouncement(`Current proposal: ${current.summary}`);
+        navigate(`/review/${current.review_id}`, { replace: true });
+      }
+    } catch (error) {
+      setReconciliationError(error);
+    } finally {
+      setReconciling(false);
+    }
+  }
+
+  if (reviewQuery.error && reconciliationError === null) {
+    return <RequestError error={reviewQuery.error} />;
+  }
   if (review === undefined) return <p role="status">Loading review…</p>;
   if (review === null) {
     return (
       <section>
         <h1>No pending review</h1>
+        <ReviewStateNotices
+          announcement={announcement}
+          reconciliationError={reconciliationError}
+        />
         <p>The workspace does not currently have a proposal to resolve.</p>
       </section>
     );
   }
 
-  const busy = apply.isPending || discard.isPending || reconciling;
+  const busy =
+    apply.isPending ||
+    discard.isPending ||
+    reconciling ||
+    reconciliationError !== null;
   const mutationError = apply.error ?? discard.error;
 
   return (
     <section className="review-workbench">
       <h1>Review proposal</h1>
-      {announcement ? (
-        <p role="status" aria-label="Review state changed">
-          {announcement}
-        </p>
-      ) : null}
+      <ReviewStateNotices
+        announcement={announcement}
+        reconciliationError={reconciliationError}
+      />
       <p>{review.summary}</p>
       <dl className="review-metadata">
         <div>
@@ -163,5 +217,32 @@ export function ReviewPage() {
       ) : null}
       {mutationError ? <RequestError error={mutationError} /> : null}
     </section>
+  );
+}
+
+function ReviewStateNotices({
+  announcement,
+  reconciliationError,
+}: {
+  readonly announcement: string | null;
+  readonly reconciliationError: unknown;
+}) {
+  return (
+    <>
+      {announcement ? (
+        <p role="status" aria-label="Review state changed">
+          {announcement}
+        </p>
+      ) : null}
+      {reconciliationError !== null ? (
+        <>
+          <p role="status" aria-label="Review reconciliation failed">
+            Authoritative reconciliation failed. Resolution controls remain
+            unavailable.
+          </p>
+          <RequestError error={reconciliationError} />
+        </>
+      ) : null}
+    </>
   );
 }
