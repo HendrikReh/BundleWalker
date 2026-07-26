@@ -8,6 +8,7 @@ import { AskPage } from "../features/ask/AskPage";
 import { BrowsePage } from "../features/browse/BrowsePage";
 import { ConceptPage } from "../features/browse/ConceptPage";
 import { LintPage } from "../features/lint/LintPage";
+import { IngestionPage } from "../features/ingestion/IngestionPage";
 import { useWorkspace } from "../api/queries";
 import { App } from "./App";
 
@@ -20,7 +21,7 @@ export function AppRoutes() {
         <Route path="browse/*" element={<ConceptPage />} />
         <Route path="ask" element={<AskPage />} />
         <Route path="lint" element={<LintPage />} />
-        <Route path="ingest" element={<Placeholder title="New ingestion" />} />
+        <Route path="ingest" element={<IngestionPage />} />
         <Route path="review/:reviewId" element={<ReviewPlaceholder />} />
       </Route>
     </Routes>

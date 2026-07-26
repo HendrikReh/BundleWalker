@@ -14,6 +14,7 @@ export const queryKeys = {
   search: (query: string, conceptType?: string) =>
     ["concept-search", query, conceptType ?? null] as const,
   lint: ["lint"] as const,
+  ingestion: ["ingestion"] as const,
 };
 
 export function useWorkspace() {
@@ -64,5 +65,16 @@ export function useLint() {
       readonly semantic: boolean;
       readonly model?: string | null;
     }) => apiClient.lint(options),
+  });
+}
+
+export function usePrepareIngestion() {
+  return useMutation({
+    mutationKey: queryKeys.ingestion,
+    mutationFn: (options: {
+      readonly source_name: string;
+      readonly content: string;
+      readonly model?: string | null;
+    }) => apiClient.prepareIngestion(options),
   });
 }

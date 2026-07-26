@@ -17,14 +17,17 @@ from bundlewalker.application import (
     MAX_CONCEPT_PAGE_SIZE,
     ApplicationError,
     ApplicationErrorCode,
+    InlineSource,
     WorkspaceApplication,
 )
 from bundlewalker.interfaces.web.contracts import (
     WebAskRequest,
+    WebIngestionRequest,
     WebLintRequest,
     to_web_answer,
     to_web_concept,
     to_web_concept_page,
+    to_web_ingestion,
     to_web_lint,
     to_web_search,
     to_web_workspace,
@@ -128,6 +131,28 @@ def create_api_routes(application: WorkspaceApplication) -> tuple[Route, ...]:
         except ApplicationError as error:
             return _application_error(error)
 
+    async def ingestion(request: Request) -> Response:
+        try:
+            payload = WebIngestionRequest.model_validate(await request.json())
+        except (
+            JSONDecodeError,
+            ValidationError,
+            UnicodeDecodeError,
+            UnicodeEncodeError,
+        ) as error:
+            return _application_error(_invalid_json_request(error))
+        try:
+            result = await application.prepare_ingestion(
+                InlineSource(
+                    source_name=payload.source_name,
+                    content=payload.content,
+                ),
+                explicit_model=payload.model,
+            )
+            return _json_response(to_web_ingestion(result))
+        except ApplicationError as error:
+            return _application_error(error)
+
     return (
         Route("/api/v1/workspace", workspace, methods=["GET"]),
         Route("/api/v1/concepts", concepts, methods=["GET"]),
@@ -135,6 +160,7 @@ def create_api_routes(application: WorkspaceApplication) -> tuple[Route, ...]:
         Route("/api/v1/concepts/{concept_id:path}", concept, methods=["GET"]),
         Route("/api/v1/ask", ask, methods=["POST"]),
         Route("/api/v1/lint", lint, methods=["POST"]),
+        Route("/api/v1/ingestions", ingestion, methods=["POST"]),
     )
 
 

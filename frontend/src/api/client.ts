@@ -7,8 +7,11 @@ import type {
   WebConceptResponse,
   WebConceptSummary,
   WebErrorDetail,
+  WebIngestionRequest,
+  WebIngestionResponse,
   WebLintRequest,
   WebLintResponse,
+  WebReviewResponse,
   WebSearchResponse,
   WebWorkspaceResponse,
 } from "./types";
@@ -82,6 +85,12 @@ export class ApiClient {
 
   async lint(options: WebLintRequest): Promise<WebLintResponse> {
     return this.#post("/api/v1/lint", options, parseLint);
+  }
+
+  async prepareIngestion(
+    options: WebIngestionRequest,
+  ): Promise<WebIngestionResponse> {
+    return this.#post("/api/v1/ingestions", options, parseIngestion);
   }
 
   async #get<T>(path: string, parse: (value: unknown) => T): Promise<T> {
@@ -263,6 +272,39 @@ function parseLint(value: unknown): WebLintResponse {
       };
     }),
     deterministic_has_errors: requireBoolean(record.deterministic_has_errors),
+  };
+}
+
+function parseIngestion(value: unknown): WebIngestionResponse {
+  const record = requireRecord(value);
+  if (record.status === "duplicate") {
+    if (record.review !== null) throw new Error("Invalid API response");
+    return { status: "duplicate", review: null };
+  }
+  if (record.status === "pending") {
+    return { status: "pending", review: parseReview(record.review) };
+  }
+  throw new Error("Invalid API response");
+}
+
+function parseReview(value: unknown): WebReviewResponse {
+  const record = requireRecord(value);
+  const kind = requireString(record.kind);
+  const status = requireString(record.status);
+  if (kind !== "ingestion" && kind !== "synthesis" && kind !== "refresh") {
+    throw new Error("Invalid API response");
+  }
+  if (status !== "pending" && status !== "stale") {
+    throw new Error("Invalid API response");
+  }
+  return {
+    review_id: requireString(record.review_id),
+    kind,
+    status,
+    summary: requireString(record.summary),
+    diff: requireString(record.diff),
+    changed_paths: requireArray(record.changed_paths).map(requireString),
+    created_at: requireString(record.created_at),
   };
 }
 
