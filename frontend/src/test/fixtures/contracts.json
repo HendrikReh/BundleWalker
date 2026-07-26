@@ -1,0 +1,164 @@
+{
+  "answer": {
+    "citations": [
+      {
+        "concept_id": "topics/agents",
+        "number": 1
+      }
+    ],
+    "markdown": "# Agent tools\n\nAgents can use tools. [1]\n",
+    "title": "Agent tools"
+  },
+  "concept": {
+    "concept_id": "topics/agents",
+    "description": "How agents work.",
+    "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "markdown": "# Agents\n\nAgents can use tools.\n",
+    "tags": ["agents"],
+    "title": "Agents",
+    "type": "Topic"
+  },
+  "concept_page": {
+    "items": [
+      {
+        "concept_id": "topics/agents",
+        "description": "How agents work.",
+        "tags": ["agents"],
+        "title": "Agents",
+        "type": "Topic"
+      }
+    ],
+    "next_cursor": "page-2"
+  },
+  "error": {
+    "error": {
+      "code": "review_stale",
+      "diagnostic_id": null,
+      "message": "review is stale",
+      "retryable": false,
+      "review_id": null
+    }
+  },
+  "ingestion_duplicate": {
+    "review": null,
+    "status": "duplicate"
+  },
+  "ingestion_pending": {
+    "review": {
+      "changed_paths": ["topics/agents.md"],
+      "created_at": "2026-07-25T12:00:00Z",
+      "diff": "diff --git a/topics/agents.md b/topics/agents.md\n",
+      "kind": "ingestion",
+      "review_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "pending",
+      "summary": "Add agent notes"
+    },
+    "status": "pending"
+  },
+  "lint": {
+    "deterministic_has_errors": false,
+    "findings": [
+      {
+        "code": "missing-description",
+        "evidence_paths": ["topics/agents.md"],
+        "message": "Description is missing.",
+        "origin": "deterministic",
+        "path": "topics/agents.md",
+        "remediation": "Add a description.",
+        "severity": "warning"
+      }
+    ]
+  },
+  "mutation": {
+    "review_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "applied"
+  },
+  "refresh_current": {
+    "answer": {
+      "citations": [
+        {
+          "concept_id": "topics/agents",
+          "number": 1
+        }
+      ],
+      "markdown": "# Agent tools\n\nAgents can use tools. [1]\n",
+      "title": "Agent tools"
+    },
+    "concept_id": "syntheses/agents",
+    "review": null,
+    "status": "current"
+  },
+  "refresh_pending": {
+    "answer": {
+      "citations": [
+        {
+          "concept_id": "topics/agents",
+          "number": 1
+        }
+      ],
+      "markdown": "# Agent tools\n\nAgents can use tools. [1]\n",
+      "title": "Agent tools"
+    },
+    "concept_id": "syntheses/agents",
+    "review": {
+      "changed_paths": ["topics/agents.md"],
+      "created_at": "2026-07-25T12:00:00Z",
+      "diff": "diff --git a/topics/agents.md b/topics/agents.md\n",
+      "kind": "ingestion",
+      "review_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "pending",
+      "summary": "Add agent notes"
+    },
+    "status": "pending"
+  },
+  "review": {
+    "changed_paths": ["topics/agents.md"],
+    "created_at": "2026-07-25T12:00:00Z",
+    "diff": "diff --git a/topics/agents.md b/topics/agents.md\n",
+    "kind": "ingestion",
+    "review_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "pending",
+    "summary": "Add agent notes"
+  },
+  "search": {
+    "items": [
+      {
+        "concept_id": "topics/agents",
+        "description": "How agents work.",
+        "tags": ["agents"],
+        "title": "Agents",
+        "type": "Topic"
+      }
+    ]
+  },
+  "synthesis": {
+    "answer": {
+      "citations": [
+        {
+          "concept_id": "topics/agents",
+          "number": 1
+        }
+      ],
+      "markdown": "# Agent tools\n\nAgents can use tools. [1]\n",
+      "title": "Agent tools"
+    },
+    "review": {
+      "changed_paths": ["topics/agents.md"],
+      "created_at": "2026-07-25T12:00:00Z",
+      "diff": "diff --git a/topics/agents.md b/topics/agents.md\n",
+      "kind": "ingestion",
+      "review_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "pending",
+      "summary": "Add agent notes"
+    }
+  },
+  "workspace": {
+    "concept_counts": {
+      "Topic": 1
+    },
+    "config_version": 3,
+    "csrf_token": "fixture-csrf-token",
+    "display_name": "knowledge",
+    "pending_review": null
+  }
+}

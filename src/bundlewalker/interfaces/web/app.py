@@ -18,9 +18,10 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from bundlewalker.application import WorkspaceApplication
+from bundlewalker.interfaces.web.contracts import MAX_WEB_REQUEST_BYTES
+from bundlewalker.interfaces.web.errors import unexpected_exception_handler
 from bundlewalker.interfaces.web.security import BrowserSessionStore
 
-MAX_WEB_REQUEST_BYTES: Final = 4_100_000
 SESSION_COOKIE_NAME: Final = "bundlewalker_session"
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _HASHED_ASSET = re.compile(
@@ -82,8 +83,8 @@ def create_web_app(
             return PlainTextResponse("Web interface assets are unavailable", status_code=500)
         return Response(index.read_bytes(), media_type="text/html")
 
-    async def internal_error(_: Request, __: Exception) -> Response:
-        response = PlainTextResponse("Internal Server Error", status_code=500)
+    async def internal_error(request: Request, error: Exception) -> Response:
+        response = await unexpected_exception_handler(request, error)
         _apply_security_headers(response.headers)
         return response
 
@@ -98,7 +99,10 @@ def create_web_app(
         Route("/ingest", spa_shell, methods=["GET"]),
         Route("/review/{review_id}", spa_shell, methods=["GET"]),
     ]
-    app = Starlette(routes=routes, exception_handlers={Exception: internal_error})
+    app = Starlette(
+        routes=routes,
+        exception_handlers={Exception: internal_error},
+    )
     app.state.application = application
     app.state.sessions = sessions
     app.add_middleware(
