@@ -28,6 +28,17 @@ const workspaceWithReview = {
   },
 };
 
+const pendingReview = {
+  ...workspaceWithReview.pending_review,
+  diff:
+    "--- /dev/null\n" +
+    "+++ wiki/sources/prepared-notes.md\n" +
+    "@@ -0,0 +1 @@\n" +
+    "+Prepared notes.\n",
+  changed_paths: ["sources/prepared-notes.md"],
+  created_at: "2026-07-25T12:00:00Z",
+};
+
 const agents = {
   concept_id: "topics/agents",
   type: "Topic",
@@ -73,11 +84,21 @@ afterEach(() => {
 });
 
 test("opens Review first when workspace status contains a pending review", async () => {
-  vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(workspaceWithReview));
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      return Promise.resolve(jsonResponse(workspaceWithReview));
+    }
+    if (path === "/api/v1/review") {
+      return Promise.resolve(jsonResponse(pendingReview));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
 
   renderRoutes("/");
 
-  await screen.findByRole("heading", { name: "Prepared notes" });
+  await screen.findByRole("heading", { name: "Review proposal" });
+  expect(screen.getByText("Prepared notes")).toBeTruthy();
 });
 
 test("opens Browse first when workspace has no pending review", async () => {

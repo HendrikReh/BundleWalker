@@ -15,6 +15,7 @@ export const queryKeys = {
     ["concept-search", query, conceptType ?? null] as const,
   lint: ["lint"] as const,
   ingestion: ["ingestion"] as const,
+  review: ["review"] as const,
 };
 
 export function useWorkspace() {
@@ -76,5 +77,24 @@ export function usePrepareIngestion() {
       readonly content: string;
       readonly model?: string | null;
     }) => apiClient.prepareIngestion(options),
+  });
+}
+
+export function useReview() {
+  return useQuery({
+    queryKey: queryKeys.review,
+    queryFn: () => apiClient.review(),
+  });
+}
+
+export function useApplyReview() {
+  return useMutation({
+    mutationFn: (reviewId: string) => apiClient.applyReview(reviewId),
+  });
+}
+
+export function useDiscardReview() {
+  return useMutation({
+    mutationFn: (reviewId: string) => apiClient.discardReview(reviewId),
   });
 }

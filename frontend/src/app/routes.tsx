@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Hendrik Reh
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { Navigate, Route, Routes, useParams } from "react-router";
+import { Navigate, Route, Routes } from "react-router";
 
 import { RequestError } from "../components/RequestError";
 import { AskPage } from "../features/ask/AskPage";
@@ -9,6 +9,7 @@ import { BrowsePage } from "../features/browse/BrowsePage";
 import { ConceptPage } from "../features/browse/ConceptPage";
 import { LintPage } from "../features/lint/LintPage";
 import { IngestionPage } from "../features/ingestion/IngestionPage";
+import { ReviewPage } from "../features/review/ReviewPage";
 import { useWorkspace } from "../api/queries";
 import { App } from "./App";
 
@@ -22,7 +23,7 @@ export function AppRoutes() {
         <Route path="ask" element={<AskPage />} />
         <Route path="lint" element={<LintPage />} />
         <Route path="ingest" element={<IngestionPage />} />
-        <Route path="review/:reviewId" element={<ReviewPlaceholder />} />
+        <Route path="review/:reviewId" element={<ReviewPage />} />
       </Route>
     </Routes>
   );
@@ -42,25 +43,5 @@ function DefaultRoute() {
           : "/browse"
       }
     />
-  );
-}
-
-function ReviewPlaceholder() {
-  const workspace = useWorkspace();
-  const reviewId = useParams().reviewId;
-  const pending = workspace.data?.pending_review;
-  const title =
-    pending !== null && pending !== undefined && pending.review_id === reviewId
-      ? pending.summary
-      : "No pending review";
-  return <Placeholder title={title} />;
-}
-
-function Placeholder({ title }: { readonly title: string }) {
-  return (
-    <section>
-      <h1>{title}</h1>
-      <p>This workbench will be available in the next capability slice.</p>
-    </section>
   );
 }

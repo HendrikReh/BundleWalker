@@ -226,9 +226,29 @@ test("shows a no-change result for duplicate pasted content", async () => {
 });
 
 test("navigates a pending result to its opaque review route", async () => {
-  vi.mocked(fetch)
-    .mockResolvedValueOnce(jsonResponse(workspace))
-    .mockResolvedValueOnce(jsonResponse(pendingResult));
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      return Promise.resolve(
+        jsonResponse({
+          ...workspace,
+          pending_review: {
+            review_id: pendingResult.review.review_id,
+            kind: pendingResult.review.kind,
+            status: pendingResult.review.status,
+            summary: pendingResult.review.summary,
+          },
+        }),
+      );
+    }
+    if (path === "/api/v1/ingestions") {
+      return Promise.resolve(jsonResponse(pendingResult));
+    }
+    if (path === "/api/v1/review") {
+      return Promise.resolve(jsonResponse(pendingResult.review));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
   const user = userEvent.setup();
   renderIngestion();
 
@@ -241,7 +261,6 @@ test("navigates a pending result to its opaque review route", async () => {
   await waitFor(() => {
     expect(screen.queryByRole("heading", { name: "New ingestion" })).toBeNull();
   });
-  expect(
-    screen.getByRole("heading", { name: "No pending review" }),
-  ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Review proposal" })).toBeTruthy();
+  expect(screen.getByText("Integrated browser notes")).toBeTruthy();
 });

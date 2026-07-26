@@ -29,6 +29,8 @@ from bundlewalker.interfaces.web.contracts import (
     to_web_concept_page,
     to_web_ingestion,
     to_web_lint,
+    to_web_mutation,
+    to_web_review,
     to_web_search,
     to_web_workspace,
 )
@@ -153,10 +155,42 @@ def create_api_routes(application: WorkspaceApplication) -> tuple[Route, ...]:
         except ApplicationError as error:
             return _application_error(error)
 
+    async def review(_: Request) -> Response:
+        try:
+            pending = await application.get_pending_review()
+            return _json_response(to_web_review(pending) if pending is not None else None)
+        except ApplicationError as error:
+            return _application_error(error)
+
+    async def apply_review(request: Request) -> Response:
+        try:
+            result = await application.apply_review(request.path_params["review_id"])
+            return _json_response(to_web_mutation(result))
+        except ApplicationError as error:
+            return _application_error(error)
+
+    async def discard_review(request: Request) -> Response:
+        try:
+            result = await application.discard_review(request.path_params["review_id"])
+            return _json_response(to_web_mutation(result))
+        except ApplicationError as error:
+            return _application_error(error)
+
     return (
         Route("/api/v1/workspace", workspace, methods=["GET"]),
         Route("/api/v1/concepts", concepts, methods=["GET"]),
         Route("/api/v1/concepts/search", search, methods=["GET"]),
+        Route("/api/v1/review", review, methods=["GET"]),
+        Route(
+            "/api/v1/reviews/{review_id}/apply",
+            apply_review,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/reviews/{review_id}/discard",
+            discard_review,
+            methods=["POST"],
+        ),
         Route("/api/v1/concepts/{concept_id:path}", concept, methods=["GET"]),
         Route("/api/v1/ask", ask, methods=["POST"]),
         Route("/api/v1/lint", lint, methods=["POST"]),
@@ -217,8 +251,8 @@ def _invalid_json_request(_error: Exception) -> ApplicationError:
     )
 
 
-def _json_response(model: BaseModel) -> JSONResponse:
-    return JSONResponse(model.model_dump(mode="json"))
+def _json_response(model: BaseModel | None) -> JSONResponse:
+    return JSONResponse(model.model_dump(mode="json") if model is not None else None)
 
 
 def _application_error(error: ApplicationError) -> JSONResponse:

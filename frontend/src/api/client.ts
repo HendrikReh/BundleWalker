@@ -11,6 +11,7 @@ import type {
   WebIngestionResponse,
   WebLintRequest,
   WebLintResponse,
+  WebMutationResponse,
   WebReviewResponse,
   WebSearchResponse,
   WebWorkspaceResponse,
@@ -91,6 +92,28 @@ export class ApiClient {
     options: WebIngestionRequest,
   ): Promise<WebIngestionResponse> {
     return this.#post("/api/v1/ingestions", options, parseIngestion);
+  }
+
+  async review(): Promise<WebReviewResponse | null> {
+    return this.#get("/api/v1/review", (value) =>
+      value === null ? null : parseReview(value),
+    );
+  }
+
+  async applyReview(reviewId: string): Promise<WebMutationResponse> {
+    return this.#post(
+      `/api/v1/reviews/${encodeURIComponent(reviewId)}/apply`,
+      {},
+      (value) => parseMutation(value, "applied"),
+    );
+  }
+
+  async discardReview(reviewId: string): Promise<WebMutationResponse> {
+    return this.#post(
+      `/api/v1/reviews/${encodeURIComponent(reviewId)}/discard`,
+      {},
+      (value) => parseMutation(value, "discarded"),
+    );
   }
 
   async #get<T>(path: string, parse: (value: unknown) => T): Promise<T> {
@@ -305,6 +328,18 @@ function parseReview(value: unknown): WebReviewResponse {
     diff: requireString(record.diff),
     changed_paths: requireArray(record.changed_paths).map(requireString),
     created_at: requireString(record.created_at),
+  };
+}
+
+function parseMutation(
+  value: unknown,
+  expectedStatus: WebMutationResponse["status"],
+): WebMutationResponse {
+  const record = requireRecord(value);
+  if (record.status !== expectedStatus) throw new Error("Invalid API response");
+  return {
+    review_id: requireString(record.review_id),
+    status: expectedStatus,
   };
 }
 
