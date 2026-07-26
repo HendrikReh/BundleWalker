@@ -4,7 +4,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { AppRoutes } from "../../app/routes";
@@ -193,7 +193,78 @@ describe("MarkdownContent", () => {
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noopener noreferrer");
   });
+
+  test("marks protocol-relative links as external instead of local", () => {
+    render(<MarkdownContent markdown="[Outside](//evil.example/docs)" />);
+
+    const link = screen.getByRole("link", { name: "Outside (external)" });
+    expect(link.getAttribute("href")).toBe("//evil.example/docs");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  test.each([
+    ["/topics/agent%20systems.md", "/browse/topics/agent%20systems"],
+    ["entities/index.md#tools", "/browse/entities/index#tools"],
+  ])(
+    "opens OKF concept reference %s through the client concept route",
+    async (reference, expectedRoute) => {
+      const user = userEvent.setup();
+      render(
+        <MemoryRouter initialEntries={["/browse"]}>
+          <MarkdownContent markdown={`[Concept](${reference})`} />
+          <Routes>
+            <Route path="*" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      const link = screen.getByRole("link", { name: "Concept" });
+      expect(link.getAttribute("href")).toBe(expectedRoute);
+      await user.click(link);
+      expect(screen.getByTestId("current-location").textContent).toBe(
+        expectedRoute,
+      );
+    },
+  );
+
+  test("rejects traversal-shaped concept references", () => {
+    render(
+      <MarkdownContent
+        markdown={
+          "[parent](../topics/agents.md) [encoded](/topics/%2e%2e/agents.md)"
+        }
+      />,
+    );
+
+    expect(screen.queryByRole("link", { name: "parent" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "encoded" })).toBeNull();
+  });
+
+  test("preserves safe non-concept local links and their text", () => {
+    render(
+      <MarkdownContent markdown="[Guide](guide.pdf) [Docs](/documentation)" />,
+    );
+
+    expect(
+      screen.getByRole("link", { name: "Guide" }).getAttribute("href"),
+    ).toBe("guide.pdf");
+    expect(
+      screen.getByRole("link", { name: "Docs" }).getAttribute("href"),
+    ).toBe("/documentation");
+  });
 });
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <output data-testid="current-location">
+      {location.pathname}
+      {location.search}
+      {location.hash}
+    </output>
+  );
+}
 
 test("renders a bounded request error instead of raw response text", async () => {
   vi.mocked(fetch)
