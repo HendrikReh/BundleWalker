@@ -6,7 +6,7 @@
 
 **Architecture:** A Vite-built React/TypeScript SPA is packaged inside the Python distribution and served by a Starlette adapter in `bundlewalker-web`. The adapter maps a versioned same-origin JSON API to the existing `WorkspaceApplication`; React owns presentation and temporary view state, while Python owns security, workspace state, and every domain operation.
 
-**Tech Stack:** Python 3.13/3.14, Pydantic, Starlette `>=1.3.1,<2`, Uvicorn `>=0.51,<1`, React 19.2.8, React Router 8.3.0, TanStack Query 5.101.4, TypeScript 5.9.3, Vite 8.1.5, Vitest 4.1.10, Testing Library 16.3.2, Playwright 1.62.0, Node 22.22.3.
+**Tech Stack:** Python 3.13/3.14, Pydantic, Starlette `>=1.3.1,<2`, Uvicorn `>=0.51,<1`, React 19.2.8, React Router 7.18.1, TanStack Query 5.101.4, TypeScript 5.9.3, Vite 8.1.5, Vitest 4.1.10, Testing Library 16.3.2, Playwright 1.62.0, Node 22.22.3.
 
 ## Global Constraints
 
@@ -160,7 +160,7 @@ Create `frontend/package.json` with:
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
-    "react-router": "8.3.0",
+    "react-router-dom": "7.18.1",
     "remark-gfm": "4.0.1"
   },
   "devDependencies": {
@@ -1188,7 +1188,7 @@ starting a listener.
 - [ ] **Step 4: Add dependency notices and publishing gates**
 
 Build `THIRD_PARTY_NOTICES.md` from exact locked direct runtime dependencies:
-React, React DOM, React Router, TanStack Query, react-markdown, remark-gfm, and their required
+React, React DOM, React Router DOM, TanStack Query, react-markdown, remark-gfm, and their required
 shipped transitive license notices. Update both publishing workflows so tag publication reruns the
 same frontend build, clean-asset, audit, and artifact-content gates before upload.
 
