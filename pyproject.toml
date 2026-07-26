@@ -63,11 +63,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 exclude = ["benchmarks/**"]
+packages = ["src/bundlewalker"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".superpowers/**", "benchmarks/**"]
 
 [tool.hatch.build.targets.sdist.force-include]
+"src/bundlewalker/interfaces/web/static" = "src/bundlewalker/interfaces/web/static"
 "tests/fixtures/historical/empty-directories.json" = "tests/fixtures/historical/empty-directories.json"
 "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/transactions/ab193d2b8bff42d198ad4611b7feb5c4/backup-wiki/entities/index.md" = "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/transactions/ab193d2b8bff42d198ad4611b7feb5c4/backup-wiki/entities/index.md"
 "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/transactions/ab193d2b8bff42d198ad4611b7feb5c4/backup-wiki/index.md" = "tests/fixtures/historical/v1-schema1-swapping/.bundlewalker/transactions/ab193d2b8bff42d198ad4611b7feb5c4/backup-wiki/index.md"
