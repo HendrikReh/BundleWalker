@@ -427,6 +427,7 @@ def test_review_mapper_preserves_safe_root_relative_source_citation_in_exact_dif
         "/topics/agents/tools.md",
         "/entities/agent%20tools.md",
         "/syntheses/agent-tools.md#citations",
+        "/topics/agents.md?view=full%20page",
     ],
 )
 def test_review_mapper_preserves_safe_root_relative_concept_links_in_exact_diff(
@@ -463,6 +464,8 @@ def test_review_mapper_preserves_safe_root_relative_concept_links_in_exact_diff(
         "/topics/%00private.md",
         "/topics/%252e%252e/agents.md",
         "/topics/%252Fetc.md",
+        "/topics/%2525252Fetc.md",
+        "/topics/%2525252525252525252Fetc.md",
         r"/topics\agents.md",
         "/topics/agent tools.md",
         "/topics//agents.md",
@@ -471,8 +474,15 @@ def test_review_mapper_preserves_safe_root_relative_concept_links_in_exact_diff(
         "/topics/agents%2.md",
         "/topics/agents%GG.md",
         "/topics/agents.md?next=/etc/passwd",
+        "/topics/agents.md?next=%2525252Fetc/passwd",
         "/topics/agents.md#/%2e%2e/etc",
+        "/topics/agents.md#%2525252e%2525252e%2525252Fetc",
         "file:///topics/agents.md",
+        "file:/etc/passwd",
+        "FILE:/etc/passwd",
+        "FiLe:///etc/passwd",
+        "file:%2fetc/passwd",
+        "FILE:%252fetc/passwd",
     ],
 )
 def test_review_mapper_rejects_unsafe_internal_concept_link_destinations(

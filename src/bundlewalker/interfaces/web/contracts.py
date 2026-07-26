@@ -61,7 +61,12 @@ _MARKDOWN_LINK_DESTINATION = re.compile(
     r"(?P<close>\))"
 )
 _MALFORMED_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_FILE_URI_PATH = re.compile(
+    r"(?<![A-Za-z0-9+.-])file:(?:/{1,3}|%(?:25)*(?:2f|5c))",
+    re.IGNORECASE,
+)
 _OKF_CONCEPT_CATEGORIES = frozenset({"sources", "topics", "entities", "syntheses"})
+_MAX_PERCENT_DECODE_PASSES = 8
 
 ModelName = Annotated[
     str,
@@ -431,6 +436,8 @@ def _contains_absolute_path(
     *,
     allow_concept_markdown_links: bool = False,
 ) -> bool:
+    if _contains_file_uri_destination(value):
+        return True
     inspected = _mask_safe_concept_destinations(value) if allow_concept_markdown_links else value
     if (
         _WINDOWS_ABSOLUTE_PATH_TEXT.search(inspected) is not None
@@ -450,6 +457,13 @@ def _mask_safe_concept_destinations(value: str) -> str:
         return f"{match.group('prefix')}bundlewalker-concept{match.group('close')}"
 
     return _MARKDOWN_LINK_DESTINATION.sub(replace, value)
+
+
+def _contains_file_uri_destination(value: str) -> bool:
+    return _FILE_URI_PATH.search(value) is not None or any(
+        match.group("destination").casefold().startswith("file:")
+        for match in _MARKDOWN_LINK_DESTINATION.finditer(value)
+    )
 
 
 def _is_safe_concept_destination(destination: str) -> bool:
@@ -474,14 +488,13 @@ def _is_safe_concept_destination(destination: str) -> bool:
         return False
 
     decoded_segments: list[str] = []
-    try:
-        for segment in raw_segments:
-            decoded = unquote_to_bytes(segment).decode("utf-8")
-            if _decoded_path_segment_is_unsafe(decoded):
-                return False
-            decoded_segments.append(decoded)
-        decoded_suffix = unquote_to_bytes(suffix).decode("utf-8")
-    except UnicodeDecodeError:
+    for segment in raw_segments:
+        decoded = _decode_percent_recursively(segment)
+        if decoded is None or _decoded_path_segment_is_unsafe(decoded):
+            return False
+        decoded_segments.append(decoded)
+    decoded_suffix = _decode_percent_recursively(suffix)
+    if decoded_suffix is None:
         return False
 
     if (
@@ -503,29 +516,23 @@ def _contains_control_character(value: str) -> bool:
 
 
 def _decoded_path_segment_is_unsafe(value: str) -> bool:
+    return (
+        value in {".", ".."} or "/" in value or "\\" in value or _contains_control_character(value)
+    )
+
+
+def _decode_percent_recursively(value: str) -> str | None:
     inspected = value
-    for _ in range(2):
-        if (
-            inspected in {".", ".."}
-            or "/" in inspected
-            or "\\" in inspected
-            or _contains_control_character(inspected)
-        ):
-            return True
-        if "%" not in inspected:
-            return False
+    for _ in range(_MAX_PERCENT_DECODE_PASSES):
         if _MALFORMED_PERCENT_ESCAPE.search(inspected) is not None:
-            return True
+            return None
+        if "%" not in inspected:
+            return inspected
         try:
             decoded = unquote_to_bytes(inspected).decode("utf-8")
         except UnicodeDecodeError:
-            return True
+            return None
         if decoded == inspected:
-            return False
+            return inspected
         inspected = decoded
-    return (
-        inspected in {".", ".."}
-        or "/" in inspected
-        or "\\" in inspected
-        or _contains_control_character(inspected)
-    )
+    return None if "%" in inspected else inspected
