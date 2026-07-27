@@ -85,6 +85,26 @@ def _assert_archives_require_hashed_assets(workflow: dict[str, Any], job: str) -
     assert "[A-Za-z0-9_-]{8,}" in commands
 
 
+def _assert_frontend_publish_gate(workflow: dict[str, Any]) -> None:
+    commands = _run_commands(workflow, "build")
+    ordered_commands = (
+        "npm ci",
+        "npm run format:check",
+        "npm run lint",
+        "npm run test",
+        "uv run python scripts/generate_web_contract_fixtures.py",
+        "npm run build",
+        "git diff --exit-code -- src/bundlewalker/interfaces/web/static",
+        "npm audit --audit-level=high",
+        "npx playwright install --with-deps chromium",
+        "uv run python scripts/run_web_smoke.py -- npm --prefix frontend run test:e2e",
+    )
+    for command in ordered_commands:
+        assert command in commands
+    positions = [commands.index(command) for command in ordered_commands]
+    assert positions == sorted(positions)
+
+
 def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
     workflow = _yaml(".github/workflows/ci.yml")
 
@@ -373,6 +393,7 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     assert "static/.vite/manifest.json" in build_commands
     assert "static/assets/" in build_commands
     _assert_archives_require_hashed_assets(workflow, "build")
+    _assert_frontend_publish_gate(workflow)
     _assert_actions_are_sha_pinned(workflow)
 
 
@@ -582,6 +603,7 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
     assert "static/.vite/manifest.json" in build_commands
     assert "static/assets/" in build_commands
     _assert_archives_require_hashed_assets(workflow, "build")
+    _assert_frontend_publish_gate(workflow)
     assert "persist-credentials" in str(_steps(workflow, "build")[0])
     assert _steps(workflow, "build")[0]["with"]["persist-credentials"] == "false"
 

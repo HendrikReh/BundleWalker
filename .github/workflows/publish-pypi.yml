@@ -51,6 +51,15 @@ jobs:
       - name: Install locked browser dependencies
         run: npm ci
         working-directory: frontend
+      - name: Check frontend format
+        run: npm run format:check
+        working-directory: frontend
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+      - name: Test frontend
+        run: npm run test
+        working-directory: frontend
       - name: Regenerate canonical web contracts
         run: uv run python scripts/generate_web_contract_fixtures.py
       - name: Build reviewed browser assets
@@ -63,6 +72,13 @@ jobs:
       - name: Audit production browser dependencies
         run: npm audit --audit-level=high
         working-directory: frontend
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Run production browser smoke
+        run: >-
+          uv run python scripts/run_web_smoke.py --
+          npm --prefix frontend run test:e2e
       - name: Validate release identity
         id: identity
         shell: bash
