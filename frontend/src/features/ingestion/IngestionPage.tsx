@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
 import { useNavigate } from "react-router";
 
@@ -25,9 +25,14 @@ export function IngestionPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [model, setModel] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
+  const validationErrorRef = useRef<HTMLParagraphElement>(null);
   const prepare = usePrepareIngestion();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (validationError !== null) validationErrorRef.current?.focus();
+  }, [validationError]);
 
   function chooseMode(nextMode: SourceMode) {
     setMode(nextMode);
@@ -205,7 +210,11 @@ export function IngestionPage() {
       </form>
 
       <OperationProgress message={status} />
-      {validationError ? <p role="alert">{validationError}</p> : null}
+      {validationError ? (
+        <p ref={validationErrorRef} role="alert" tabIndex={-1}>
+          {validationError}
+        </p>
+      ) : null}
       {prepare.error ? <RequestError error={prepare.error} /> : null}
       {prepare.data?.status === "duplicate" ? (
         <p>This source is already in the knowledge base.</p>
