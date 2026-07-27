@@ -11,6 +11,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +95,7 @@ def _assert_frontend_publish_gate(workflow: dict[str, Any]) -> None:
         "npm run test",
         "uv run python scripts/generate_web_contract_fixtures.py",
         "npm run build",
+        "git diff --exit-code -- frontend/src/test/fixtures/contracts.json",
         "git diff --exit-code -- src/bundlewalker/interfaces/web/static",
         "npm audit --audit-level=high",
         "npx playwright install --with-deps chromium",
@@ -155,6 +157,18 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
         "dependency-audit",
     ]
     _assert_actions_are_sha_pinned(workflow)
+
+
+def test_frontend_publish_policy_rejects_missing_contract_fixture_diff() -> None:
+    workflow = _yaml(".github/workflows/publish-testpypi.yml")
+    reproducibility = _step(workflow, "build", "Require reproducible contracts and assets")
+    fixture_diff = "git diff --exit-code -- frontend/src/test/fixtures/contracts.json\n"
+    run = str(reproducibility["run"])
+    assert fixture_diff in run
+    reproducibility["run"] = run.replace(fixture_diff, "")
+
+    with pytest.raises(AssertionError):
+        _assert_frontend_publish_gate(workflow)
 
 
 def test_benchmark_workflow_is_scheduled_manual_and_nonblocking() -> None:
