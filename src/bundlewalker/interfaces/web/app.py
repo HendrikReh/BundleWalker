@@ -90,6 +90,7 @@ def create_web_app(
         Route("/bootstrap", bootstrap, methods=["GET"]),
         *create_api_routes(application),
         Route("/assets/{asset_path:path}", asset, methods=["GET"]),
+        Route("/", spa_shell, methods=["GET"]),
         Route("/browse", spa_shell, methods=["GET"]),
         Route("/browse/{concept_id:path}", spa_shell, methods=["GET"]),
         Route("/ask", spa_shell, methods=["GET"]),

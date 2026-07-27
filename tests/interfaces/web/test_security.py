@@ -114,6 +114,24 @@ def test_protected_routes_require_a_browser_session(client: TestClient) -> None:
     assert client.get(f"/assets/{asset_name}").status_code == 403
 
 
+def test_root_spa_shell_requires_and_accepts_browser_session(
+    client: TestClient,
+) -> None:
+    assert client.get("/").status_code == 403
+    bootstrap = client.get(
+        "/bootstrap?token=correct-secret",
+        follow_redirects=False,
+    )
+    assert bootstrap.status_code == 303
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert '<div id="root"></div>' in response.text
+    assert '<script type="module"' in response.text
+
+
 def test_mutation_requires_exact_origin_and_csrf(
     authenticated_client: AuthenticatedClient,
 ) -> None:
