@@ -3,7 +3,7 @@
 
 import { Navigate, Route, Routes } from "react-router";
 
-import { RequestError } from "../components/RequestError";
+import { PageRequestError } from "../components/RequestError";
 import { AskPage } from "../features/ask/AskPage";
 import { BrowsePage } from "../features/browse/BrowsePage";
 import { ConceptPage } from "../features/browse/ConceptPage";
@@ -33,7 +33,10 @@ export function AppRoutes() {
 
 function DefaultRoute() {
   const workspace = useWorkspace();
-  if (workspace.error) return <RequestError error={workspace.error} />;
+  if (workspace.data === undefined && workspace.error)
+    return (
+      <PageRequestError title="Workspace unavailable" error={workspace.error} />
+    );
   if (workspace.data === undefined)
     return <p role="status">Loading workspace…</p>;
   return (

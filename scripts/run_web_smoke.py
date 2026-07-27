@@ -18,11 +18,16 @@ from pathlib import Path
 from typing import cast
 
 import uvicorn
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from bundlewalker.agents.common import AgentDependencies
 from bundlewalker.agents.ingest import AgentModel as IngestionAgentModel
 from bundlewalker.agents.query import AgentModel as QueryAgentModel
-from bundlewalker.application import ApplicationDependencies, WorkspaceApplication
+from bundlewalker.application import (
+    ApplicationDependencies,
+    SynthesisResult,
+    WorkspaceApplication,
+)
 from bundlewalker.domain import (
     ChangeOperation,
     ChangeSet,
@@ -33,6 +38,7 @@ from bundlewalker.domain import (
     OkfDocument,
     OkfMetadata,
 )
+from bundlewalker.interfaces.mcp import create_mcp_server
 from bundlewalker.interfaces.web.app import create_web_app
 from bundlewalker.interfaces.web.security import BrowserSessionStore
 from bundlewalker.interfaces.web.server import bind_loopback_socket
@@ -293,10 +299,15 @@ async def _refresh_runner(
 
 async def _prepare_mcp_review(root: Path) -> str:
     application = WorkspaceApplication(discover_workspace(root), _dependencies())
-    prepared = await application.prepare_synthesis(
-        "MCP handoff",
-        explicit_model=_SMOKE_MODEL,
-    )
+    server = create_mcp_server(application)
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool(
+            "prepare_synthesis",
+            {"question": "MCP handoff", "model": _SMOKE_MODEL},
+        )
+    if result.isError or result.structuredContent is None:
+        raise RuntimeError("MCP prepare_synthesis did not return a result")
+    prepared = SynthesisResult.model_validate(result.structuredContent)
     return prepared.review.review_id
 
 

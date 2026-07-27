@@ -14,7 +14,7 @@ import {
   useReview,
 } from "../../api/queries";
 import type { WebReviewResponse } from "../../api/types";
-import { RequestError } from "../../components/RequestError";
+import { PageRequestError, RequestError } from "../../components/RequestError";
 import { ReviewDiff } from "../../components/ReviewDiff";
 
 type Resolution = "apply" | "discard";
@@ -134,7 +134,9 @@ export function ReviewPage() {
   }
 
   if (reviewQuery.error && reconciliationError === null) {
-    return <RequestError error={reviewQuery.error} />;
+    return (
+      <PageRequestError title="Review unavailable" error={reviewQuery.error} />
+    );
   }
   if (review === undefined) return <p role="status">Loading review…</p>;
   if (review === null) {

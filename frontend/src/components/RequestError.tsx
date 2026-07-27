@@ -12,3 +12,18 @@ export function RequestError({ error }: { readonly error: unknown }) {
     </div>
   );
 }
+
+export function PageRequestError({
+  title,
+  error,
+}: {
+  readonly title: string;
+  readonly error: unknown;
+}) {
+  return (
+    <section>
+      <h1>{title}</h1>
+      <RequestError error={error} />
+    </section>
+  );
+}

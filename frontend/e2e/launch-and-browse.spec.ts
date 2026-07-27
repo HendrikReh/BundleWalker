@@ -26,6 +26,8 @@ test("exchanges the bootstrap secret and opens a clean Browse workbench", async 
       ),
     )
     .toBe(true);
+  await skipLink.click();
+  await expect(page.getByRole("main")).toBeFocused();
 
   await page.emulateMedia({ reducedMotion: "reduce" });
   const reducedDuration = await skipLink.evaluate((element) =>
@@ -39,6 +41,16 @@ test("exchanges the bootstrap secret and opens a clean Browse workbench", async 
       ({ impact }) => impact === "serious" || impact === "critical",
     ),
   ).toEqual([]);
+});
+
+test("focuses and titles a route-level error", async ({ page }) => {
+  await page.goto("/browse/topics/missing");
+
+  await expect(
+    page.getByRole("heading", { name: "Concept unavailable", level: 1 }),
+  ).toBeFocused({ timeout: 10_000 });
+  await expect(page).toHaveTitle("Concept unavailable · BundleWalker");
+  await expect(page.getByRole("alert")).toContainText("concept does not exist");
 });
 
 test("searches and reads one hierarchical concept", async ({ page }) => {

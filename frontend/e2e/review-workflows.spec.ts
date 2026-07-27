@@ -103,7 +103,7 @@ test("keeps synthesis and refresh result variants distinct", async ({
   await page.getByRole("button", { name: "Discard proposal" }).click();
 });
 
-test("discovers a review prepared through another application adapter", async ({
+test("opens a review prepared through MCP as the root default", async ({
   page,
 }) => {
   execFileSync(
@@ -117,8 +117,14 @@ test("discovers a review prepared through another application adapter", async ({
   );
 
   await page.reload();
-  await expect(page.getByRole("link", { name: "Review (1)" })).toBeVisible();
-  await page.getByRole("link", { name: "Review (1)" }).click();
+  await page.evaluate(() => {
+    window.history.pushState(null, "", "/");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page).toHaveURL(/\/review\/[0-9a-f]{32}$/);
+  await expect(
+    page.getByRole("heading", { name: "Review proposal", level: 1 }),
+  ).toBeFocused();
   await expect(
     page.getByText("Saved synthesis: MCP handoff", { exact: true }),
   ).toBeVisible();

@@ -10,7 +10,7 @@ import { queryKeys, useConcept, usePrepareRefresh } from "../../api/queries";
 import type { WebRefreshResponse } from "../../api/types";
 import { MarkdownContent } from "../../components/MarkdownContent";
 import { OperationProgress } from "../../components/OperationProgress";
-import { RequestError } from "../../components/RequestError";
+import { PageRequestError, RequestError } from "../../components/RequestError";
 import { isRefreshEligibleConcept } from "./refresh";
 
 const MAX_INSTRUCTION_CHARACTERS = 20_000;
@@ -75,7 +75,10 @@ export function RefreshPage() {
     );
   }
 
-  if (concept.error) return <RequestError error={concept.error} />;
+  if (concept.error)
+    return (
+      <PageRequestError title="Refresh unavailable" error={concept.error} />
+    );
   if (concept.data === undefined) return <p role="status">Loading concept…</p>;
   if (!isRefreshEligibleConcept(concept.data)) {
     return (

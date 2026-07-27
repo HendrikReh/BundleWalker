@@ -64,8 +64,12 @@ test("offers a skip link and focuses the single page heading after navigation", 
   expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
   const skipLink = screen.getByRole("link", { name: "Skip to main content" });
   expect(skipLink.getAttribute("href")).toBe("#main-content");
-  expect(document.querySelector("main")?.id).toBe("main-content");
+  const main = screen.getByRole("main");
+  expect(main.id).toBe("main-content");
   await waitFor(() => expect(document.activeElement).toBe(browseHeading));
+
+  await user.click(skipLink);
+  expect(document.activeElement).toBe(main);
 
   await user.click(screen.getByRole("link", { name: "Ask" }));
   const askHeading = await screen.findByRole("heading", {
@@ -77,6 +81,39 @@ test("offers a skip link and focuses the single page heading after navigation", 
     expect(document.activeElement).toBe(askHeading);
     expect(document.title).toBe("Ask · BundleWalker");
   });
+});
+
+test("focuses and titles a route-level concept error", async () => {
+  vi.mocked(fetch)
+    .mockResolvedValueOnce(jsonResponse(workspace))
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "concept_not_found",
+            message: "concept does not exist",
+            retryable: false,
+            review_id: null,
+            diagnostic_id: null,
+          },
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+  renderRoutes("/browse/topics/missing");
+
+  const heading = await screen.findByRole("heading", {
+    name: "Concept unavailable",
+    level: 1,
+  });
+  expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  await waitFor(() => {
+    expect(document.activeElement).toBe(heading);
+    expect(document.title).toBe("Concept unavailable · BundleWalker");
+  });
+  expect(screen.getByRole("alert").textContent).toContain(
+    "concept does not exist",
+  );
 });
 
 test("moves focus to an announced validation error", async () => {

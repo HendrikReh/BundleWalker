@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 import { Link, Outlet, useLocation } from "react-router";
 
 import { useWorkspace } from "../api/queries";
-import { RequestError } from "../components/RequestError";
+import { PageRequestError, RequestError } from "../components/RequestError";
 
 export function App() {
   const workspace = useWorkspace();
@@ -36,7 +36,14 @@ export function App() {
 
   return (
     <>
-      <a className="skip-link" href="#main-content">
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault();
+          mainRef.current?.focus();
+        }}
+      >
         Skip to main content
       </a>
       <div className="app-shell">
@@ -45,7 +52,9 @@ export function App() {
             <strong>BundleWalker</strong>
             {workspace.data ? <p>{workspace.data.display_name}</p> : null}
           </header>
-          {workspace.error ? <RequestError error={workspace.error} /> : null}
+          {workspace.data && workspace.error ? (
+            <RequestError error={workspace.error} />
+          ) : null}
           <nav aria-label="Explorer">
             <Link to="/browse">Browse</Link>
             <Link to="/ask">Ask</Link>
@@ -62,9 +71,14 @@ export function App() {
             <Link to="/ingest">New ingestion</Link>
           </nav>
         </aside>
-        <main id="main-content" ref={mainRef}>
+        <main id="main-content" ref={mainRef} tabIndex={-1}>
           {workspace.data ? (
             <Outlet />
+          ) : workspace.error ? (
+            <PageRequestError
+              title="Workspace unavailable"
+              error={workspace.error}
+            />
           ) : (
             <p role="status">Loading workspace…</p>
           )}
