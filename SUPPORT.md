@@ -9,14 +9,20 @@ Support is community-based and has no guaranteed response time or service-level 
 - Python 3.13 and 3.14 are supported when their required CI jobs pass.
 - Windows is experimental and may fail because some filesystem and locking behavior is
   POSIX-specific.
-- The supported product surface is the local CLI and workspace-bound MCP `stdio` server.
+- The supported product surface is the local CLI, workspace-bound MCP `stdio` server, and
+  explicitly launched local web review cockpit.
+- One web process serves one workspace on an ephemeral `127.0.0.1` port. Browse, Ask, lint,
+  paste/single-file ingestion preparation, synthesis, refresh, exact review, Apply, and Discard
+  are in scope.
+- Web sessions are local and single-user. Remote binding, accounts, multi-workspace operation,
+  daemon use, and browser-based workspace lifecycle administration are unsupported.
 - Current ingestion accepts one regular UTF-8 Markdown or text file at a time.
 - The reviewed local-workspace envelope is 1,000 knowledge documents, approximately 10 MiB of
   wiki content, and a 50,000-character ingestion source on four named macOS/Linux reference
   environments. It excludes remote-model latency and is not a promise for every machine or
   filesystem; see the [reviewed performance and capacity evidence](docs/performance-and-capacity.md).
 
-Hosted operation, remote MCP transport, multi-user synchronization, a web UI, embeddings, vector
+Hosted operation, remote MCP or web transport, multi-user synchronization, embeddings, vector
 databases, additional source formats, and automatic Git operations are outside the first beta.
 
 Use the [User Guide](docs/user-guide.md) for supported CLI/MCP operation and troubleshooting, and

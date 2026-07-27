@@ -752,6 +752,44 @@ def test_public_policy_documents_exist_and_are_linked() -> None:
     assert "no guaranteed response time" in support
 
 
+def test_active_documentation_publishes_the_standard_local_web_contract() -> None:
+    active_paths = (
+        "README.md",
+        "docs/user-guide.md",
+        "SUPPORT.md",
+        "CONTRIBUTING.md",
+        "CHANGELOG.md",
+    )
+    active = {
+        relative: (PROJECT_ROOT / relative).read_text(encoding="utf-8") for relative in active_paths
+    }
+
+    for relative in ("README.md", "docs/user-guide.md"):
+        document = active[relative]
+        for required in (
+            "pip install bundlewalker",
+            "bundlewalker-web",
+            "bundlewalker-web --workspace",
+            "127.0.0.1",
+            "one workspace",
+            "macOS and Linux",
+            "Windows is experimental",
+        ):
+            assert required in document
+
+    combined = "\n".join(active.values()).casefold()
+    for stale_claim in (
+        "local web ui is planned",
+        "web ui is not implemented",
+        "web application or hosted service to start",
+        "bundlewalker[web]",
+        "web extra",
+        "web optional extra",
+        "optional-extra",
+    ):
+        assert stale_claim not in combined
+
+
 def test_development_version_is_public_beta() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
