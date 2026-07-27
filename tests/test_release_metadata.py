@@ -782,12 +782,22 @@ def test_active_documentation_publishes_the_standard_local_web_contract() -> Non
         "local web ui is planned",
         "web ui is not implemented",
         "web application or hosted service to start",
+        "short-lived secret",
         "bundlewalker[web]",
         "web extra",
         "web optional extra",
         "optional-extra",
     ):
         assert stale_claim not in combined
+
+    unreleased = (
+        active["CHANGELOG.md"]
+        .split("## [Unreleased]", maxsplit=1)[1]
+        .split("\n## [", maxsplit=1)[0]
+    )
+    normalized_unreleased = " ".join(unreleased.split()).casefold()
+    assert "final release verification remains pending" in normalized_unreleased
+    assert re.search(r"not part of (?:the )?tagged `0\.4\.0`", normalized_unreleased)
 
 
 def test_development_version_is_public_beta() -> None:

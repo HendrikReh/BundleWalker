@@ -765,9 +765,10 @@ and Ctrl-C stops the server and invalidates every in-memory browser session.
 
 If the default browser cannot be opened, the terminal prints
 `Open this URL in your browser: ...`. Copy that complete URL into a browser on the same machine.
-Treat it as a short-lived secret: do not paste it into chat, logs, an issue, or another person's
-browser. A successful first visit exchanges the single-use bootstrap value for a non-persistent
-browser session and redirects to a clean URL.
+Treat it as a single-use secret scoped to the lifetime of that server process: until exchanged,
+it remains valid for as long as the process runs. Do not paste it into chat, logs, an issue, or
+another person's browser. A successful first visit exchanges the bootstrap value for a
+non-persistent browser session and redirects to a clean URL.
 
 ### Browse, ask, lint, and prepare work
 
