@@ -15,6 +15,11 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FULL_SHA = re.compile(r"^[^@]+@[0-9a-f]{40}$")
+NODE_VERSION = "22.22.3"
+WEB_RESOURCE_SMOKE = (
+    "from importlib.resources import files; "
+    "assert files('bundlewalker.interfaces.web').joinpath('static/index.html').is_file()"
+)
 
 
 def _yaml(relative: str) -> dict[str, Any]:
@@ -45,6 +50,39 @@ def _assert_actions_are_sha_pinned(workflow: dict[str, Any]) -> None:
         for step in job.get("steps", []):
             if uses := step.get("uses"):
                 assert FULL_SHA.fullmatch(uses), uses
+
+
+def _assert_exact_node_setup(workflow: dict[str, Any], job: str) -> None:
+    setup = next(
+        step
+        for step in _steps(workflow, job)
+        if step.get("uses", "").startswith("actions/setup-node@")
+    )
+    assert FULL_SHA.fullmatch(setup["uses"])
+    assert setup["with"] == {
+        "node-version": NODE_VERSION,
+        "cache": "npm",
+        "cache-dependency-path": "frontend/package-lock.json",
+    }
+
+
+def _assert_frontend_build_gate(workflow: dict[str, Any], job: str) -> None:
+    commands = _run_commands(workflow, job)
+    for required in (
+        "npm ci",
+        "npm run build",
+        "npm audit --audit-level=high",
+        "uv run python scripts/generate_web_contract_fixtures.py",
+        "git diff --exit-code -- src/bundlewalker/interfaces/web/static",
+    ):
+        assert required in commands
+    _assert_exact_node_setup(workflow, job)
+
+
+def _assert_archives_require_hashed_assets(workflow: dict[str, Any], job: str) -> None:
+    commands = _run_commands(workflow, job)
+    assert "re.fullmatch" in commands
+    assert "[A-Za-z0-9_-]{8,}" in commands
 
 
 def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
@@ -90,6 +128,7 @@ def test_ci_has_required_supported_matrix_and_experimental_windows() -> None:
     assert required["if"] == "always()"
     assert required["needs"] == [
         "supported",
+        "frontend",
         "build",
         "artifact-smoke",
         "sdist-smoke",
@@ -133,10 +172,15 @@ def test_normal_ci_runs_benchmark_correctness_without_timing_assertions() -> Non
 def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
     workflow = _yaml(".github/workflows/ci.yml")
 
-    assert workflow["jobs"]["build"]["needs"] == ["supported"]
+    assert workflow["jobs"]["build"]["needs"] == ["supported", "frontend"]
     build_commands = _run_commands(workflow, "build")
     assert "uv build --clear --no-sources" in build_commands
     assert "uv run twine check dist/*" in build_commands
+    assert "static/index.html" in build_commands
+    assert "static/.vite/manifest.json" in build_commands
+    assert "static/assets/" in build_commands
+    _assert_frontend_build_gate(workflow, "build")
+    _assert_archives_require_hashed_assets(workflow, "build")
 
     artifact_smoke = workflow["jobs"]["artifact-smoke"]
     assert artifact_smoke["needs"] == ["build"]
@@ -144,15 +188,48 @@ def test_ci_builds_once_and_smoke_tests_both_distribution_formats() -> None:
         "os": ["ubuntu-24.04", "macos-15"],
         "python-version": ["3.13", "3.14"],
     }
-    assert "dist/*.whl" in _run_commands(workflow, "artifact-smoke")
+    artifact_commands = _run_commands(workflow, "artifact-smoke")
+    assert "dist/*.whl" in artifact_commands
+    assert "bundlewalker-web --help" in artifact_commands
+    assert WEB_RESOURCE_SMOKE in artifact_commands
+    assert "bundlewalker[web]" not in artifact_commands
 
     sdist_smoke = workflow["jobs"]["sdist-smoke"]
     assert sdist_smoke["needs"] == ["build"]
-    assert "dist/*.tar.gz" in _run_commands(workflow, "sdist-smoke")
+    assert sdist_smoke["strategy"]["matrix"] == {
+        "os": ["ubuntu-24.04", "macos-15"],
+        "python-version": ["3.13", "3.14"],
+    }
+    sdist_commands = _run_commands(workflow, "sdist-smoke")
+    assert "dist/*.tar.gz" in sdist_commands
+    assert "${{ matrix.python-version }}" in sdist_commands
+    assert "bundlewalker-web --help" in sdist_commands
+    assert WEB_RESOURCE_SMOKE in sdist_commands
+    assert "bundlewalker[web]" not in sdist_commands
 
     required_needs = workflow["jobs"]["required"]["needs"]
     for dependency in ("supported", "build", "artifact-smoke", "sdist-smoke"):
         assert dependency in required_needs
+    _assert_actions_are_sha_pinned(workflow)
+
+
+def test_ci_requires_reproducible_frontend_and_real_browser_smoke() -> None:
+    workflow = _yaml(".github/workflows/ci.yml")
+
+    frontend = workflow["jobs"]["frontend"]
+    assert frontend["runs-on"] == "ubuntu-24.04"
+    _assert_frontend_build_gate(workflow, "frontend")
+    commands = _run_commands(workflow, "frontend")
+    for required in ("npm run format:check", "npm run lint", "npm run test"):
+        assert required in commands
+    assert "npx playwright install --with-deps chromium" in commands
+    assert (
+        "uv run python scripts/run_web_smoke.py -- npm --prefix frontend run test:e2e" in commands
+    )
+
+    required = workflow["jobs"]["required"]
+    assert "frontend" in required["needs"]
+    assert 'test "${{ needs.frontend.result }}" = "success"' in _run_commands(workflow, "required")
     _assert_actions_are_sha_pinned(workflow)
 
 
@@ -201,6 +278,7 @@ def test_ci_requires_dependency_audit() -> None:
     )
     assert workflow["jobs"]["required"]["needs"] == [
         "supported",
+        "frontend",
         "build",
         "artifact-smoke",
         "sdist-smoke",
@@ -288,6 +366,13 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     assert workflow["jobs"]["verify"]["needs"] == ["publish"]
     verify_commands = _run_commands(workflow, "verify")
     assert "--no-deps --default-index https://test.pypi.org/simple" in verify_commands
+    assert "bundlewalker-web --help" in verify_commands
+    assert WEB_RESOURCE_SMOKE in verify_commands
+    _assert_frontend_build_gate(workflow, "build")
+    assert "static/index.html" in build_commands
+    assert "static/.vite/manifest.json" in build_commands
+    assert "static/assets/" in build_commands
+    _assert_archives_require_hashed_assets(workflow, "build")
     _assert_actions_are_sha_pinned(workflow)
 
 
@@ -487,9 +572,16 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
         'uv run twine check "${artifacts[@]}"',
         "bundlewalker --help",
         "bundlewalker-mcp --help",
+        "bundlewalker-web --help",
+        WEB_RESOURCE_SMOKE,
         "sha256sum",
     ):
         assert required in build_commands
+    _assert_frontend_build_gate(workflow, "build")
+    assert "static/index.html" in build_commands
+    assert "static/.vite/manifest.json" in build_commands
+    assert "static/assets/" in build_commands
+    _assert_archives_require_hashed_assets(workflow, "build")
     assert "persist-credentials" in str(_steps(workflow, "build")[0])
     assert _steps(workflow, "build")[0]["with"]["persist-credentials"] == "false"
 

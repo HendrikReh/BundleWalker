@@ -33,6 +33,12 @@ jobs:
           test -n "$tag_oid"
           test -n "$peeled_oid"
           test "$peeled_oid" = "$GITHUB_SHA"
+      - name: Install exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.3"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
@@ -42,6 +48,21 @@ jobs:
           cache-suffix: publish-pypi
       - name: Synchronize locked environment
         run: uv sync --locked
+      - name: Install locked browser dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Regenerate canonical web contracts
+        run: uv run python scripts/generate_web_contract_fixtures.py
+      - name: Build reviewed browser assets
+        run: npm run build
+        working-directory: frontend
+      - name: Require reproducible contracts and assets
+        run: |
+          git diff --exit-code -- frontend/src/test/fixtures/contracts.json
+          git diff --exit-code -- src/bundlewalker/interfaces/web/static
+      - name: Audit production browser dependencies
+        run: npm audit --audit-level=high
+        working-directory: frontend
       - name: Validate release identity
         id: identity
         shell: bash
@@ -74,6 +95,34 @@ jobs:
           test -f "dist/bundlewalker-${{ steps.identity.outputs.version }}.tar.gz"
           uv run twine check "${artifacts[@]}"
           sha256sum "${artifacts[@]}"
+      - name: Validate packaged browser assets
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import re
+          import tarfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          def require_web_assets(names: list[str]) -> None:
+              assert any(name.endswith("static/index.html") for name in names)
+              assert any(name.endswith("static/.vite/manifest.json") for name in names)
+              assets = [
+                  PurePosixPath(name).name for name in names if "/static/assets/" in name
+              ]
+              assert assets
+              assert all(
+                  re.fullmatch(r".+-[A-Za-z0-9_-]{8,}\.(?:css|js)", asset)
+                  for asset in assets
+              )
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              require_web_assets(archive.namelist())
+          sdist = next(Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist, "r:gz") as archive:
+              require_web_assets(archive.getnames())
+          PY
       - name: Install and smoke-test built wheel
         shell: bash
         run: |
@@ -82,6 +131,8 @@ jobs:
           test "$(.release-venv/bin/python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = "${{ steps.identity.outputs.version }}"
           .release-venv/bin/bundlewalker --help
           .release-venv/bin/bundlewalker-mcp --help
+          .release-venv/bin/bundlewalker-web --help
+          .release-venv/bin/python -c "from importlib.resources import files; assert files('bundlewalker.interfaces.web').joinpath('static/index.html').is_file()"
       - name: Upload exact distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -154,6 +205,8 @@ jobs:
           uv pip install --python .pypi-venv/bin/python dist/*.whl
           .pypi-venv/bin/bundlewalker --help
           .pypi-venv/bin/bundlewalker-mcp --help
+          .pypi-venv/bin/bundlewalker-web --help
+          .pypi-venv/bin/python -c "from importlib.resources import files; assert files('bundlewalker.interfaces.web').joinpath('static/index.html').is_file()"
           uv pip uninstall --python .pypi-venv/bin/python bundlewalker
           retry_delays=(5 10 20 40 80)
           for attempt in 1 2 3 4 5 6; do
@@ -171,6 +224,8 @@ jobs:
           test "$(.pypi-venv/bin/python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = "$version"
           .pypi-venv/bin/bundlewalker --help
           .pypi-venv/bin/bundlewalker-mcp --help
+          .pypi-venv/bin/bundlewalker-web --help
+          .pypi-venv/bin/python -c "from importlib.resources import files; assert files('bundlewalker.interfaces.web').joinpath('static/index.html').is_file()"
 
   github-release:
     name: Create GitHub release from exact distributions

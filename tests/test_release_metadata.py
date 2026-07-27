@@ -4,6 +4,7 @@
 import hashlib
 import importlib.metadata
 import importlib.util
+import json
 import re
 import shlex
 import shutil
@@ -48,7 +49,12 @@ REVIEWED_EVIDENCE_SHA256 = {
 }
 
 LICENSE_EXPRESSION = "GPL-3.0-or-later AND CC0-1.0"
-LICENSE_FILES = ["LICENSE", "LICENSES/CC0-1.0.txt", "LICENSE-SCOPE.md"]
+LICENSE_FILES = [
+    "LICENSE",
+    "LICENSES/CC0-1.0.txt",
+    "LICENSE-SCOPE.md",
+    "THIRD_PARTY_NOTICES.md",
+]
 OFFICIAL_LICENSE_SHA256 = {
     "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
     "LICENSES/CC0-1.0.txt": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499",
@@ -571,6 +577,36 @@ def test_license_metadata_and_files_are_declared() -> None:
     assert all((PROJECT_ROOT / relative).is_file() for relative in LICENSE_FILES)
 
 
+def test_browser_dependency_notices_cover_locked_production_packages() -> None:
+    lock = json.loads((PROJECT_ROOT / "frontend/package-lock.json").read_text(encoding="utf-8"))
+    notices = (PROJECT_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    packages = lock["packages"]
+
+    direct_dependencies = {
+        "@tanstack/react-query",
+        "react",
+        "react-dom",
+        "react-markdown",
+        "react-router",
+        "remark-gfm",
+    }
+    assert set(packages[""]["dependencies"]) == direct_dependencies
+    assert "| `react-router-dom` |" not in notices
+
+    production_inventory: set[tuple[str, str, str]] = set()
+    for package_path, metadata in packages.items():
+        if not package_path.startswith("node_modules/") or metadata.get("dev") is True:
+            continue
+        package_name = package_path.rsplit("node_modules/", maxsplit=1)[1]
+        production_inventory.add((package_name, metadata["version"], metadata["license"]))
+
+    assert production_inventory
+    for package_name, version, license_name in production_inventory:
+        assert f"| `{package_name}` | `{version}` | {license_name} |" in notices
+    assert "## MIT License" in notices
+    assert "## ISC License" in notices
+
+
 def test_official_license_texts_are_unmodified() -> None:
     for relative, expected_digest in OFFICIAL_LICENSE_SHA256.items():
         content = (PROJECT_ROOT / relative).read_bytes()
@@ -669,11 +705,34 @@ def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
     unpacked = tmp_path / "wheel"
     shutil.unpack_archive(wheel, unpacked, "zip")
     assert not (unpacked / "benchmarks").exists()
+    static = unpacked / "bundlewalker/interfaces/web/static"
+    assert (static / "index.html").is_file()
+    assert (static / ".vite/manifest.json").is_file()
+    wheel_assets = [path.name for path in (static / "assets").iterdir()]
+    assert wheel_assets
+    assert all(re.fullmatch(r".+-[A-Za-z0-9_-]{8,}\.(?:css|js)", asset) for asset in wheel_assets)
+    assert any(unpacked.rglob("THIRD_PARTY_NOTICES.md"))
     sdist = next(tmp_path.glob("*.tar.gz"))
     with tarfile.open(sdist, "r:gz") as archive:
-        assert not any(
-            PurePosixPath(name).parts[1:2] == ("benchmarks",) for name in archive.getnames()
+        names = archive.getnames()
+        assert not any(PurePosixPath(name).parts[1:2] == ("benchmarks",) for name in names)
+        assert any(
+            name.endswith("/src/bundlewalker/interfaces/web/static/index.html") for name in names
         )
+        assert any(
+            name.endswith("/src/bundlewalker/interfaces/web/static/.vite/manifest.json")
+            for name in names
+        )
+        sdist_assets = [
+            PurePosixPath(name).name
+            for name in names
+            if "/src/bundlewalker/interfaces/web/static/assets/" in name
+        ]
+        assert sdist_assets
+        assert all(
+            re.fullmatch(r".+-[A-Za-z0-9_-]{8,}\.(?:css|js)", asset) for asset in sdist_assets
+        )
+        assert any(name.endswith("/THIRD_PARTY_NOTICES.md") for name in names)
 
 
 def test_public_policy_documents_exist_and_are_linked() -> None:
