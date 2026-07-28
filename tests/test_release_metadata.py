@@ -803,6 +803,7 @@ def test_active_documentation_publishes_the_standard_local_web_contract() -> Non
     assert "dependency audit" in normalized_unreleased
     assert "distribution build and packaged-asset validation" in normalized_unreleased
     assert "all eight clean wheel/sdist install smokes" in normalized_unreleased
+    assert "the separate codeql analysis also passed" in normalized_unreleased
     assert "the gui remains unreleased" in normalized_unreleased
     assert "final release verification remains pending" not in normalized_unreleased
     assert re.search(r"not part of (?:the )?tagged `0\.4\.0`", normalized_unreleased)
