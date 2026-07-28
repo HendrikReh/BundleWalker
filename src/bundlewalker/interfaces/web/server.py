@@ -19,6 +19,7 @@ from starlette.applications import Starlette
 from bundlewalker.application import ApplicationError, WorkspaceApplication, translate_error
 from bundlewalker.errors import BundleWalkerError
 from bundlewalker.interfaces.web.app import create_web_app
+from bundlewalker.interfaces.web.assets import validate_web_assets
 from bundlewalker.interfaces.web.security import BrowserSessionStore
 from bundlewalker.workspace import discover_workspace
 
@@ -58,6 +59,7 @@ async def serve_web(
     """Discover one workspace and serve it through one local browser session."""
     workspace = discover_workspace(workspace_path)
     application = WorkspaceApplication(workspace)
+    web_assets = validate_web_assets()
     listener = bind_loopback_socket()
     sessions: BrowserSessionStore | None = None
     try:
@@ -69,6 +71,7 @@ async def serve_web(
             application,
             expected_host=expected_host,
             sessions=sessions,
+            web_assets=web_assets,
         )
         server = (server_factory or _create_uvicorn_server)(app)
         bootstrap_url = f"http://{expected_host}/bootstrap?token={bootstrap_secret}"

@@ -5,11 +5,11 @@
 
 from collections.abc import Mapping
 from importlib.resources import files
-from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
-import pytest
 from httpx2 import Response
+from starlette.requests import Request
+from starlette.routing import Route
 from starlette.testclient import TestClient
 from starlette.types import Message, Receive, Scope, Send
 
@@ -262,23 +262,18 @@ def test_responses_include_browser_security_headers(client: TestClient) -> None:
 
 def test_unexpected_error_response_includes_browser_security_headers(
     application: WorkspaceApplication,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    static_dir = tmp_path / "static"
-    static_dir.mkdir()
-    (static_dir / "index.html").write_text("shell", encoding="utf-8")
     sessions = BrowserSessionStore("correct-secret")
     app = create_web_app(
         application,
         expected_host=EXPECTED_HOST,
         sessions=sessions,
-        static_dir=static_dir,
     )
 
-    def fail_read_bytes(_: Path) -> bytes:
-        raise OSError("simulated asset read failure")
+    async def fail_request(_: Request) -> NoReturn:
+        raise OSError("simulated request failure")
 
+    app.router.routes.insert(0, Route("/unexpected", fail_request))
     with TestClient(
         app,
         base_url=f"http://{EXPECTED_HOST}",
@@ -289,8 +284,7 @@ def test_unexpected_error_response_includes_browser_security_headers(
             follow_redirects=False,
         )
         assert bootstrap.status_code == 303
-        monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
-        response = test_client.get("/browse")
+        response = test_client.get("/unexpected")
 
     assert response.status_code == 500
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]

@@ -4,9 +4,7 @@
 """Secured Starlette shell for the local BundleWalker web interface."""
 
 import mimetypes
-import re
 import secrets
-from importlib.resources import files
 from importlib.resources.abc import Traversable
 from typing import Final
 
@@ -19,15 +17,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from bundlewalker.application import WorkspaceApplication
 from bundlewalker.interfaces.web.api import create_api_routes
+from bundlewalker.interfaces.web.assets import ValidatedWebAssets, validate_web_assets
 from bundlewalker.interfaces.web.contracts import MAX_WEB_REQUEST_BYTES
 from bundlewalker.interfaces.web.errors import unexpected_exception_handler
 from bundlewalker.interfaces.web.security import BrowserSessionStore
 
 SESSION_COOKIE_NAME: Final = "bundlewalker_session"
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_HASHED_ASSET = re.compile(
-    r"^[A-Za-z0-9_.]+-[A-Za-z0-9_-]{8,}\.(?:css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$"
-)
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "base-uri 'none'; "
@@ -43,9 +39,12 @@ def create_web_app(
     expected_host: str,
     sessions: BrowserSessionStore,
     static_dir: Traversable | None = None,
+    web_assets: ValidatedWebAssets | None = None,
 ) -> Starlette:
     """Create one authenticated local web application."""
-    packaged_static = static_dir or files("bundlewalker.interfaces.web").joinpath("static")
+    if static_dir is not None and web_assets is not None:
+        raise ValueError("static_dir and web_assets are mutually exclusive")
+    packaged_assets = web_assets if web_assets is not None else validate_web_assets(static_dir)
 
     async def bootstrap(request: Request) -> Response:
         session = sessions.exchange(request.query_params.get("token", ""))
@@ -63,23 +62,20 @@ def create_web_app(
 
     async def asset(request: Request) -> Response:
         asset_path = request.path_params["asset_path"]
-        if not isinstance(asset_path, str) or _HASHED_ASSET.fullmatch(asset_path) is None:
+        if not isinstance(asset_path, str):
             return PlainTextResponse("Not Found", status_code=404)
-        candidate = packaged_static.joinpath("assets", asset_path)
-        if not candidate.is_file():
+        content = packaged_assets.files.get(asset_path)
+        if content is None:
             return PlainTextResponse("Not Found", status_code=404)
         media_type, _ = mimetypes.guess_type(asset_path)
         return Response(
-            candidate.read_bytes(),
+            content,
             media_type=media_type or "application/octet-stream",
             headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
     async def spa_shell(_: Request) -> Response:
-        index = packaged_static.joinpath("index.html")
-        if not index.is_file():
-            return PlainTextResponse("Web interface assets are unavailable", status_code=500)
-        return Response(index.read_bytes(), media_type="text/html")
+        return Response(packaged_assets.index_html, media_type="text/html")
 
     async def internal_error(request: Request, error: Exception) -> Response:
         response = await unexpected_exception_handler(request, error)

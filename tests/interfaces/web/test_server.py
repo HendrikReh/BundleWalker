@@ -11,6 +11,7 @@ from socket import create_connection, socket
 import pytest
 from starlette.applications import Starlette
 
+from bundlewalker.application import ApplicationError, ApplicationErrorCode
 from bundlewalker.interfaces.web import server as server_module
 from bundlewalker.interfaces.web.security import BrowserSessionStore
 from bundlewalker.interfaces.web.server import bind_loopback_socket, main, serve_web
@@ -165,6 +166,45 @@ async def test_startup_secret_failure_closes_bound_listener(
     assert listener.fileno() == -1
 
 
+async def test_invalid_assets_fail_before_binding_or_opening_or_serving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    events: list[str] = []
+
+    def reject_assets() -> None:
+        events.append("validate")
+        raise ApplicationError(
+            ApplicationErrorCode.CONFIGURATION_ERROR,
+            "web interface assets are unavailable",
+        )
+
+    def unexpected_bind() -> socket:
+        events.append("bind")
+        raise AssertionError("listener must not be bound")
+
+    def unexpected_open(_: str) -> bool:
+        events.append("open")
+        raise AssertionError("browser must not be opened")
+
+    def unexpected_server(_: Starlette) -> FakeServer:
+        events.append("server")
+        raise AssertionError("server must not be created")
+
+    monkeypatch.setattr(server_module, "validate_web_assets", reject_assets, raising=False)
+    monkeypatch.setattr(server_module, "bind_loopback_socket", unexpected_bind)
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        await serve_web(
+            workspace.root,
+            browser_opener=unexpected_open,
+            server_factory=unexpected_server,
+        )
+
+    assert events == ["validate"]
+
+
 def test_main_prints_only_bounded_workspace_error(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -174,3 +214,35 @@ def test_main_prints_only_bounded_workspace_error(
 
     assert raised.value.code == 1
     assert capsys.readouterr().err == "Error: workspace operation failed\n"
+
+
+def test_main_prints_only_bounded_web_asset_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    private_path = tmp_path / "private" / "manifest.json"
+
+    def reject_assets() -> None:
+        try:
+            raise OSError(f"could not read {private_path}")
+        except OSError as error:
+            raise ApplicationError(
+                ApplicationErrorCode.CONFIGURATION_ERROR,
+                "web interface assets are unavailable",
+            ) from error
+
+    def unexpected_bind() -> socket:
+        raise AssertionError("listener must not be bound")
+
+    monkeypatch.setattr(server_module, "validate_web_assets", reject_assets)
+    monkeypatch.setattr(server_module, "bind_loopback_socket", unexpected_bind)
+
+    with pytest.raises(SystemExit) as raised:
+        main(["--workspace", str(workspace.root)])
+
+    assert raised.value.code == 1
+    error_output = capsys.readouterr().err
+    assert error_output == "Error: web interface assets are unavailable\n"
+    assert str(private_path) not in error_output
