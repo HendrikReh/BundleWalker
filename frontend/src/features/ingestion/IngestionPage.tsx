@@ -4,9 +4,9 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 
-import { queryKeys, usePrepareIngestion } from "../../api/queries";
+import { apiClient, queryKeys, usePrepareIngestion } from "../../api/queries";
 import type { WebIngestionResponse } from "../../api/types";
 import { OperationProgress } from "../../components/OperationProgress";
 import { RequestError } from "../../components/RequestError";
@@ -25,6 +25,10 @@ export function IngestionPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [model, setModel] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [prepared, setPrepared] = useState<WebIngestionResponse | null>(null);
+  const [reconciliation, setReconciliation] = useState<
+    "idle" | "loading" | "failed"
+  >("idle");
   const validationErrorRef = useRef<HTMLParagraphElement>(null);
   const prepare = usePrepareIngestion();
   const queryClient = useQueryClient();
@@ -53,7 +57,7 @@ export function IngestionPage() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (prepare.isPending) return;
+    if (prepare.isPending || prepared?.status === "pending") return;
     setValidationError(null);
 
     let activeName = sourceName;
@@ -69,7 +73,21 @@ export function IngestionPage() {
         setValidationError(fileError);
         return;
       }
-      activeContent = await selectedFile.text();
+      let fileBytes: ArrayBuffer;
+      try {
+        fileBytes = await selectedFile.arrayBuffer();
+      } catch {
+        setValidationError("The selected file could not be read.");
+        return;
+      }
+      try {
+        activeContent = new TextDecoder("utf-8", { fatal: true }).decode(
+          fileBytes,
+        );
+      } catch {
+        setValidationError("The selected file is not valid UTF-8.");
+        return;
+      }
     }
 
     const inputError = validateSource(activeName, activeContent);
@@ -89,8 +107,43 @@ export function IngestionPage() {
       return;
     }
     if (result.status === "pending") {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.workspace });
-      navigate(`/review/${result.review.review_id}`);
+      setPrepared(result);
+      setReconciliation("loading");
+      try {
+        await Promise.all([
+          queryClient.invalidateQueries(
+            { queryKey: queryKeys.workspace, refetchType: "none" },
+            { throwOnError: true },
+          ),
+          queryClient.invalidateQueries(
+            { queryKey: queryKeys.review, refetchType: "none" },
+            { throwOnError: true },
+          ),
+        ]);
+        const [freshWorkspace, freshReview] = await Promise.all([
+          queryClient.fetchQuery({
+            queryKey: queryKeys.workspace,
+            queryFn: () => apiClient.workspace(),
+            staleTime: 0,
+          }),
+          queryClient.fetchQuery({
+            queryKey: queryKeys.review,
+            queryFn: () => apiClient.review(),
+            staleTime: 0,
+          }),
+        ]);
+        if (
+          freshWorkspace.pending_review?.review_id !==
+            result.review.review_id ||
+          freshReview?.review_id !== result.review.review_id
+        ) {
+          setReconciliation("failed");
+          return;
+        }
+        navigate(`/review/${result.review.review_id}`);
+      } catch {
+        setReconciliation("failed");
+      }
     }
   }
 
@@ -103,9 +156,16 @@ export function IngestionPage() {
     ? "Preparing ingestion…"
     : prepare.isError
       ? "Ingestion preparation failed"
-      : prepare.data?.status === "duplicate"
-        ? "No changes prepared"
-        : "";
+      : reconciliation === "loading"
+        ? "Ingestion proposal ready; refreshing workspace and review status…"
+        : prepare.data?.status === "duplicate"
+          ? "No changes prepared"
+          : "";
+
+  const reconciliationWarning =
+    reconciliation === "failed"
+      ? "Ingestion preparation succeeded, but workspace and review status could not refresh. The proposal remains ready for review."
+      : "";
 
   return (
     <section className="knowledge-workbench ingestion-workbench">
@@ -204,12 +264,25 @@ export function IngestionPage() {
             setModel(event.currentTarget.value);
           }}
         />
-        <button type="submit" disabled={prepare.isPending}>
+        <button
+          type="submit"
+          disabled={prepare.isPending || prepared?.status === "pending"}
+        >
           Prepare ingestion
         </button>
       </form>
 
-      <OperationProgress message={status} />
+      {reconciliationWarning ? (
+        <p
+          aria-label="Ingestion reconciliation warning"
+          aria-live="polite"
+          role="status"
+        >
+          {reconciliationWarning}
+        </p>
+      ) : (
+        <OperationProgress message={status} />
+      )}
       {validationError ? (
         <p ref={validationErrorRef} role="alert" tabIndex={-1}>
           {validationError}
@@ -218,6 +291,16 @@ export function IngestionPage() {
       {prepare.error ? <RequestError error={prepare.error} /> : null}
       {prepare.data?.status === "duplicate" ? (
         <p>This source is already in the knowledge base.</p>
+      ) : null}
+      {prepared?.status === "pending" && reconciliation === "failed" ? (
+        <>
+          <p>{prepared.review.summary}</p>
+          <p>
+            <Link to={`/review/${prepared.review.review_id}`}>
+              Review the ingestion proposal
+            </Link>
+          </p>
+        </>
       ) : null}
     </section>
   );
