@@ -30,6 +30,11 @@ export function BrowsePage() {
         .slice(0, MAX_CONCEPT_TYPE_OPTIONS),
     [workspace.data?.concept_counts],
   );
+  const availableConceptType = conceptTypes.some(
+    ([type]) => type === conceptType,
+  )
+    ? conceptType
+    : "";
   const concepts = useMemo(() => {
     const source = isSearch
       ? search.data?.items
@@ -53,7 +58,7 @@ export function BrowsePage() {
           event.preventDefault();
           const query = input.trim();
           setSubmittedQuery(query);
-          setSubmittedType(query.length > 0 ? conceptType : "");
+          setSubmittedType(query.length > 0 ? availableConceptType : "");
         }}
       >
         <label>
@@ -67,7 +72,7 @@ export function BrowsePage() {
         <label>
           Concept type (search only)
           <select
-            value={conceptType}
+            value={availableConceptType}
             onChange={(event) => setConceptType(event.target.value)}
           >
             <option value="">All types</option>

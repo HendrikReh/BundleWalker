@@ -332,3 +332,57 @@ test("does not render empty nested groups when an origin has no findings", async
     0,
   );
 });
+
+test("keeps null workspace scope distinct from a literal workspace path", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse(workspace))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          deterministic_has_errors: true,
+          findings: [
+            {
+              origin: "deterministic",
+              severity: "error",
+              code: "ROOT-SCOPE",
+              message: "Workspace metadata is invalid.",
+              path: null,
+              evidence_paths: [],
+              remediation: null,
+            },
+            {
+              origin: "deterministic",
+              severity: "error",
+              code: "LITERAL-PATH",
+              message: "The workspace concept is invalid.",
+              path: "workspace",
+              evidence_paths: [],
+              remediation: null,
+            },
+          ],
+        }),
+      );
+    const user = userEvent.setup();
+    renderLint();
+
+    await user.click(await screen.findByRole("button", { name: "Run lint" }));
+
+    const errors = await screen.findByRole("region", { name: "Errors" });
+    const rootScope = within(errors).getByRole("region", {
+      name: "Concept: Workspace",
+    });
+    const literalPath = within(errors).getByRole("region", {
+      name: "Concept: workspace",
+    });
+    expect(rootScope.textContent).toContain("ROOT-SCOPE");
+    expect(rootScope.textContent).not.toContain("LITERAL-PATH");
+    expect(literalPath.textContent).toContain("LITERAL-PATH");
+    expect(literalPath.textContent).not.toContain("ROOT-SCOPE");
+    expect(consoleError.mock.calls.flat().map(String).join(" ")).not.toContain(
+      "same key",
+    );
+  } finally {
+    consoleError.mockRestore();
+  }
+});

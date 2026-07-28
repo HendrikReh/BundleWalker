@@ -150,7 +150,11 @@ function FindingGroup({
                 const conceptId = `${severityId}-concept-${conceptIndex}`;
                 return (
                   <section
-                    key={concept.path ?? "workspace"}
+                    key={
+                      concept.path === null
+                        ? "scope:workspace"
+                        : `path:${concept.path}`
+                    }
                     aria-labelledby={conceptId}
                   >
                     <h4 id={conceptId}>

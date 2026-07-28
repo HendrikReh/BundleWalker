@@ -8,6 +8,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { AppRoutes } from "../../app/routes";
+import { queryKeys } from "../../api/queries";
 import { MarkdownContent } from "../../components/MarkdownContent";
 
 const workspaceWithoutReview = {
@@ -66,13 +67,14 @@ function renderRoutes(initialEntry = "/browse") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <AppRoutes />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...result, queryClient };
 }
 
 beforeEach(() => {
@@ -200,6 +202,64 @@ test("submits the selected concept type only with an explicit lexical search", a
     "/api/v1/concepts/search?query=tools&type=Entity",
     "/api/v1/concepts/search?query=tools&type=Topic",
   ]);
+});
+
+test("clears a drafted type removed by authoritative workspace refresh", async () => {
+  vi.mocked(fetch)
+    .mockResolvedValueOnce(
+      jsonResponse({
+        ...workspaceWithoutReview,
+        concept_counts: { Entity: 1, Topic: 1 },
+      }),
+    )
+    .mockResolvedValueOnce(jsonResponse({ items: [], next_cursor: null }))
+    .mockResolvedValueOnce(
+      jsonResponse({
+        ...workspaceWithoutReview,
+        config_version: 2,
+        concept_counts: { Topic: 1 },
+      }),
+    )
+    .mockResolvedValueOnce(jsonResponse({ items: [] }));
+  const user = userEvent.setup();
+  const { queryClient } = renderRoutes();
+
+  const type = await screen.findByRole("combobox", {
+    name: "Concept type (search only)",
+  });
+  await user.selectOptions(type, "Entity");
+  expect((type as HTMLSelectElement).value).toBe("Entity");
+
+  await queryClient.refetchQueries({
+    queryKey: queryKeys.workspace,
+    exact: true,
+  });
+
+  await waitFor(() => {
+    expect((type as HTMLSelectElement).value).toBe("");
+  });
+  expect(
+    [...type.querySelectorAll("option")].map((option) => option.textContent),
+  ).toEqual(["All types", "Topic (1)"]);
+
+  await user.type(
+    screen.getByRole("searchbox", { name: "Search concepts" }),
+    "agents",
+  );
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  await screen.findByText("No concepts match your search.");
+
+  const searchCalls = vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => String(url).includes("/concepts/search"));
+  expect(searchCalls.map(([url]) => String(url))).toEqual([
+    "/api/v1/concepts/search?query=agents",
+  ]);
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url) === "/api/v1/workspace"),
+  ).toHaveLength(2);
 });
 
 test("announces the initial concept page while it is loading", async () => {
