@@ -5,9 +5,8 @@
 
 import re
 import unicodedata
-from pathlib import PurePosixPath
 from typing import Annotated, Final, Literal, Self
-from urllib.parse import unquote_to_bytes
+from urllib.parse import unquote_to_bytes, urlsplit
 
 from pydantic import (
     AwareDatetime,
@@ -51,7 +50,7 @@ MAX_WEB_SOURCE_BYTES: Final = 4_000_000
 MAX_WEB_REQUEST_BYTES: Final = 4_100_000
 MAX_WEB_MODEL_NAME_CHARACTERS: Final = 255
 _REVIEW_ID_PATTERN = r"^[0-9a-f]{32}$"
-_WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 _WINDOWS_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
 _WINDOWS_UNC_PATH_TEXT = re.compile(r"(?<![\\A-Za-z0-9])\\\\[^\\\s]+\\[^\\\s]+")
 _UNIX_ABSOLUTE_PATH_TEXT = re.compile(r"(?<![:A-Za-z0-9])/(?!/)[^\s\"'<>`]+")
@@ -61,6 +60,17 @@ _MARKDOWN_LINK_DESTINATION = re.compile(
     r"(?P<close>\))"
 )
 _MALFORMED_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_HTTP_URL_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])https?://[^\s\"'<>`]+", re.IGNORECASE)
+_HTTP_SCHEME_TEXT = re.compile(r"(?<![A-Za-z0-9+.-])https?:", re.IGNORECASE)
+_DANGEROUS_URI_TEXT = re.compile(
+    r"(?<![A-Za-z0-9+.-])(?:data|file|javascript|vbscript):(?=\S)",
+    re.IGNORECASE,
+)
+_UNKNOWN_PATH_SCHEME = re.compile(
+    r"(?<![A-Za-z0-9+.-])(?!https?:)[A-Za-z][A-Za-z0-9+.-]*:"
+    r"(?:/{1,2}|%(?:25)*(?:2f|5c))",
+    re.IGNORECASE,
+)
 _FILE_URI_PATH = re.compile(
     r"(?<![A-Za-z0-9+.-])file:(?:/{1,3}|%(?:25)*(?:2f|5c))",
     re.IGNORECASE,
@@ -87,6 +97,13 @@ class WebPendingReviewSummary(_WebModel):
     kind: ReviewKind
     status: ReviewStatus
     summary: str
+
+    @field_validator("summary")
+    @classmethod
+    def reject_summary_absolute_paths(cls, value: str) -> str:
+        if _contains_absolute_path(value):
+            raise ValueError("review metadata must not contain absolute paths")
+        return value
 
 
 class WebWorkspaceResponse(_WebModel):
@@ -419,14 +436,14 @@ def _to_web_concept_summary(result: ConceptSummaryResult) -> WebConceptSummary:
 
 
 def _require_safe_relative_path(value: str) -> None:
-    normalized = value.replace("\\", "/")
-    path = PurePosixPath(normalized)
+    segments = value.split("/")
     if (
         not value
-        or value.startswith(("/", "\\"))
-        or _WINDOWS_ABSOLUTE_PATH.match(value) is not None
-        or path.is_absolute()
-        or any(part in {"", ".", ".."} for part in path.parts)
+        or value.startswith("/")
+        or "\\" in value
+        or _WINDOWS_DRIVE_PATH.match(value) is not None
+        or _contains_control_character(value)
+        or any(segment in {"", ".", ".."} for segment in segments)
     ):
         raise ValueError("web paths must be safe relative paths")
 
@@ -436,11 +453,19 @@ def _contains_absolute_path(
     *,
     allow_concept_markdown_links: bool = False,
 ) -> bool:
-    if _contains_file_uri_destination(value):
-        return True
-    inspected = _mask_safe_concept_destinations(value) if allow_concept_markdown_links else value
     if (
-        _WINDOWS_ABSOLUTE_PATH_TEXT.search(inspected) is not None
+        _contains_file_uri_destination(value)
+        or _DANGEROUS_URI_TEXT.search(value) is not None
+        or _UNKNOWN_PATH_SCHEME.search(value) is not None
+    ):
+        return True
+    inspected = _mask_safe_browser_destinations(
+        value,
+        allow_concept_markdown_links=allow_concept_markdown_links,
+    )
+    if (
+        _HTTP_SCHEME_TEXT.search(inspected) is not None
+        or _WINDOWS_ABSOLUTE_PATH_TEXT.search(inspected) is not None
         or _WINDOWS_UNC_PATH_TEXT.search(inspected) is not None
     ):
         return True
@@ -450,19 +475,79 @@ def _contains_absolute_path(
     )
 
 
-def _mask_safe_concept_destinations(value: str) -> str:
+def _mask_safe_browser_destinations(
+    value: str,
+    *,
+    allow_concept_markdown_links: bool,
+) -> str:
     def replace(match: re.Match[str]) -> str:
-        if not _is_safe_concept_destination(match.group("destination")):
+        destination = match.group("destination")
+        if not (
+            _is_safe_http_url(destination)
+            or (allow_concept_markdown_links and _is_safe_concept_destination(destination))
+        ):
             return match.group()
-        return f"{match.group('prefix')}bundlewalker-concept{match.group('close')}"
+        return f"{match.group('prefix')}bundlewalker-link{match.group('close')}"
 
-    return _MARKDOWN_LINK_DESTINATION.sub(replace, value)
+    inspected = _MARKDOWN_LINK_DESTINATION.sub(replace, value)
+    return _HTTP_URL_TEXT.sub(
+        lambda match: "bundlewalker-link" if _is_safe_http_url(match.group()) else match.group(),
+        inspected,
+    )
 
 
 def _contains_file_uri_destination(value: str) -> bool:
     return _FILE_URI_PATH.search(value) is not None or any(
         match.group("destination").casefold().startswith("file:")
         for match in _MARKDOWN_LINK_DESTINATION.finditer(value)
+    )
+
+
+def _is_safe_http_url(value: str) -> bool:
+    if (
+        "\\" in value
+        or _contains_control_character(value)
+        or _MALFORMED_PERCENT_ESCAPE.search(value) is not None
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+    ):
+        return False
+
+    decoded_netloc = _decode_percent_recursively(parsed.netloc)
+    decoded_path = _decode_percent_recursively(parsed.path)
+    decoded_query = _decode_percent_recursively(parsed.query)
+    decoded_fragment = _decode_percent_recursively(parsed.fragment)
+    if (
+        decoded_netloc is None
+        or decoded_path is None
+        or decoded_query is None
+        or decoded_fragment is None
+    ):
+        return False
+    return not (
+        "@" in decoded_netloc
+        or "/" in decoded_netloc
+        or "\\" in decoded_netloc
+        or _contains_control_character(decoded_netloc)
+        or "\\" in decoded_path
+        or "\\" in decoded_query
+        or "\\" in decoded_fragment
+        or _contains_control_character(decoded_path)
+        or _contains_control_character(decoded_query)
+        or _contains_control_character(decoded_fragment)
+        or any(segment in {".", ".."} for segment in decoded_path.split("/"))
     )
 
 

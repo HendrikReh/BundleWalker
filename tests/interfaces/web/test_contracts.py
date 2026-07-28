@@ -20,6 +20,7 @@ from bundlewalker.application import (
     IngestionResult,
     LintResult,
     MutationResult,
+    PendingReviewSummary,
     RefreshResult,
     ReviewResult,
     SynthesisResult,
@@ -110,6 +111,62 @@ def test_workspace_response_contains_safe_status_and_csrf() -> None:
     }
     assert "workspace_path" not in response.model_dump()
     assert "session_id" not in response.model_dump()
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Review /Users/private/workspace/wiki/topics/agents.md",
+        r"Review C:\Users\private\workspace\wiki\topics\agents.md",
+        r"Review \\server\share\workspace\wiki\topics\agents.md",
+        "Review path:/etc/passwd",
+    ],
+)
+def test_workspace_response_rejects_paths_in_pending_review_summary(
+    summary: str,
+) -> None:
+    status = WorkspaceStatus(
+        display_name="knowledge",
+        config_version=3,
+        concept_counts={"Topic": 1},
+        pending_review=PendingReviewSummary(
+            review_id=REVIEW_ID,
+            kind=ReviewKind.INGESTION,
+            status=ReviewStatus.PENDING,
+            summary=summary,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_workspace(status, csrf_token="csrf")
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Review https://example.com/guides/agents?view=full#citations",
+        "Review [external guide](http://example.com/guides/agents)",
+    ],
+)
+def test_workspace_response_preserves_safe_http_urls_in_pending_review_summary(
+    summary: str,
+) -> None:
+    status = WorkspaceStatus(
+        display_name="knowledge",
+        config_version=3,
+        concept_counts={"Topic": 1},
+        pending_review=PendingReviewSummary(
+            review_id=REVIEW_ID,
+            kind=ReviewKind.INGESTION,
+            status=ReviewStatus.PENDING,
+            summary=summary,
+        ),
+    )
+
+    response = to_web_workspace(status, csrf_token="csrf")
+
+    assert response.pending_review is not None
+    assert response.pending_review.summary == summary
 
 
 @pytest.mark.parametrize(
@@ -404,6 +461,116 @@ def test_review_mapper_preserves_valid_exact_diff_text() -> None:
     assert response.diff == review.diff
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "summary",
+            "Review https://example.com/guides/agents?view=full#citations.",
+        ),
+        (
+            "summary",
+            "Review [external guide](http://example.com/guides/agents).",
+        ),
+        (
+            "summary",
+            "Review data: updated agent evidence.",
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+                "+See https://example.com/guides/agents?view=full#citations.\n"
+            ),
+        ),
+        (
+            "diff",
+            (
+                "diff --git a/topics/agents.md b/topics/agents.md\n"
+                "--- a/topics/agents.md\n"
+                "+++ b/topics/agents.md\n"
+                "+[External guide](http://example.com/guides/agents)\n"
+            ),
+        ),
+    ],
+)
+def test_review_mapper_preserves_safe_http_urls_unchanged(
+    field: str,
+    value: str,
+) -> None:
+    review = _review().model_copy(update={field: value})
+
+    response = to_web_review(review)
+
+    assert getattr(response, field) == value
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "/Users/private/agents.md",
+        r"C:\Users\private\agents.md",
+        r"\\server\share\agents.md",
+        "path:/etc/passwd",
+    ],
+)
+def test_review_mapper_scans_visible_labels_of_safe_http_links(label: str) -> None:
+    diff = (
+        "diff --git a/topics/agents.md b/topics/agents.md\n"
+        "--- a/topics/agents.md\n"
+        "+++ b/topics/agents.md\n"
+        f"+[{label}](https://example.com/guides/agents)\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
+
+
+def test_review_mapper_scans_text_surrounding_safe_http_links() -> None:
+    diff = (
+        "diff --git a/topics/agents.md b/topics/agents.md\n"
+        "--- a/topics/agents.md\n"
+        "+++ b/topics/agents.md\n"
+        "+[External guide](https://example.com/guides/agents) copied from /etc/passwd\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "file:/etc/passwd",
+        "data:text/plain,/etc/passwd",
+        "javascript:alert('/etc/passwd')",
+        "ftp://example.com/etc/passwd",
+        "path:/etc/passwd",
+        "https://user:secret@example.com/guides/agents",
+        "https://user%40example.com/guides/agents",
+        "https://example.com/guides/../private",
+        "https://example.com/%5CUsers%5Cprivate",
+    ],
+)
+def test_review_mapper_rejects_unsafe_external_link_destinations(
+    destination: str,
+) -> None:
+    diff = (
+        "diff --git a/topics/agents.md b/topics/agents.md\n"
+        "--- a/topics/agents.md\n"
+        "+++ b/topics/agents.md\n"
+        f"+[External guide]({destination})\n"
+    )
+    review = _review().model_copy(update={"diff": diff})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
+
+
 def test_review_mapper_preserves_safe_root_relative_source_citation_in_exact_diff() -> None:
     diff = (
         "diff --git a/topics/agents.md b/topics/agents.md\n"
@@ -535,6 +702,49 @@ def test_review_mapper_preserves_arbitrary_non_path_source_link_label() -> None:
     response = to_web_review(review)
 
     assert response.diff == diff
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        r"topics\agents.md",
+        "C:topics/agents.md",
+        "C:/topics/agents.md",
+        "/topics/agents.md",
+        r"\topics\agents.md",
+        r"\\server\share\agents.md",
+        "topics/../agents.md",
+        "topics/./agents.md",
+        "topics//agents.md",
+        "topics/agents.md\nprivate",
+        "topics/\x00agents.md",
+    ],
+)
+def test_review_mapper_rejects_noncanonical_relative_changed_paths(
+    changed_path: str,
+) -> None:
+    review = _review().model_copy(update={"changed_paths": (changed_path,)})
+
+    with pytest.raises(ValueError, match="relative"):
+        to_web_review(review)
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        "topics/agents.md",
+        "topics/agent notes.md",
+        "nested/topics/agents-v2.md",
+    ],
+)
+def test_review_mapper_preserves_safe_forward_slash_changed_paths(
+    changed_path: str,
+) -> None:
+    review = _review().model_copy(update={"changed_paths": (changed_path,)})
+
+    response = to_web_review(review)
+
+    assert response.changed_paths == (changed_path,)
 
 
 def test_explicit_result_mappers_publish_only_web_fields() -> None:
