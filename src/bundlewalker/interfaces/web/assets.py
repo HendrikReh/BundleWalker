@@ -29,24 +29,57 @@ class ValidatedWebAssets:
     files: Mapping[str, bytes]
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexAssets:
+    all: frozenset[str]
+    module_scripts: frozenset[str]
+    stylesheets: frozenset[str]
+
+
 class _IndexAssetParser(HTMLParser):
     """Collect browser-loaded shell resources without filesystem assumptions."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.references: list[str] = []
+        self.references: list[tuple[str, str]] = []
 
     def handle_starttag(
         self,
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
-        reference_attribute = {"script": "src", "link": "href"}.get(tag)
-        if reference_attribute is None:
+        if tag == "script":
+            reference = _single_attribute(attrs, "src")
+            if reference is None:
+                return
+            script_type = _single_attribute(attrs, "type")
+            role = (
+                "module-script"
+                if script_type is not None and (script_type.strip().casefold() == "module")
+                else "other"
+            )
+            self.references.append((reference, role))
             return
-        for name, value in attrs:
-            if name == reference_attribute and value is not None:
-                self.references.append(value)
+        if tag == "link":
+            reference = _single_attribute(attrs, "href")
+            if reference is None:
+                return
+            rel = _single_attribute(attrs, "rel")
+            rel_tokens: frozenset[str] = (
+                frozenset(rel.casefold().split()) if rel is not None else frozenset()
+            )
+            role = "stylesheet" if "stylesheet" in rel_tokens else "other"
+            self.references.append((reference, role))
+
+
+def _single_attribute(
+    attrs: list[tuple[str, str | None]],
+    expected_name: str,
+) -> str | None:
+    values = [value for name, value in attrs if name == expected_name]
+    if len(values) > 1:
+        raise ValueError("web asset element has duplicate attributes")
+    return values[0] if values else None
 
 
 def validate_web_assets(static_dir: Traversable | None = None) -> ValidatedWebAssets:
@@ -61,13 +94,15 @@ def validate_web_assets(static_dir: Traversable | None = None) -> ValidatedWebAs
         index_text = index_html.decode("utf-8")
         manifest_bytes = _read_required_resource(static.joinpath(".vite", "manifest.json"))
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-        manifest_assets, entry_assets = _manifest_assets(manifest)
+        manifest_assets, entry_script, entry_stylesheets = _manifest_assets(manifest)
         index_assets = _index_assets(index_text)
-        if not entry_assets.issubset(index_assets):
-            raise ValueError("Vite entry assets are absent from index.html")
+        if entry_script not in index_assets.module_scripts or not entry_stylesheets.issubset(
+            index_assets.stylesheets
+        ):
+            raise ValueError("Vite entry asset loading roles are invalid")
 
         loaded: dict[str, bytes] = {}
-        for relative in sorted(manifest_assets | index_assets):
+        for relative in sorted(manifest_assets | index_assets.all):
             asset_name = _validate_asset_path(relative)
             loaded[asset_name] = _read_required_resource(static.joinpath("assets", asset_name))
         return ValidatedWebAssets(
@@ -89,7 +124,7 @@ def _read_required_resource(resource: Traversable) -> bytes:
     return resource.read_bytes()
 
 
-def _manifest_assets(manifest: object) -> tuple[set[str], set[str]]:
+def _manifest_assets(manifest: object) -> tuple[set[str], str, set[str]]:
     if not isinstance(manifest, dict):
         raise ValueError("Vite manifest must be an object")
     records = cast(dict[object, object], manifest)
@@ -101,7 +136,8 @@ def _manifest_assets(manifest: object) -> tuple[set[str], set[str]]:
         raise ValueError("Vite manifest index entry is invalid")
 
     all_assets: set[str] = set()
-    entry_assets: set[str] = set()
+    entry_script: str | None = None
+    entry_stylesheets: set[str] = set()
     for key, value in records.items():
         if not isinstance(key, str) or not isinstance(value, dict):
             raise ValueError("Vite manifest record is invalid")
@@ -129,9 +165,11 @@ def _manifest_assets(manifest: object) -> tuple[set[str], set[str]]:
                 raise ValueError("Vite manifest import list is invalid")
         all_assets.update(record_assets)
         if key == "index.html":
-            entry_assets.add(file_asset)
-            entry_assets.update(css_assets)
-    return all_assets, entry_assets
+            entry_script = file_asset
+            entry_stylesheets.update(css_assets)
+    if entry_script is None:
+        raise ValueError("Vite manifest has no index entry")
+    return all_assets, entry_script, entry_stylesheets
 
 
 def _manifest_asset(value: object) -> str:
@@ -141,16 +179,28 @@ def _manifest_asset(value: object) -> str:
     return value
 
 
-def _index_assets(index_html: str) -> set[str]:
+def _index_assets(index_html: str) -> _IndexAssets:
     parser = _IndexAssetParser()
     parser.feed(index_html)
     parser.close()
     assets: set[str] = set()
-    for reference in parser.references:
+    module_scripts: set[str] = set()
+    stylesheets: set[str] = set()
+    for reference, role in parser.references:
         relative = reference.removeprefix("/")
         _validate_asset_path(relative)
+        if relative in assets:
+            raise ValueError("web asset has ambiguous loading roles")
         assets.add(relative)
-    return assets
+        if role == "module-script":
+            module_scripts.add(relative)
+        if role == "stylesheet":
+            stylesheets.add(relative)
+    return _IndexAssets(
+        all=frozenset(assets),
+        module_scripts=frozenset(module_scripts),
+        stylesheets=frozenset(stylesheets),
+    )
 
 
 def _validate_asset_path(relative: str) -> str:

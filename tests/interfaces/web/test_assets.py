@@ -130,6 +130,76 @@ def test_web_asset_validation_accepts_code_loaded_manifest_asset(tmp_path: Path)
     assert "logo-abcdefgh.svg" in assets.files
 
 
+def test_web_asset_validation_rejects_swapped_loading_roles(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            b"<!doctype html><html><head>"
+            b'<script type="module" src="/assets/index-abcdefgh.css"></script>'
+            b'<link rel="stylesheet" href="/assets/index-abcdefgh.js">'
+            b"</head><body></body></html>"
+        ),
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
+@pytest.mark.parametrize(
+    "index",
+    [
+        (
+            "<!doctype html><html><head>"
+            '<script src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ),
+        (
+            "<!doctype html><html><head>"
+            '<script type="text/javascript" src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ),
+        (
+            "<!doctype html><html><head>"
+            '<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            '<link href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ),
+        (
+            "<!doctype html><html><head>"
+            '<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="preload" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ),
+        (
+            "<!doctype html><html><head>"
+            '<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            '<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ),
+    ],
+    ids=[
+        "missing-module-type",
+        "wrong-module-type",
+        "missing-stylesheet-rel",
+        "wrong-stylesheet-rel",
+        "duplicate-entry-script",
+    ],
+)
+def test_web_asset_validation_rejects_missing_wrong_or_ambiguous_loading_role(
+    tmp_path: Path,
+    index: str,
+) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(static, index=index.encode())
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
 @pytest.mark.parametrize(
     "asset_path",
     [
