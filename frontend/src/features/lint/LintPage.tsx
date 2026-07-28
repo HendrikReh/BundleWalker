@@ -5,11 +5,19 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 
 import { useLint } from "../../api/queries";
-import type { FindingOrigin, WebLintFinding } from "../../api/types";
+import type { FindingOrigin, Severity, WebLintFinding } from "../../api/types";
 import { OperationProgress } from "../../components/OperationProgress";
 import { RequestError } from "../../components/RequestError";
 
 const MAX_MODEL_CHARACTERS = 255;
+const SEVERITY_GROUPS: readonly {
+  readonly severity: Severity;
+  readonly title: string;
+}[] = [
+  { severity: "error", title: "Errors" },
+  { severity: "warning", title: "Warnings" },
+  { severity: "info", title: "Information" },
+];
 
 export function LintPage() {
   const [semantic, setSemantic] = useState(false);
@@ -106,26 +114,96 @@ function FindingGroup({
   readonly title: string;
   readonly findings: readonly WebLintFinding[];
 }) {
+  const groups = SEVERITY_GROUPS.flatMap(({ severity, title }) => {
+    const matching = findings.filter(
+      (finding) => finding.severity === severity,
+    );
+    if (matching.length === 0) return [];
+
+    const byConcept = new Map<string | null, WebLintFinding[]>();
+    for (const finding of matching) {
+      const conceptFindings = byConcept.get(finding.path) ?? [];
+      conceptFindings.push(finding);
+      byConcept.set(finding.path, conceptFindings);
+    }
+    const concepts = [...byConcept.entries()]
+      .sort(([left], [right]) => compareConceptPaths(left, right))
+      .map(([path, conceptFindings]) => ({
+        path,
+        findings: conceptFindings.slice().sort(compareFindings),
+      }));
+    return [{ severity, title, concepts }];
+  });
+
   return (
     <section aria-labelledby={id}>
       <h2 id={id}>{title}</h2>
       {findings.length === 0 ? (
         <p>No findings.</p>
       ) : (
-        <ul className="lint-findings">
-          {findings.map((finding) => (
-            <li key={`${finding.origin}:${finding.code}:${finding.path ?? ""}`}>
-              <strong>{finding.code}</strong>
-              <span>Severity: {finding.severity}</span>
-              <p>{finding.message}</p>
-              {finding.path ? <p>Concept: {finding.path}</p> : null}
-              {finding.remediation ? (
-                <p>Suggested action: {finding.remediation}</p>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+        groups.map((group) => {
+          const severityId = `${id}-${group.severity}`;
+          return (
+            <section key={group.severity} aria-labelledby={severityId}>
+              <h3 id={severityId}>{group.title}</h3>
+              {group.concepts.map((concept, conceptIndex) => {
+                const conceptId = `${severityId}-concept-${conceptIndex}`;
+                return (
+                  <section
+                    key={concept.path ?? "workspace"}
+                    aria-labelledby={conceptId}
+                  >
+                    <h4 id={conceptId}>
+                      Concept: {concept.path ?? "Workspace"}
+                    </h4>
+                    <ul className="lint-findings">
+                      {concept.findings.map((finding, findingIndex) => (
+                        <Finding
+                          key={`${finding.code}:${finding.message}:${findingIndex}`}
+                          finding={finding}
+                        />
+                      ))}
+                    </ul>
+                  </section>
+                );
+              })}
+            </section>
+          );
+        })
       )}
     </section>
   );
+}
+
+function Finding({ finding }: { readonly finding: WebLintFinding }) {
+  return (
+    <li>
+      <strong>{finding.code}</strong>
+      <span>Severity: {finding.severity}</span>
+      <p>{finding.message}</p>
+      {finding.remediation ? (
+        <p>Suggested action: {finding.remediation}</p>
+      ) : null}
+    </li>
+  );
+}
+
+function compareConceptPaths(left: string | null, right: string | null) {
+  if (left === right) return 0;
+  if (left === null) return -1;
+  if (right === null) return 1;
+  return compareStrings(left, right);
+}
+
+function compareFindings(left: WebLintFinding, right: WebLintFinding) {
+  return (
+    compareStrings(left.code, right.code) ||
+    compareStrings(left.message, right.message)
+  );
+}
+
+function compareStrings(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }

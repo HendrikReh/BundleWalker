@@ -150,6 +150,124 @@ test("submits a lexical search exactly once", async () => {
   expect(String(searchCalls[0]?.[0])).toContain("query=agents");
 });
 
+test("submits the selected concept type only with an explicit lexical search", async () => {
+  vi.mocked(fetch)
+    .mockResolvedValueOnce(
+      jsonResponse({
+        ...workspaceWithoutReview,
+        concept_counts: { Topic: 1, Entity: 2, Synthesis: 1 },
+      }),
+    )
+    .mockResolvedValueOnce(jsonResponse({ items: [], next_cursor: null }))
+    .mockResolvedValueOnce(jsonResponse({ items: [tools] }))
+    .mockResolvedValueOnce(jsonResponse({ items: [agents] }));
+  const user = userEvent.setup();
+  renderRoutes();
+
+  const type = await screen.findByRole("combobox", {
+    name: "Concept type (search only)",
+  });
+  expect(
+    [...type.querySelectorAll("option")].map((option) => option.textContent),
+  ).toEqual(["All types", "Entity (2)", "Synthesis (1)", "Topic (1)"]);
+
+  await user.selectOptions(type, "Entity");
+  await user.type(
+    screen.getByRole("searchbox", { name: "Search concepts" }),
+    "tools",
+  );
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).includes("/concepts/search")),
+  ).toHaveLength(0);
+
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  await screen.findByRole("link", { name: "Tools" });
+  await user.selectOptions(type, "Topic");
+  expect(
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).includes("/concepts/search")),
+  ).toHaveLength(1);
+
+  await user.click(screen.getByRole("button", { name: "Search" }));
+  await screen.findByRole("link", { name: "Agents" });
+  const searchCalls = vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => String(url).includes("/concepts/search"));
+  expect(searchCalls.map(([url]) => String(url))).toEqual([
+    "/api/v1/concepts/search?query=tools&type=Entity",
+    "/api/v1/concepts/search?query=tools&type=Topic",
+  ]);
+});
+
+test("announces the initial concept page while it is loading", async () => {
+  let resolveConcepts!: (response: Response) => void;
+  const pendingConcepts = new Promise<Response>((resolve) => {
+    resolveConcepts = resolve;
+  });
+  vi.mocked(fetch)
+    .mockResolvedValueOnce(jsonResponse(workspaceWithoutReview))
+    .mockReturnValueOnce(pendingConcepts);
+
+  renderRoutes();
+
+  await screen.findByRole("heading", { name: "Browse concepts" });
+  expect(screen.getByRole("status").textContent).toContain("Loading concepts");
+
+  resolveConcepts(jsonResponse({ items: [agents], next_cursor: null }));
+  await screen.findByRole("link", { name: "Agents" });
+});
+
+test("announces a submitted concept search while it is loading", async () => {
+  let resolveSearch!: (response: Response) => void;
+  const pendingSearch = new Promise<Response>((resolve) => {
+    resolveSearch = resolve;
+  });
+  vi.mocked(fetch)
+    .mockResolvedValueOnce(jsonResponse(workspaceWithoutReview))
+    .mockResolvedValueOnce(jsonResponse({ items: [agents], next_cursor: null }))
+    .mockReturnValueOnce(pendingSearch);
+  const user = userEvent.setup();
+  renderRoutes();
+
+  await user.type(
+    await screen.findByRole("searchbox", { name: "Search concepts" }),
+    "missing",
+  );
+  await user.click(screen.getByRole("button", { name: "Search" }));
+
+  expect(screen.getByRole("status").textContent).toContain(
+    "Searching concepts",
+  );
+  expect(screen.queryByRole("link", { name: "Agents" })).toBeNull();
+
+  resolveSearch(jsonResponse({ items: [] }));
+  await screen.findByText("No concepts match your search.");
+});
+
+test("distinguishes an empty workspace page from a search with no matches", async () => {
+  vi.mocked(fetch)
+    .mockResolvedValueOnce(jsonResponse(workspaceWithoutReview))
+    .mockResolvedValueOnce(jsonResponse({ items: [], next_cursor: null }))
+    .mockResolvedValueOnce(jsonResponse({ items: [] }));
+  const user = userEvent.setup();
+  renderRoutes();
+
+  await screen.findByText("This workspace has no concepts yet.");
+  expect(screen.queryByText("No concepts match your search.")).toBeNull();
+
+  await user.type(
+    screen.getByRole("searchbox", { name: "Search concepts" }),
+    "agents",
+  );
+  await user.click(screen.getByRole("button", { name: "Search" }));
+
+  await screen.findByText("No concepts match your search.");
+  expect(screen.queryByText("This workspace has no concepts yet.")).toBeNull();
+});
+
 test("appends later concept pages without duplicate entries", async () => {
   vi.mocked(fetch)
     .mockResolvedValueOnce(jsonResponse(workspaceWithoutReview))

@@ -4,25 +4,45 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
 
-import { useConceptPages, useConceptSearch } from "../../api/queries";
+import {
+  useConceptPages,
+  useConceptSearch,
+  useWorkspace,
+} from "../../api/queries";
 import type { WebConceptSummary } from "../../api/types";
 import { RequestError } from "../../components/RequestError";
 
+const MAX_CONCEPT_TYPE_OPTIONS = 100;
+
 export function BrowsePage() {
   const [input, setInput] = useState("");
+  const [conceptType, setConceptType] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
+  const [submittedType, setSubmittedType] = useState("");
+  const workspace = useWorkspace({ refetchOnMount: false });
   const pages = useConceptPages();
-  const search = useConceptSearch(submittedQuery);
+  const search = useConceptSearch(submittedQuery, submittedType || undefined);
+  const isSearch = submittedQuery.length > 0;
+  const conceptTypes = useMemo(
+    () =>
+      Object.entries(workspace.data?.concept_counts ?? {})
+        .sort(([left], [right]) => compareStrings(left, right))
+        .slice(0, MAX_CONCEPT_TYPE_OPTIONS),
+    [workspace.data?.concept_counts],
+  );
   const concepts = useMemo(() => {
-    const source =
-      submittedQuery.length > 0
-        ? search.data?.items
-        : pages.data?.pages.flatMap((page) => page.items);
+    const source = isSearch
+      ? search.data?.items
+      : pages.data?.pages.flatMap((page) => page.items);
     const unique = new Map<string, WebConceptSummary>();
     for (const concept of source ?? []) unique.set(concept.concept_id, concept);
     return [...unique.values()];
-  }, [pages.data, search.data, submittedQuery]);
-  const error = submittedQuery.length > 0 ? search.error : pages.error;
+  }, [isSearch, pages.data, search.data]);
+  const error = isSearch ? search.error : pages.error;
+  const isLoading = isSearch ? search.isPending : pages.isPending;
+  const emptyMessage = isSearch
+    ? "No concepts match your search."
+    : "This workspace has no concepts yet.";
 
   return (
     <section>
@@ -31,7 +51,9 @@ export function BrowsePage() {
         role="search"
         onSubmit={(event) => {
           event.preventDefault();
-          setSubmittedQuery(input.trim());
+          const query = input.trim();
+          setSubmittedQuery(query);
+          setSubmittedType(query.length > 0 ? conceptType : "");
         }}
       >
         <label>
@@ -42,21 +64,45 @@ export function BrowsePage() {
             onChange={(event) => setInput(event.target.value)}
           />
         </label>
+        <label>
+          Concept type (search only)
+          <select
+            value={conceptType}
+            onChange={(event) => setConceptType(event.target.value)}
+          >
+            <option value="">All types</option>
+            {conceptTypes.map(([type, count]) => (
+              <option key={type} value={type}>
+                {type} ({count})
+              </option>
+            ))}
+          </select>
+        </label>
         <button type="submit">Search</button>
       </form>
       {error ? <RequestError error={error} /> : null}
-      <ul className="concept-list">
-        {concepts.map((concept) => (
-          <li key={concept.concept_id}>
-            <Link to={`/browse/${encodeConceptRoute(concept.concept_id)}`}>
-              {concept.title}
-            </Link>
-            <span>{concept.type}</span>
-            {concept.description ? <p>{concept.description}</p> : null}
-          </li>
-        ))}
-      </ul>
-      {submittedQuery.length === 0 && pages.hasNextPage ? (
+      {isLoading ? (
+        <p role="status">
+          {isSearch ? "Searching concepts…" : "Loading concepts…"}
+        </p>
+      ) : null}
+      {!isLoading && !error && concepts.length === 0 ? (
+        <p role="status">{emptyMessage}</p>
+      ) : null}
+      {concepts.length > 0 ? (
+        <ul className="concept-list">
+          {concepts.map((concept) => (
+            <li key={concept.concept_id}>
+              <Link to={`/browse/${encodeConceptRoute(concept.concept_id)}`}>
+                {concept.title}
+              </Link>
+              <span>{concept.type}</span>
+              {concept.description ? <p>{concept.description}</p> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {!isSearch && pages.hasNextPage ? (
         <button
           type="button"
           disabled={pages.isFetchingNextPage}
@@ -67,6 +113,12 @@ export function BrowsePage() {
       ) : null}
     </section>
   );
+}
+
+function compareStrings(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function encodeConceptRoute(conceptId: string): string {

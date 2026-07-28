@@ -20,10 +20,13 @@ export const queryKeys = {
   review: ["review"] as const,
 };
 
-export function useWorkspace() {
+export function useWorkspace(
+  options: { readonly refetchOnMount: boolean } = { refetchOnMount: true },
+) {
   return useQuery({
     queryKey: queryKeys.workspace,
     queryFn: () => apiClient.workspace(),
+    refetchOnMount: options.refetchOnMount,
   });
 }
 
@@ -36,10 +39,14 @@ export function useConceptPages() {
   });
 }
 
-export function useConceptSearch(query: string) {
+export function useConceptSearch(query: string, conceptType?: string) {
   return useQuery({
-    queryKey: queryKeys.search(query),
-    queryFn: () => apiClient.searchConcepts({ query }),
+    queryKey: queryKeys.search(query, conceptType),
+    queryFn: () =>
+      apiClient.searchConcepts({
+        query,
+        ...(conceptType === undefined ? {} : { conceptType }),
+      }),
     enabled: query.length > 0,
   });
 }
