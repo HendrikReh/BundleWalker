@@ -20,6 +20,7 @@ import type {
   WebSynthesisResponse,
   WebWorkspaceResponse,
 } from "./types";
+import { encodeConceptRoute } from "../routing/conceptRoute";
 
 const MAX_ERROR_BYTES = 65_536;
 
@@ -74,10 +75,7 @@ export class ApiClient {
   }
 
   async concept(conceptId: string): Promise<WebConceptResponse> {
-    const encodedId = conceptId
-      .split("/")
-      .map((segment) => encodeURIComponent(segment))
-      .join("/");
+    const encodedId = encodeConceptRoute(conceptId);
     return this.#get(`/api/v1/concepts/${encodedId}`, parseConcept);
   }
 

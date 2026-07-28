@@ -68,6 +68,7 @@ afterEach(() => {
 
 test("keeps Ask and Prepare synthesis distinct and submits through its own endpoint", async () => {
   let workspaceCalls = 0;
+  let reviewCalls = 0;
   vi.mocked(fetch).mockImplementation((input) => {
     const path = String(input);
     if (path === "/api/v1/workspace") {
@@ -87,6 +88,10 @@ test("keeps Ask and Prepare synthesis distinct and submits through its own endpo
               },
         ),
       );
+    }
+    if (path === "/api/v1/review") {
+      reviewCalls += 1;
+      return Promise.resolve(jsonResponse(synthesis.review));
     }
     if (path === "/api/v1/syntheses") {
       return Promise.resolve(jsonResponse(synthesis));
@@ -109,7 +114,7 @@ test("keeps Ask and Prepare synthesis distinct and submits through its own endpo
       level: 2,
     }),
   ).toBeTruthy();
-  const reviewLink = screen.getByRole("link", {
+  const reviewLink = await screen.findByRole("link", {
     name: "Review the synthesis proposal",
   });
   expect(reviewLink.getAttribute("href")).toBe(`/review/${reviewId}`);
@@ -124,7 +129,10 @@ test("keeps Ask and Prepare synthesis distinct and submits through its own endpo
   expect(
     vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/ask"),
   ).toHaveLength(0);
-  await waitFor(() => expect(workspaceCalls).toBe(2));
+  await waitFor(() => {
+    expect(workspaceCalls).toBe(2);
+    expect(reviewCalls).toBe(1);
+  });
 });
 
 test("preserves the question and model after a bounded synthesis failure", async () => {
@@ -161,7 +169,7 @@ test("preserves the question and model after a bounded synthesis failure", async
   );
 });
 
-test("retains a successful synthesis when workspace reconciliation fails", async () => {
+test("retains a successful synthesis without a review link when workspace reconciliation fails", async () => {
   let workspaceCalls = 0;
   vi.mocked(fetch).mockImplementation((input) => {
     const path = String(input);
@@ -192,10 +200,8 @@ test("retains a successful synthesis when workspace reconciliation fails", async
     }),
   ).toBeTruthy();
   expect(
-    screen
-      .getByRole("link", { name: "Review the synthesis proposal" })
-      .getAttribute("href"),
-  ).toBe(`/review/${reviewId}`);
+    screen.queryByRole("link", { name: "Review the synthesis proposal" }),
+  ).toBeNull();
   expect(
     (
       await screen.findByRole("status", {
@@ -203,7 +209,7 @@ test("retains a successful synthesis when workspace reconciliation fails", async
       })
     ).textContent,
   ).toContain(
-    "Synthesis preparation succeeded, but workspace status could not refresh",
+    "Synthesis preparation succeeded, but workspace and review status could not be confirmed",
   );
   expect(screen.queryByText("Synthesis preparation failed")).toBeNull();
   expect(
@@ -212,4 +218,140 @@ test("retains a successful synthesis when workspace reconciliation fails", async
   expect(
     screen.getByRole("button", { name: "Prepare synthesis" }),
   ).toHaveProperty("disabled", true);
+  await user.click(screen.getByRole("button", { name: "Prepare synthesis" }));
+  expect(
+    vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/syntheses"),
+  ).toHaveLength(1);
 });
+
+test("retains a successful synthesis without a review link when review reconciliation fails", async () => {
+  let workspaceCalls = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const path = String(input);
+    if (path === "/api/v1/workspace") {
+      workspaceCalls += 1;
+      return Promise.resolve(
+        workspaceCalls === 1
+          ? jsonResponse(workspace)
+          : jsonResponse({
+              ...workspace,
+              pending_review: {
+                review_id: reviewId,
+                kind: "synthesis",
+                status: "pending",
+                summary: synthesis.review.summary,
+              },
+            }),
+      );
+    }
+    if (path === "/api/v1/syntheses") {
+      return Promise.resolve(jsonResponse(synthesis));
+    }
+    if (path === "/api/v1/review") {
+      return Promise.reject(new Error("review reload failed"));
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  const user = userEvent.setup();
+  renderAsk();
+
+  await user.type(
+    await screen.findByRole("textbox", { name: "Question" }),
+    "What do agents use?",
+  );
+  await user.click(screen.getByRole("button", { name: "Prepare synthesis" }));
+
+  expect(
+    await screen.findByRole("heading", {
+      name: "Agent tools synthesis",
+      level: 2,
+    }),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("link", { name: "Review the synthesis proposal" }),
+  ).toBeNull();
+  expect(
+    (
+      await screen.findByRole("status", {
+        name: "Synthesis reconciliation warning",
+      })
+    ).textContent,
+  ).toContain(
+    "Synthesis preparation succeeded, but workspace and review status could not be confirmed",
+  );
+  expect(screen.queryByText("Synthesis preparation failed")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Prepare synthesis" }),
+  ).toHaveProperty("disabled", true);
+});
+
+test.each(["workspace", "review"] as const)(
+  "blocks an unreconciled synthesis when the authoritative %s review ID mismatches",
+  async (mismatchSource) => {
+    const wrongReviewId = "b".repeat(32);
+    let workspaceCalls = 0;
+    vi.mocked(fetch).mockImplementation((input) => {
+      const path = String(input);
+      if (path === "/api/v1/workspace") {
+        workspaceCalls += 1;
+        return Promise.resolve(
+          workspaceCalls === 1
+            ? jsonResponse(workspace)
+            : jsonResponse({
+                ...workspace,
+                pending_review: {
+                  review_id:
+                    mismatchSource === "workspace" ? wrongReviewId : reviewId,
+                  kind: "synthesis",
+                  status: "pending",
+                  summary: synthesis.review.summary,
+                },
+              }),
+        );
+      }
+      if (path === "/api/v1/syntheses") {
+        return Promise.resolve(jsonResponse(synthesis));
+      }
+      if (path === "/api/v1/review") {
+        return Promise.resolve(
+          jsonResponse({
+            ...synthesis.review,
+            review_id: mismatchSource === "review" ? wrongReviewId : reviewId,
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const user = userEvent.setup();
+    renderAsk();
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Question" }),
+      "What do agents use?",
+    );
+    await user.click(screen.getByRole("button", { name: "Prepare synthesis" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Agent tools synthesis",
+        level: 2,
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("link", { name: "Review the synthesis proposal" }),
+    ).toBeNull();
+    await screen.findByRole("status", {
+      name: "Synthesis reconciliation warning",
+    });
+    expect(screen.queryByText("Synthesis preparation failed")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Prepare synthesis" }),
+    ).toHaveProperty("disabled", true);
+    await user.click(screen.getByRole("button", { name: "Prepare synthesis" }));
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([url]) => url === "/api/v1/syntheses"),
+    ).toHaveLength(1);
+  },
+);

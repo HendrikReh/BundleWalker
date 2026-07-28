@@ -103,6 +103,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     except ApplicationError as error:
         print(f"Error: {error.safe_message}", file=sys.stderr)
         raise SystemExit(1) from None
+    except Exception:
+        print("Error: local web server failed", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def _create_uvicorn_server(app: Starlette) -> WebServer:

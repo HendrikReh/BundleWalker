@@ -246,3 +246,76 @@ def test_main_prints_only_bounded_web_asset_error(
     error_output = capsys.readouterr().err
     assert error_output == "Error: web interface assets are unavailable\n"
     assert str(private_path) not in error_output
+
+
+def test_main_bounds_unexpected_socket_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    private_path = tmp_path / "private" / "socket"
+
+    def fail_bind() -> socket:
+        raise OSError(f"could not bind {private_path}")
+
+    monkeypatch.setattr(server_module, "bind_loopback_socket", fail_bind)
+
+    with pytest.raises(SystemExit) as raised:
+        main(["--workspace", str(workspace.root)])
+
+    assert raised.value.code == 1
+    error_output = capsys.readouterr().err
+    assert error_output == "Error: local web server failed\n"
+    assert str(private_path) not in error_output
+
+
+def test_main_bounds_unexpected_server_failure_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    private_path = tmp_path / "private" / "uvicorn.log"
+    listener = socket()
+
+    class RecordingSessionStore(BrowserSessionStore):
+        def __init__(self, bootstrap_secret: str) -> None:
+            super().__init__(bootstrap_secret)
+            self.cleared = False
+            stores.append(self)
+
+        def clear(self) -> None:
+            self.cleared = True
+            super().clear()
+
+    stores: list[RecordingSessionStore] = []
+
+    class FailingServer:
+        async def serve(self, sockets: list[socket]) -> None:
+            assert sockets == [listener]
+            raise RuntimeError(f"server failed at {private_path}")
+
+    def bind_listener() -> socket:
+        return listener
+
+    def browser_opener(_: str) -> bool:
+        return True
+
+    def create_server(_: Starlette) -> FailingServer:
+        return FailingServer()
+
+    monkeypatch.setattr(server_module, "bind_loopback_socket", bind_listener)
+    monkeypatch.setattr(server_module, "BrowserSessionStore", RecordingSessionStore)
+    monkeypatch.setattr(server_module.webbrowser, "open", browser_opener)
+    monkeypatch.setattr(server_module, "_create_uvicorn_server", create_server)
+
+    with pytest.raises(SystemExit) as raised:
+        main(["--workspace", str(workspace.root)])
+
+    assert raised.value.code == 1
+    error_output = capsys.readouterr().err
+    assert error_output == "Error: local web server failed\n"
+    assert str(private_path) not in error_output
+    assert listener.fileno() == -1
+    assert stores[0].cleared is True

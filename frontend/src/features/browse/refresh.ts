@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import type { WebConceptResponse } from "../../api/types";
+import { encodeConceptRoute } from "../../routing/conceptRoute";
 
 const CANONICAL_SYNTHESIS_ID = /^syntheses\/[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -15,9 +16,5 @@ export function isRefreshEligibleConcept(
 }
 
 export function refreshPathForConcept(conceptId: string): string {
-  const encoded = conceptId
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  return `/refresh/${encoded}`;
+  return `/refresh/${encodeConceptRoute(conceptId)}`;
 }

@@ -11,6 +11,7 @@ import {
 } from "../../api/queries";
 import type { WebConceptSummary } from "../../api/types";
 import { RequestError } from "../../components/RequestError";
+import { encodeConceptRoute } from "../../routing/conceptRoute";
 
 const MAX_CONCEPT_TYPE_OPTIONS = 100;
 
@@ -124,11 +125,4 @@ function compareStrings(left: string, right: string): number {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
-}
-
-function encodeConceptRoute(conceptId: string): string {
-  return conceptId
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
 }
