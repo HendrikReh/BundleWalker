@@ -57,7 +57,7 @@ class _IndexAssetParser(HTMLParser):
             role = (
                 "module-script"
                 if script_type is not None
-                and script_type.strip(_HTML_ASCII_WHITESPACE).casefold() == "module"
+                and _html_ascii_lower(script_type.strip(_HTML_ASCII_WHITESPACE)) == "module"
                 else "other"
             )
             self.references.append((reference, role))
@@ -83,10 +83,16 @@ def _single_attribute(
 
 
 def _html_ascii_tokens(value: str) -> frozenset[str]:
-    normalized = value.casefold()
+    normalized = _html_ascii_lower(value)
     for character in _HTML_ASCII_WHITESPACE.removesuffix(" "):
         normalized = normalized.replace(character, " ")
     return frozenset(token for token in normalized.split(" ") if token)
+
+
+def _html_ascii_lower(value: str) -> str:
+    return "".join(
+        chr(ord(character) + 32) if "A" <= character <= "Z" else character for character in value
+    )
 
 
 def validate_web_assets(static_dir: Traversable | None = None) -> ValidatedWebAssets:

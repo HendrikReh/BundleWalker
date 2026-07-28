@@ -314,6 +314,42 @@ def test_web_asset_validation_accepts_ascii_whitespace_and_case_in_role_attribut
     }
 
 
+def test_web_asset_validation_rejects_unicode_casefolded_stylesheet_role(
+    tmp_path: Path,
+) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            "<!doctype html><html><head>"
+            '<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="\u017ftyle\u017fheet" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ).encode(),
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
+def test_web_asset_validation_rejects_unicode_confusable_module_type(
+    tmp_path: Path,
+) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            "<!doctype html><html><head>"
+            '<script type="\uff2dODULE" src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ).encode(),
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
 @pytest.mark.parametrize(
     "asset_path",
     [
