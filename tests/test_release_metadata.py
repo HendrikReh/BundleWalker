@@ -796,7 +796,15 @@ def test_active_documentation_publishes_the_standard_local_web_contract() -> Non
         .split("\n## [", maxsplit=1)[0]
     )
     normalized_unreleased = " ".join(unreleased.split()).casefold()
-    assert "final release verification remains pending" in normalized_unreleased
+    assert "local verification and required ci passed" in normalized_unreleased
+    assert "ubuntu 24.04 and macos 15" in normalized_unreleased
+    assert "python 3.13 and 3.14" in normalized_unreleased
+    assert "frontend/browser" in normalized_unreleased
+    assert "dependency audit" in normalized_unreleased
+    assert "distribution build and packaged-asset validation" in normalized_unreleased
+    assert "all eight clean wheel/sdist install smokes" in normalized_unreleased
+    assert "the gui remains unreleased" in normalized_unreleased
+    assert "final release verification remains pending" not in normalized_unreleased
     assert re.search(r"not part of (?:the )?tagged `0\.4\.0`", normalized_unreleased)
 
 
