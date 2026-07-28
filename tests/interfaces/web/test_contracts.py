@@ -142,6 +142,34 @@ def test_workspace_response_rejects_paths_in_pending_review_summary(
 
 
 @pytest.mark.parametrize(
+    "encoded_path",
+    [
+        "path:%25%32%66etc/passwd",
+        "PaTh:%25%32%46etc/passwd",
+        r"path:%25%35%63Users\private",
+        "PATH:%25%35%43Users%255cprivate",
+    ],
+)
+def test_workspace_response_rejects_recursively_encoded_path_schemes(
+    encoded_path: str,
+) -> None:
+    status = WorkspaceStatus(
+        display_name="knowledge",
+        config_version=3,
+        concept_counts={"Topic": 1},
+        pending_review=PendingReviewSummary(
+            review_id=REVIEW_ID,
+            kind=ReviewKind.INGESTION,
+            status=ReviewStatus.PENDING,
+            summary=f"Review {encoded_path}",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_workspace(status, csrf_token="csrf")
+
+
+@pytest.mark.parametrize(
     "summary",
     [
         "Review https://example.com/guides/agents?view=full#citations",
@@ -537,6 +565,36 @@ def test_review_mapper_scans_text_surrounding_safe_http_links() -> None:
         "+[External guide](https://example.com/guides/agents) copied from /etc/passwd\n"
     )
     review = _review().model_copy(update={"diff": diff})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
+
+
+@pytest.mark.parametrize(
+    "encoded_path",
+    [
+        "path:%25%32%66etc/passwd",
+        "PaTh:%25%32%46etc/passwd",
+        r"path:%25%35%63Users\private",
+        "PATH:%25%35%43Users%255cprivate",
+    ],
+)
+@pytest.mark.parametrize("field", ["summary", "diff"])
+def test_review_mapper_rejects_recursively_encoded_path_schemes(
+    field: str,
+    encoded_path: str,
+) -> None:
+    value = (
+        f"Review {encoded_path}"
+        if field == "summary"
+        else (
+            "diff --git a/topics/agents.md b/topics/agents.md\n"
+            "--- a/topics/agents.md\n"
+            "+++ b/topics/agents.md\n"
+            f"+[Unsafe]({encoded_path})\n"
+        )
+    )
+    review = _review().model_copy(update={field: value})
 
     with pytest.raises(ValueError, match="absolute"):
         to_web_review(review)

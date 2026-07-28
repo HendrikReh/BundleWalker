@@ -66,10 +66,10 @@ _DANGEROUS_URI_TEXT = re.compile(
     r"(?<![A-Za-z0-9+.-])(?:data|file|javascript|vbscript):(?=\S)",
     re.IGNORECASE,
 )
-_UNKNOWN_PATH_SCHEME = re.compile(
-    r"(?<![A-Za-z0-9+.-])(?!https?:)[A-Za-z][A-Za-z0-9+.-]*:"
-    r"(?:/{1,2}|%(?:25)*(?:2f|5c))",
-    re.IGNORECASE,
+_SCHEME_SUFFIX_TEXT = re.compile(
+    r"(?<![A-Za-z0-9+.-])"
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*):"
+    r"(?P<suffix>[^\s\"'<>`]*)",
 )
 _FILE_URI_PATH = re.compile(
     r"(?<![A-Za-z0-9+.-])file:(?:/{1,3}|%(?:25)*(?:2f|5c))",
@@ -456,7 +456,7 @@ def _contains_absolute_path(
     if (
         _contains_file_uri_destination(value)
         or _DANGEROUS_URI_TEXT.search(value) is not None
-        or _UNKNOWN_PATH_SCHEME.search(value) is not None
+        or _contains_unknown_path_scheme(value)
     ):
         return True
     inspected = _mask_safe_browser_destinations(
@@ -501,6 +501,27 @@ def _contains_file_uri_destination(value: str) -> bool:
         match.group("destination").casefold().startswith("file:")
         for match in _MARKDOWN_LINK_DESTINATION.finditer(value)
     )
+
+
+def _contains_unknown_path_scheme(value: str) -> bool:
+    for match in _SCHEME_SUFFIX_TEXT.finditer(value):
+        if match.group("scheme").casefold() in {
+            "data",
+            "file",
+            "http",
+            "https",
+            "javascript",
+            "vbscript",
+        }:
+            continue
+        suffix = match.group("suffix")
+        if suffix.startswith(("/", "\\")):
+            return True
+        if suffix.startswith("%"):
+            decoded = _decode_percent_recursively(suffix)
+            if decoded is None or decoded.startswith(("/", "\\")):
+                return True
+    return False
 
 
 def _is_safe_http_url(value: str) -> bool:
