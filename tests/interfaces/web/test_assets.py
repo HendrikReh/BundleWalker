@@ -200,6 +200,120 @@ def test_web_asset_validation_rejects_missing_wrong_or_ambiguous_loading_role(
         validate_web_assets(static)
 
 
+def test_web_asset_validation_rejects_extra_distinct_module_script(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            b"<!doctype html><html><head>"
+            b'<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            b'<script type="module" src="/assets/extra-abcdefgh.js"></script>'
+            b'<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            b"</head><body></body></html>"
+        ),
+    )
+    static.joinpath("assets", "extra-abcdefgh.js").write_text(
+        "export {};\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
+def test_web_asset_validation_rejects_extra_distinct_stylesheet(tmp_path: Path) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            b"<!doctype html><html><head>"
+            b'<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            b'<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            b'<link rel="stylesheet" href="/assets/extra-abcdefgh.css">'
+            b"</head><body></body></html>"
+        ),
+    )
+    static.joinpath("assets", "extra-abcdefgh.css").write_text(
+        "body {}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
+@pytest.mark.parametrize(
+    "whitespace",
+    ["\u00a0", "\u2003"],
+    ids=["nbsp", "em-space"],
+)
+def test_web_asset_validation_rejects_non_ascii_whitespace_around_module_type(
+    tmp_path: Path,
+    whitespace: str,
+) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            "<!doctype html><html><head>"
+            f'<script type="{whitespace}module{whitespace}" '
+            'src="/assets/index-abcdefgh.js"></script>'
+            '<link rel="stylesheet" href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ).encode(),
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
+@pytest.mark.parametrize(
+    "whitespace",
+    ["\u00a0", "\u2003"],
+    ids=["nbsp", "em-space"],
+)
+def test_web_asset_validation_rejects_non_ascii_whitespace_around_stylesheet_rel(
+    tmp_path: Path,
+    whitespace: str,
+) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            "<!doctype html><html><head>"
+            '<script type="module" src="/assets/index-abcdefgh.js"></script>'
+            f'<link rel="{whitespace}stylesheet{whitespace}" '
+            'href="/assets/index-abcdefgh.css">'
+            "</head><body></body></html>"
+        ).encode(),
+    )
+
+    with pytest.raises(ApplicationError, match="web interface assets are unavailable"):
+        validate_web_assets(static)
+
+
+def test_web_asset_validation_accepts_ascii_whitespace_and_case_in_role_attributes(
+    tmp_path: Path,
+) -> None:
+    static = tmp_path / "static"
+    _write_static_bundle(
+        static,
+        index=(
+            b"<!doctype html><html><head>"
+            b'<script type="\tMoDuLe\r" src="/assets/index-abcdefgh.js"></script>'
+            b'<link rel="preload\nStyleSheet" href="/assets/index-abcdefgh.css">'
+            b"</head><body></body></html>"
+        ),
+    )
+
+    assets = validate_web_assets(static)
+
+    assert set(assets.files) == {
+        "index-abcdefgh.css",
+        "index-abcdefgh.js",
+    }
+
+
 @pytest.mark.parametrize(
     "asset_path",
     [

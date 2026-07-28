@@ -19,6 +19,7 @@ _HASHED_ASSET = re.compile(
     r"^[A-Za-z0-9_.]+-[A-Za-z0-9_-]{8,}\.(?:css|gif|ico|jpe?g|js|png|svg|webp|woff2?)$"
 )
 _ASSET_ERROR_MESSAGE = "web interface assets are unavailable"
+_HTML_ASCII_WHITESPACE = "\t\n\f\r "
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +56,8 @@ class _IndexAssetParser(HTMLParser):
             script_type = _single_attribute(attrs, "type")
             role = (
                 "module-script"
-                if script_type is not None and (script_type.strip().casefold() == "module")
+                if script_type is not None
+                and script_type.strip(_HTML_ASCII_WHITESPACE).casefold() == "module"
                 else "other"
             )
             self.references.append((reference, role))
@@ -65,9 +67,7 @@ class _IndexAssetParser(HTMLParser):
             if reference is None:
                 return
             rel = _single_attribute(attrs, "rel")
-            rel_tokens: frozenset[str] = (
-                frozenset(rel.casefold().split()) if rel is not None else frozenset()
-            )
+            rel_tokens: frozenset[str] = _html_ascii_tokens(rel) if rel is not None else frozenset()
             role = "stylesheet" if "stylesheet" in rel_tokens else "other"
             self.references.append((reference, role))
 
@@ -80,6 +80,13 @@ def _single_attribute(
     if len(values) > 1:
         raise ValueError("web asset element has duplicate attributes")
     return values[0] if values else None
+
+
+def _html_ascii_tokens(value: str) -> frozenset[str]:
+    normalized = value.casefold()
+    for character in _HTML_ASCII_WHITESPACE.removesuffix(" "):
+        normalized = normalized.replace(character, " ")
+    return frozenset(token for token in normalized.split(" ") if token)
 
 
 def validate_web_assets(static_dir: Traversable | None = None) -> ValidatedWebAssets:
@@ -96,8 +103,8 @@ def validate_web_assets(static_dir: Traversable | None = None) -> ValidatedWebAs
         manifest = json.loads(manifest_bytes.decode("utf-8"))
         manifest_assets, entry_script, entry_stylesheets = _manifest_assets(manifest)
         index_assets = _index_assets(index_text)
-        if entry_script not in index_assets.module_scripts or not entry_stylesheets.issubset(
-            index_assets.stylesheets
+        if index_assets.module_scripts != frozenset({entry_script}) or (
+            index_assets.stylesheets != frozenset(entry_stylesheets)
         ):
             raise ValueError("Vite entry asset loading roles are invalid")
 
