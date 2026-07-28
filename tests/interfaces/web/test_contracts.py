@@ -170,6 +170,66 @@ def test_workspace_response_rejects_recursively_encoded_path_schemes(
 
 
 @pytest.mark.parametrize(
+    "path_scheme",
+    [
+        "path:%2520%252fetc/passwd",
+        r"path:%20%25255cUsers\private",
+        "path:relative%252fetc",
+        "path:relative%",
+        "path:relative%ZZ",
+        "path:relative/etc",
+        r"path:relative\Users",
+    ],
+)
+def test_workspace_response_rejects_path_scheme_separators_anywhere(
+    path_scheme: str,
+) -> None:
+    status = WorkspaceStatus(
+        display_name="knowledge",
+        config_version=3,
+        concept_counts={"Topic": 1},
+        pending_review=PendingReviewSummary(
+            review_id=REVIEW_ID,
+            kind=ReviewKind.INGESTION,
+            status=ReviewStatus.PENDING,
+            summary=f"Review {path_scheme}",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_workspace(status, csrf_token="csrf")
+
+
+@pytest.mark.parametrize(
+    "safe_reference",
+    [
+        "reference:relative-value",
+        "reference:relative%20value",
+        "note:",
+    ],
+)
+def test_workspace_response_preserves_safe_non_path_scheme_text(
+    safe_reference: str,
+) -> None:
+    status = WorkspaceStatus(
+        display_name="knowledge",
+        config_version=3,
+        concept_counts={"Topic": 1},
+        pending_review=PendingReviewSummary(
+            review_id=REVIEW_ID,
+            kind=ReviewKind.INGESTION,
+            status=ReviewStatus.PENDING,
+            summary=f"Review {safe_reference}",
+        ),
+    )
+
+    response = to_web_workspace(status, csrf_token="csrf")
+
+    assert response.pending_review is not None
+    assert response.pending_review.summary == f"Review {safe_reference}"
+
+
+@pytest.mark.parametrize(
     "summary",
     [
         "Review https://example.com/guides/agents?view=full#citations",
@@ -598,6 +658,69 @@ def test_review_mapper_rejects_recursively_encoded_path_schemes(
 
     with pytest.raises(ValueError, match="absolute"):
         to_web_review(review)
+
+
+@pytest.mark.parametrize(
+    "path_scheme",
+    [
+        "path:%2520%252fetc/passwd",
+        r"path:%20%25255cUsers\private",
+        "path:relative%252fetc",
+        "path:relative%",
+        "path:relative%ZZ",
+        "path:relative/etc",
+        r"path:relative\Users",
+    ],
+)
+@pytest.mark.parametrize("field", ["summary", "diff"])
+def test_review_mapper_rejects_path_scheme_separators_anywhere(
+    field: str,
+    path_scheme: str,
+) -> None:
+    value = (
+        f"Review {path_scheme}"
+        if field == "summary"
+        else (
+            "diff --git a/topics/agents.md b/topics/agents.md\n"
+            "--- a/topics/agents.md\n"
+            "+++ b/topics/agents.md\n"
+            f"+[Unsafe]({path_scheme})\n"
+        )
+    )
+    review = _review().model_copy(update={field: value})
+
+    with pytest.raises(ValueError, match="absolute"):
+        to_web_review(review)
+
+
+@pytest.mark.parametrize(
+    "safe_reference",
+    [
+        "reference:relative-value",
+        "reference:relative%20value",
+        "note:",
+    ],
+)
+@pytest.mark.parametrize("field", ["summary", "diff"])
+def test_review_mapper_preserves_safe_non_path_scheme_text(
+    field: str,
+    safe_reference: str,
+) -> None:
+    value = (
+        f"Review {safe_reference}"
+        if field == "summary"
+        else (
+            "diff --git a/topics/agents.md b/topics/agents.md\n"
+            "--- a/topics/agents.md\n"
+            "+++ b/topics/agents.md\n"
+            f"+Reference {safe_reference}\n"
+        )
+    )
+    review = _review().model_copy(update={field: value})
+
+    response = to_web_review(review)
+
+    assert getattr(response, field) == value
 
 
 @pytest.mark.parametrize(

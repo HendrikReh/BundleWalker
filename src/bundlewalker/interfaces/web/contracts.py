@@ -515,12 +515,11 @@ def _contains_unknown_path_scheme(value: str) -> bool:
         }:
             continue
         suffix = match.group("suffix")
-        if suffix.startswith(("/", "\\")):
+        decoded = _decode_percent_recursively(suffix) if "%" in suffix else suffix
+        if decoded is None:
             return True
-        if suffix.startswith("%"):
-            decoded = _decode_percent_recursively(suffix)
-            if decoded is None or decoded.startswith(("/", "\\")):
-                return True
+        if "/" in decoded or "\\" in decoded:
+            return True
     return False
 
 
