@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           version="$(uv run python -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
-          uv run python -c 'import re, sys; from packaging.version import Version; value = sys.argv[1]; assert str(Version(value)) == value; assert re.fullmatch(r"0\.4\.0(?:rc[1-9][0-9]*)?", value)' "$version"
+          uv run python -c 'import re, sys; from packaging.version import Version; value = sys.argv[1]; assert str(Version(value)) == value; assert re.fullmatch(r"0\.5\.0(?:rc[1-9][0-9]*)?", value)' "$version"
           test "$GITHUB_REF_TYPE" = "tag"
           test "$GITHUB_REF_NAME" = "v${version}"
           test "$(uv run python -c 'from importlib.metadata import version; print(version("bundlewalker"))')" = "$version"
@@ -302,7 +302,7 @@ jobs:
           PY
           expected_prerelease=false
           case "$version" in
-            0.4.0rc*) expected_prerelease=true ;;
+            0.5.0rc*) expected_prerelease=true ;;
           esac
           if gh release view "$tag" >/dev/null 2>&1; then
             test "$(gh release view "$tag" --json name --jq .name)" = "BundleWalker ${version}"

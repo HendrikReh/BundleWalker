@@ -795,25 +795,33 @@ def test_active_documentation_publishes_the_standard_local_web_contract() -> Non
         .split("## [Unreleased]", maxsplit=1)[1]
         .split("\n## [", maxsplit=1)[0]
     )
-    normalized_unreleased = " ".join(unreleased.split()).casefold()
-    assert "local verification and required ci passed" in normalized_unreleased
-    assert "ubuntu 24.04 and macos 15" in normalized_unreleased
-    assert "python 3.13 and 3.14" in normalized_unreleased
-    assert "frontend/browser" in normalized_unreleased
-    assert "dependency audit" in normalized_unreleased
-    assert "distribution build and packaged-asset validation" in normalized_unreleased
-    assert "all eight clean wheel/sdist install smokes" in normalized_unreleased
-    assert "the separate codeql analysis also passed" in normalized_unreleased
-    assert "the gui remains unreleased" in normalized_unreleased
-    assert "final release verification remains pending" not in normalized_unreleased
-    assert re.search(r"not part of (?:the )?tagged `0\.4\.0`", normalized_unreleased)
+    assert unreleased.strip() == ""
+
+    gui_release = (
+        active["CHANGELOG.md"]
+        .split("## [v0.5.0] - 2026-07-28", maxsplit=1)[1]
+        .split("\n## [", maxsplit=1)[0]
+    )
+    normalized_gui_release = " ".join(gui_release.split()).casefold()
+    assert "local `bundlewalker-web` review cockpit" in normalized_gui_release
+    assert "local verification and required ci passed" in normalized_gui_release
+    assert "ubuntu 24.04 and macos 15" in normalized_gui_release
+    assert "python 3.13 and 3.14" in normalized_gui_release
+    assert "frontend/browser" in normalized_gui_release
+    assert "dependency audit" in normalized_gui_release
+    assert "distribution build and packaged-asset validation" in normalized_gui_release
+    assert "all eight clean wheel/sdist install smokes" in normalized_gui_release
+    assert "the separate codeql analysis also passed" in normalized_gui_release
+    assert "the gui remains unreleased" not in normalized_gui_release
+    assert "final release verification remains pending" not in normalized_gui_release
+    assert re.search(r"not part of (?:the )?tagged `0\.4\.0`", normalized_gui_release) is None
 
 
 def test_development_version_is_public_beta() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.0"
-    assert bundlewalker.__version__ == "0.4.0"
+    assert project["project"]["version"] == "0.5.0"
+    assert bundlewalker.__version__ == "0.5.0"
     assert "Development Status :: 4 - Beta" in project["project"]["classifiers"]
     assert "Development Status :: 3 - Alpha" not in project["project"]["classifiers"]
 
@@ -858,7 +866,7 @@ def test_source_distribution_excludes_untracked_superpowers_worker_state(
 
     assert not any("/.superpowers/" in path for path in packaged_paths)
     assert (
-        "bundlewalker-0.4.0/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+        "bundlewalker-0.5.0/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
     ) in packaged_paths
 
 
@@ -935,10 +943,10 @@ def test_public_beta_documents_preserve_release_candidate_history() -> None:
     normalized_user_guide = " ".join(user_guide.split())
     normalized_performance = " ".join(performance.split())
 
-    assert "current public beta is `0.4.0`" in readme
-    assert 'uv tool install "bundlewalker==0.4.0"' in readme
-    assert "current public beta is `0.4.0`" in user_guide
-    assert 'uv tool install "bundlewalker==0.4.0"' in user_guide
+    assert "current public beta is `0.5.0`" in readme
+    assert 'uv tool install "bundlewalker==0.5.0"' in readme
+    assert "current public beta is `0.5.0`" in user_guide
+    assert 'uv tool install "bundlewalker==0.5.0"' in user_guide
     for active_guide in (
         normalized_readme,
         normalized_support,
@@ -951,6 +959,7 @@ def test_public_beta_documents_preserve_release_candidate_history() -> None:
         assert "release candidate" not in active_guide.casefold()
     assert "BundleWalker `0.4.0` installed as a tool" in vscode_setup
     assert "## [Unreleased]" in changelog
+    assert "## [v0.5.0] - 2026-07-28" in changelog
     assert "## [v0.4.0] - 2026-07-25" in changelog
     assert "## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog
@@ -963,7 +972,10 @@ def test_public_beta_documents_preserve_release_candidate_history() -> None:
         "## [v0.4.0rc2] - 2026-07-21", maxsplit=1
     )[0]
     assert (
-        "[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0...HEAD"
+        "[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.5.0...HEAD"
+    ) in changelog
+    assert (
+        "[v0.5.0]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0...v0.5.0"
     ) in changelog
     assert (
         "[v0.4.0]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...v0.4.0"
