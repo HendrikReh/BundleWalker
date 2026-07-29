@@ -16,3 +16,6 @@ __pycache__/
 /.benchmark-*.md
 *.partial
 /...benchmark-*.json.*.partial.cleanup-*/
+frontend/node_modules/
+frontend/coverage/
+frontend/test-results/

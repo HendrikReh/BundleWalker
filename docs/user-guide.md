@@ -1,8 +1,8 @@
 # BundleWalker User Guide
 
 BundleWalker is a local-first tool that turns a source bundle into a navigable knowledge workspace for people and AI agents.
-This guide is the canonical operational reference for every supported CLI and MCP workflow,
-including review, recovery, lifecycle management, and troubleshooting.
+This guide is the canonical operational reference for every supported CLI, MCP, and local-web
+workflow, including review, recovery, lifecycle management, and troubleshooting.
 
 ## Choose your path
 
@@ -11,6 +11,8 @@ including review, recovery, lifecycle management, and troubleshooting.
 - **CLI users:** go to the [CLI reference](#cli-reference) for authoritative signatures, then use
   the task sections for intent, safety, and recovery behavior.
 - **MCP-host users:** start with the [host-neutral local MCP guide](#use-bundlewalker-through-a-local-mcp-host).
+- **Local-web users:** start with the
+  [local web review cockpit](#use-the-local-web-review-cockpit).
 - **Hermes users:** use the separate [Hermes MCP setup guide](hermes-mcp-setup.md) for
   Hermes-specific registration and configuration.
 - **VS Code/Copilot users:** use the separate
@@ -33,7 +35,8 @@ including review, recovery, lifecycle management, and troubleshooting.
   an explicit decision, and recoverable persistence.
 - The **MCP server** is the existing local `stdio` interface that binds one workspace at startup;
   it is not a hosted or remote service.
-- The **local web UI** is planned, not implemented. Use the CLI or local MCP server today.
+- The **local web UI** is an explicitly launched, loopback-only review cockpit for one workspace;
+  it shares the same application and pending-review state as the CLI and MCP server.
 
 A BundleWalker workspace separates original evidence from maintained knowledge:
 
@@ -78,6 +81,18 @@ For the current public beta without a checkout, install the exact release as an 
 uv tool install "bundlewalker==0.4.0"
 bundlewalker --help
 ```
+
+The local web cockpit is implemented on the current unreleased branch and ships in the standard
+Python package rather than a separate web install. For a published build containing it, use:
+
+```bash
+pip install bundlewalker
+bundlewalker-web --help
+```
+
+The tagged `0.4.0` public beta predates this unreleased addition. In a current source checkout,
+`uv sync --locked` installs the Python web runtime with the rest of BundleWalker; installed users
+do not need Node.js.
 
 Examples in this guide start from the checkout. After changing into a knowledge workspace, they
 pass the checkout through `uv --project "$PROJECT_ROOT"` so `uv` can still find BundleWalker.
@@ -644,8 +659,8 @@ For a command-and-arguments MCP configuration, the same launch is:
 
 The optional `--workspace` is resolved once at startup; omitting it uses normal workspace discovery
 from the server process's current directory. After startup, only MCP protocol messages use stdout.
-Diagnostics use stderr or MCP logging. A local web UI is not implemented; it is a separate next
-plan.
+Diagnostics use stderr or MCP logging. The separately launched local web cockpit can open the same
+workspace and inspect or resolve the MCP server's one pending review.
 
 ### Resources and review lifecycle
 
@@ -730,6 +745,83 @@ The default test suite remains offline and needs no model credentials or network
 `uv run pytest -m 'not eval' -q`. Provider access belongs only to the runtime model-backed tools
 listed above (and to explicit opt-in evaluations), not to deterministic tests or MCP transport.
 
+## Use the local web review cockpit
+
+The web UI is an explicitly launched local adapter for one existing workspace. It does not create,
+migrate, repair, back up, restore, or configure workspaces. Create and maintain lifecycle state
+with the CLI, then start the cockpit from the workspace or name it explicitly:
+
+```bash
+cd /path/to/workspace
+bundlewalker-web
+
+bundlewalker-web --workspace /path/to/workspace
+```
+
+Without `--workspace`, BundleWalker discovers the nearest workspace from the current directory.
+Startup validates that one workspace before opening a browser. The process binds only an
+ephemeral port on `127.0.0.1`; there is no host or remote-bind option. It stays in the foreground,
+and Ctrl-C stops the server and invalidates every in-memory browser session.
+
+If the default browser cannot be opened, the terminal prints
+`Open this URL in your browser: ...`. Copy that complete URL into a browser on the same machine.
+Treat it as a single-use secret scoped to the lifetime of that server process: until exchanged,
+it remains valid for as long as the process runs. Do not paste it into chat, logs, an issue, or
+another person's browser. A successful first visit exchanges the bootstrap value for a
+non-persistent browser session and redirects to a clean URL.
+
+### Browse, ask, lint, and prepare work
+
+The Explorer identifies the bound workspace and opens Review first when a proposal is pending;
+otherwise it opens Browse. The workbenches provide:
+
+- **Browse:** page through concepts, run bounded lexical search, and read safe rendered Markdown.
+- **Ask:** request a cited, read-only answer without creating a review.
+- **Lint:** run deterministic checks or an explicit model-backed semantic advisory pass.
+- **New ingestion:** paste text or select one bounded UTF-8 `.md` or `.txt` file. The browser sends
+  the basename and text, never a server-side path.
+- **Prepare synthesis:** run a separate model-backed preparation from the question. It is distinct
+  from read-only Ask and returns an answer plus a pending review.
+- **Prepare refresh:** revise an eligible Synthesis from an explicit instruction. An already
+  current result creates no review; a changed result creates the exact pending proposal.
+
+Long-running model operations use one ordinary request. Their forms prevent duplicate submission
+and show progress, but closing the tab does not promise provider cancellation. Reopen the cockpit
+to reload authoritative workspace and pending-review state.
+
+### Inspect and resolve the exact proposal
+
+Review displays the proposal kind, summary, changed paths, opaque review ID, and complete persisted
+diff. Wide screens default to side-by-side presentation; narrow screens default to unified
+presentation, and a visible control can switch modes. Added and removed rows include text labels
+and signs as well as color.
+
+Apply and Discard act on the whole proposal only and require confirmation. They send the exact
+review ID and reload authoritative workspace, concept, lint, and review state before navigation.
+There is no partial-file or hunk-level apply and no review backlog: one workspace has zero or one
+pending review.
+
+The pending review belongs to the workspace, not to an adapter. A proposal prepared through MCP is
+visible immediately when the web process opens that workspace; the browser can inspect, Apply, or
+Discard it without translation. The CLI `bundlewalker review` commands remain an equivalent
+recovery path.
+
+### Understand the local browser boundary
+
+Loopback binding is exposure reduction, not the only protection. Every protected request must
+match the exact `127.0.0.1` host and selected port and carry a valid process-local session.
+State-changing requests also require the exact same Origin and a session-bound CSRF value. The
+single-use bootstrap, session, and CSRF values exist only in memory and are cleared at shutdown.
+
+The browser loads packaged same-origin scripts and styles only. HTML and API responses are not
+cached; content-hashed assets may be cached immutably. Workspace Markdown is treated as untrusted:
+raw HTML is not executed, executable links are rejected, and external links receive safe
+navigation attributes.
+
+This boundary is for one local user on one machine. The first release deliberately has no remote
+access, accounts, teams, multi-workspace switcher, daemon, background jobs, or web lifecycle
+administration. macOS and Linux are supported; Windows is experimental.
+
 ## Workspace and process reference
 
 ### Workspace layout and configuration
@@ -794,8 +886,8 @@ content or provider credentials.
 ## Limits and compatibility
 
 BundleWalker is a public beta for technical solo users. The current public beta is `0.4.0`. macOS
-and Linux are supported; Windows is experimental. The planned local web UI is not part of the
-current release.
+and Linux are supported; Windows is experimental. The local web cockpit is implemented on the
+current unreleased branch and is not part of the already-tagged `0.4.0` release.
 
 The [workspace compatibility and portable-backup policy](workspace-compatibility.md) is
 authoritative for readable and writable formats, explicit upgrades, archive scope, restoration,
@@ -860,6 +952,34 @@ Pass `--model '<pydantic-ai-model-string>'` or set `BUNDLEWALKER_MODEL`; the exp
 Check provider credentials without printing them. See
 [Model and provider setup](#model-and-provider-setup).
 
+### The web command is unavailable
+
+The web runtime is part of the standard package. Do not add a separate feature suffix to the
+package name. From a current source checkout, run `uv sync --locked`; for a published build that
+contains the cockpit, run `pip install bundlewalker`, then confirm `bundlewalker-web --help`.
+Also confirm that the environment's scripts directory is on `PATH`.
+
+### The browser did not open
+
+Keep `bundlewalker-web` running and copy the complete `Open this URL in your browser: ...` value
+from the terminal into a browser on the same machine. Do not share or record the URL. If the
+single-use URL has already been consumed or rejected, stop the process with Ctrl-C and start it
+again to create a fresh session.
+
+### A web model operation fails
+
+The form preserves its question, instruction, source text, and model choice after a bounded
+configuration or provider error. Set `BUNDLEWALKER_MODEL` and the provider credential in the
+terminal that starts `bundlewalker-web`, or enter a supported explicit model where offered, then
+retry. The browser never stores provider credentials.
+
+### A web review changed or became stale
+
+Another CLI, MCP, browser process, or editor may have changed authoritative state. The cockpit
+does not retry a write silently; it reloads the current review or blocks resolution if
+reconciliation fails. Inspect the new state. A stale review cannot be applied, so Discard it by
+its exact ID and prepare a fresh proposal from current content.
+
 ### OpenAI returns 401 or 403
 
 Confirm that `OPENAI_API_KEY` is set in the BundleWalker process and that the account can use the
@@ -919,6 +1039,8 @@ BundleWalker never commits or pushes for you. Review durable files—especially 
 - The [VS Code/Copilot MCP Setup Guide](vscode-copilot-mcp-setup.md) contains workspace-scoped
   configuration, secret inputs, tool selection, approvals, resources, diagnostics, and removal;
   the [MCP Host Compatibility Record](mcp-compatibility.md) publishes the exact observed evidence.
+- The [local web review cockpit](#use-the-local-web-review-cockpit) covers launch, capabilities,
+  MCP handoff, browser security, shutdown, and troubleshooting.
 - The [Workspace Compatibility Policy](workspace-compatibility.md) defines lifecycle and
   portability behavior.
 - [Performance and Capacity](performance-and-capacity.md) publishes reviewed measurements,

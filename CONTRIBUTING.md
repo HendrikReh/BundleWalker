@@ -10,8 +10,9 @@ deterministic code, and must keep the default test suite offline.
 BundleWalker v3 ingests one UTF-8 Markdown or text source at a time and produces only four
 concept types: Source, Topic, Entity, and Synthesis. Agents never write files directly. The
 project does not perform automatic Git operations and does not run a background, hosted, or remote
-service. Its MCP adapter is a foreground local `stdio` process bound to one workspace at startup;
-the local web UI remains a separate next plan.
+service. Its MCP adapter is a foreground local `stdio` process bound to one workspace at startup.
+Its separately launched web adapter binds an ephemeral `127.0.0.1` port and serves one workspace
+until Ctrl-C; it is not a daemon, remote service, or lifecycle-management interface.
 
 Before proposing an expansion of that scope, read the original
 [v1 design](docs/superpowers/specs/2026-07-15-bundlewalker-v1-design.md), the accepted
@@ -26,7 +27,8 @@ change should begin with an explicit design decision, not an incidental implemen
 | Layer | Main paths | Responsibility |
 | --- | --- | --- |
 | CLI compatibility | `src/bundlewalker/cli.py` | Re-export `app` and `main` for existing imports and the `bundlewalker` console entry point. |
-| Delivery adapters | `src/bundlewalker/interfaces/cli.py`, `src/bundlewalker/interfaces/mcp.py`, `src/bundlewalker/interfaces/mcp_schemas.py`, `src/bundlewalker/interfaces/mcp_tools.py` | Typer parsing, display, confirmation, and bounded exits; plus local `stdio` MCP resources, strict tool schemas, and dispatch. |
+| Delivery adapters | `src/bundlewalker/interfaces/cli.py`, `src/bundlewalker/interfaces/mcp.py`, `src/bundlewalker/interfaces/mcp_schemas.py`, `src/bundlewalker/interfaces/mcp_tools.py`, `src/bundlewalker/interfaces/web/` | Typer parsing, display, and bounded exits; local `stdio` MCP resources, strict tool schemas, and dispatch; plus loopback browser security, explicit web DTOs/API mapping, packaged assets, and foreground lifecycle. |
+| Browser UI | `frontend/` | React presentation and temporary view/query state; it consumes only the versioned same-origin web API and cannot own workspace or transaction authority. |
 | Application | `src/bundlewalker/application/` | Workspace-bound async facade, serializable contracts, and bounded error translation shared by delivery adapters |
 | Workflows | `src/bundlewalker/workflows/` | Recovery, orchestration, pre-model checks, dependency construction, and transaction preparation |
 | Agents | `src/bundlewalker/agents/` | PydanticAI prompts, read-only tools, typed model output, and output validation |
@@ -74,7 +76,9 @@ from release provenance, and retain the explicit Hatch source-distribution inclu
 BundleWalker development requires Python 3.13 or 3.14. Required CI tests both versions on macOS
 and Linux; Windows is experimental and remains visible without being a supported gate. Use the
 locked dependency graph so local results match CI and other contributors. Credentials are
-unnecessary for the default suite.
+unnecessary for the default suite. Browser-interface work additionally requires exact Node
+`22.22.3`; installed users do not need Node because reviewed production assets ship in the normal
+Python package.
 
 ```bash
 git clone https://github.com/HendrikReh/BundleWalker.git
@@ -82,6 +86,27 @@ cd BundleWalker
 uv sync --locked
 uv run bundlewalker --help
 ```
+
+Install the locked frontend graph before running browser checks:
+
+```bash
+cd frontend
+npm ci
+cd ..
+```
+
+The frontend command surface is:
+
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Run Vite's contributor development server; it is not an installed-user or supported remote service. |
+| `npm run format:check` | Check frontend formatting without changes. |
+| `npm run format:write` | Apply frontend formatting intentionally. |
+| `npm run lint` | Run the TypeScript, React Hooks, and React Refresh ESLint policy. |
+| `npm run test` | Run Vitest unit, component, and contract-consumer tests. |
+| `npm run test:a11y` | Run the focused keyboard, focus, announcement, and axe baseline. |
+| `npm run build` | Type-check and rebuild the packaged production assets. |
+| `npm run test:e2e` | Run Playwright journeys through the production smoke harness described below. |
 
 Maintainers must follow the [Release Procedure](docs/maintainers/releases.md); contributors must
 not create tags or publish package artifacts from feature branches.
@@ -106,7 +131,11 @@ can provide the current interface.
 - `tests/cli/`: Typer arguments, output, prompts, exit codes, and routing;
 - `tests/application/`: facade contracts, workspace confinement, and adapter-neutral use cases;
 - `tests/interfaces/`: local MCP resources, strict schemas, tool dispatch, progress/cancellation,
-  and `stdio` process behavior;
+  `stdio` process behavior, plus local-web contracts, APIs, browser security, assets, and
+  loopback lifecycle;
+- `frontend/src/**/*.test.tsx`: browser client, component, workbench, contract, focus, and
+  accessibility behavior;
+- `frontend/e2e/`: deterministic production-stack Chromium journeys;
 - `tests/test_acceptance.py`: complete offline user workflows and recovery;
 - remaining `tests/test_*.py`: domain, workspace, retrieval, changes, conventions, and
   transactions; and
@@ -122,6 +151,32 @@ uv run ruff format --check .
 uv run ruff check .
 uv run pyright
 git diff --check
+```
+
+For any frontend or web-adapter change, also run:
+
+```bash
+cd frontend
+npm ci
+npm run format:check
+npm run lint
+npm run test
+npm run test:a11y
+npm run build
+npm audit --audit-level=high
+cd ..
+git diff --exit-code -- src/bundlewalker/interfaces/web/static
+```
+
+`npm run build` includes strict TypeScript compilation and writes the Vite output directly to the
+packaged Python static directory. Run the real-browser suite with the production loopback/session
+path after installing the locked Chromium version:
+
+```bash
+cd frontend
+npx playwright install chromium
+cd ..
+uv run python scripts/run_web_smoke.py -- npm --prefix frontend run test:e2e
 ```
 
 Run the smallest relevant focused test before this standard verification gate; for example,
@@ -149,6 +204,30 @@ section, or changes its navigation.
 Historical plans and specifications are immutable project records.
 Do not synchronize them with later edits to active documentation. Validate the current README,
 tutorial, user guide, specialist guides, and policy files against the live product instead.
+
+### Web source, contracts, and packaged assets
+
+Treat `frontend/package-lock.json`, `frontend/src/test/fixtures/contracts.json`, and
+`src/bundlewalker/interfaces/web/static/` as reviewed product inputs and outputs:
+
+- keep the frontend dependency graph exact and update
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) whenever its production inventory changes;
+- regenerate canonical Python-to-TypeScript examples with
+  `uv run python scripts/generate_web_contract_fixtures.py`, then require their Git diff to remain
+  clean;
+- never hand-edit compiled Vite output; change frontend source, run `npm run build`, and commit the
+  new manifest, HTML shell, and content-hashed assets together;
+- keep production source maps, remote scripts, fonts, analytics, credentials, bootstrap values,
+  and developer-only absolute paths out of packaged assets;
+- preserve keyboard operation, visible focus, status announcements, non-color labels, reduced
+  motion, narrow-screen behavior, and the serious/critical axe baseline; and
+- use the Playwright smoke for cross-boundary journeys instead of replacing lower-level Python or
+  component tests with browser-only assertions.
+
+The web runtime is part of the standard Python dependency set. Distribution checks install the
+ordinary wheel and source archive, run `bundlewalker-web --help`, inspect the packaged
+`static/index.html`, manifest, and hashed assets, and verify that
+`THIRD_PARTY_NOTICES.md` ships with the artifacts.
 
 For every active-document change, check relative links and local heading anchors, compare affected
 commands with live help, and preserve versioned statements that intentionally describe a tagged
@@ -191,6 +270,8 @@ copyright assignment, contributor license agreement, or Developer Certificate of
 - [ ] The change is focused, remains within v3 scope, or links to an accepted scope decision.
 - [ ] Focused tests cover the behavior and were observed failing before the fix where applicable.
 - [ ] The full offline suite passes.
+- [ ] Frontend format, lint, unit/component, accessibility, build, audit, clean-asset, and
+  Playwright checks pass when browser code or contracts changed.
 - [ ] `uv run ruff format --check .` and `uv run ruff check .` pass.
 - [ ] `uv run pyright` reports no errors or warnings.
 - [ ] `git diff --check` is silent for the working tree.

@@ -21,7 +21,8 @@ of every accepted source as immutable evidence.
 - **Trace answers to evidence.** Cited answers link back to the OKF Markdown concepts they read,
   while accepted source bytes stay unchanged.
 - **Use the same workspace from different interfaces.** Work directly through the command-line
-  interface or connect an AI agent through the local MCP server.
+  interface, connect an AI agent through the local MCP server, or inspect and resolve work in the
+  local browser cockpit.
 - **Recover safely.** Authenticated transaction state lets an accepted write finish or roll back
   after interruption without silently accepting a partial result.
 
@@ -48,6 +49,18 @@ bundlewalker-mcp --help
 Keep the exact version in the install command for reproducible setup. If you want to contribute or
 run from a source checkout, use the separate
 [development setup](CONTRIBUTING.md#development-setup).
+
+The local web cockpit is implemented on the current unreleased branch and is included in the
+standard Python package; there is no separate web install. For a published build that contains
+this feature, the conventional installation is:
+
+```bash
+pip install bundlewalker
+bundlewalker-web --help
+```
+
+The tagged `0.4.0` public beta predates this unreleased addition. From the current source checkout,
+`uv sync --locked` installs the same web runtime for development and testing.
 
 ## Create your first workspace
 
@@ -112,8 +125,33 @@ documented but untested combinations.
 
 ### Local web UI
 
-A local web UI is planned, not implemented. Use the command-line interface or local MCP server
-today; there is no web application or hosted service to start.
+The explicitly launched local web UI is a review cockpit for one workspace. It can Browse and
+search concepts, Ask cited questions, run deterministic or semantic lint, prepare pasted text or
+one `.md`/`.txt` file, prepare Syntheses and refreshes, inspect the complete exact diff, and Apply
+or Discard the whole proposal.
+
+From a workspace or with an explicit workspace path, run:
+
+```bash
+bundlewalker-web
+bundlewalker-web --workspace /absolute/path/to/workspace
+```
+
+The process binds an operating-system-selected port on `127.0.0.1`, opens a single-use
+authenticated URL in the default browser, and stays attached to the terminal. If the browser does
+not open, copy the complete URL printed in the terminal without sharing it. Press Ctrl-C to stop
+the server and invalidate its in-memory browser sessions.
+
+One process serves one workspace, with the same zero-or-one pending-review state used by the CLI
+and MCP server. A proposal prepared through MCP therefore appears in the browser and can be
+resolved there by its exact opaque review ID. Host, session, Origin, and CSRF checks protect the
+loopback browser boundary; the UI loads only packaged same-origin assets.
+
+The first web release intentionally excludes remote access, multiple workspaces, accounts,
+background service operation, workspace initialization, migration, backup, restore, and
+configuration editing. macOS and Linux are supported; Windows is experimental. See the
+[local web cockpit guide](docs/user-guide.md#use-the-local-web-review-cockpit) for the complete
+workflow, security boundary, and troubleshooting.
 
 ## Understand reviewed writes
 

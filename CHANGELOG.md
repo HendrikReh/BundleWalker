@@ -4,6 +4,18 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+- Added the local `bundlewalker-web` review cockpit for one workspace, with Browse, Ask, lint,
+  pasted or single-file ingestion preparation, synthesis and refresh preparation, exact diff
+  inspection, Apply, Discard, and MCP-to-web pending-review handoff.
+- Added loopback-only `127.0.0.1` serving with single-use bootstrap exchange, in-memory sessions,
+  exact Host/Origin and CSRF enforcement, packaged same-origin browser assets, accessibility
+  coverage, real-browser journeys, and standard-install artifact gates.
+- Added the frontend contributor and release toolchain, reproducible generated assets, canonical
+  Python-to-TypeScript contract fixtures, dependency auditing, and complete browser dependency
+  notices. Local verification and required CI passed across supported Ubuntu 24.04 and macOS 15
+  on Python 3.13 and 3.14, including frontend/browser, dependency audit, distribution build and
+  packaged-asset validation, and all eight clean wheel/sdist install smokes. The separate CodeQL
+  analysis also passed. The GUI remains unreleased and is not part of the tagged `0.4.0` beta.
 - Included all tracked historical `.bundlewalker` fixture data in source distributions while
   excluding untracked fixture files.
 - Separated current dependency-floor validation from the immutable `0.4.0rc3` lock-resolution

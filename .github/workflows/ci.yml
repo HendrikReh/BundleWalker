@@ -87,15 +87,76 @@ jobs:
       - name: Type-check
         run: uv run pyright
 
-  build:
-    name: Build distribution
-    needs: [supported]
+  frontend:
+    name: Frontend and browser
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      - name: Install exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.3"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.13"
+          enable-cache: true
+          cache-suffix: frontend
+      - name: Synchronize locked environments
+        run: |
+          uv sync --locked
+          npm ci
+        working-directory: frontend
+      - name: Regenerate canonical web contracts
+        run: uv run python scripts/generate_web_contract_fixtures.py
+      - name: Check frontend format
+        run: npm run format:check
+        working-directory: frontend
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+      - name: Test frontend
+        run: npm run test
+        working-directory: frontend
+      - name: Build reviewed browser assets
+        run: npm run build
+        working-directory: frontend
+      - name: Require reproducible contracts and assets
+        run: |
+          git diff --exit-code -- frontend/src/test/fixtures/contracts.json
+          git diff --exit-code -- src/bundlewalker/interfaces/web/static
+      - name: Audit production browser dependencies
+        run: npm audit --audit-level=high
+        working-directory: frontend
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Run production browser smoke
+        run: >-
+          uv run python scripts/run_web_smoke.py --
+          npm --prefix frontend run test:e2e
+
+  build:
+    name: Build distribution
+    needs: [supported, frontend]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.3"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install uv and Python
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
@@ -105,10 +166,53 @@ jobs:
           cache-suffix: build
       - name: Synchronize locked environment
         run: uv sync --locked
+      - name: Install locked browser dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Regenerate canonical web contracts
+        run: uv run python scripts/generate_web_contract_fixtures.py
+      - name: Build reviewed browser assets
+        run: npm run build
+        working-directory: frontend
+      - name: Require reproducible contracts and assets
+        run: |
+          git diff --exit-code -- frontend/src/test/fixtures/contracts.json
+          git diff --exit-code -- src/bundlewalker/interfaces/web/static
+      - name: Audit production browser dependencies
+        run: npm audit --audit-level=high
+        working-directory: frontend
       - name: Build wheel and source distribution
         run: uv build --clear --no-sources
       - name: Validate distribution metadata
         run: uv run twine check dist/*
+      - name: Validate packaged browser assets
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import re
+          import tarfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          def require_web_assets(names: list[str]) -> None:
+              assert any(name.endswith("static/index.html") for name in names)
+              assert any(name.endswith("static/.vite/manifest.json") for name in names)
+              assets = [
+                  PurePosixPath(name).name for name in names if "/static/assets/" in name
+              ]
+              assert assets
+              assert all(
+                  re.fullmatch(r".+-[A-Za-z0-9_-]{8,}\.(?:css|js)", asset)
+                  for asset in assets
+              )
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              require_web_assets(archive.namelist())
+          sdist = next(Path("dist").glob("*.tar.gz"))
+          with tarfile.open(sdist, "r:gz") as archive:
+              require_web_assets(archive.getnames())
+          PY
       - name: Upload exact distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -144,12 +248,19 @@ jobs:
           uv pip install --python .artifact-venv/bin/python dist/*.whl
           .artifact-venv/bin/bundlewalker --help
           .artifact-venv/bin/bundlewalker-mcp --help
+          .artifact-venv/bin/bundlewalker-web --help
+          .artifact-venv/bin/python -c "from importlib.resources import files; assert files('bundlewalker.interfaces.web').joinpath('static/index.html').is_file()"
           .artifact-venv/bin/python -c 'from importlib.metadata import version; print(version("bundlewalker"))'
 
   sdist-smoke:
-    name: Source distribution smoke
+    name: Source distribution smoke (${{ matrix.os }}, Python ${{ matrix.python-version }})
     needs: [build]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python-version: ["3.13", "3.14"]
     steps:
       - name: Download exact distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -160,14 +271,16 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: ${{ env.UV_VERSION }}
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
       - name: Build and install from source distribution
         shell: bash
         run: |
-          uv venv --python "3.13" .sdist-venv
+          uv venv --python "${{ matrix.python-version }}" .sdist-venv
           uv pip install --python .sdist-venv/bin/python dist/*.tar.gz
           .sdist-venv/bin/bundlewalker --help
           .sdist-venv/bin/bundlewalker-mcp --help
+          .sdist-venv/bin/bundlewalker-web --help
+          .sdist-venv/bin/python -c "from importlib.resources import files; assert files('bundlewalker.interfaces.web').joinpath('static/index.html').is_file()"
 
   dependency-audit:
     name: Dependency audit
@@ -195,13 +308,14 @@ jobs:
   required:
     name: Required
     if: always()
-    needs: [supported, build, artifact-smoke, sdist-smoke, dependency-audit]
+    needs: [supported, frontend, build, artifact-smoke, sdist-smoke, dependency-audit]
     runs-on: ubuntu-24.04
     steps:
       - name: Require supported jobs
         shell: bash
         run: |
           test "${{ needs.supported.result }}" = "success"
+          test "${{ needs.frontend.result }}" = "success"
           test "${{ needs.build.result }}" = "success"
           test "${{ needs.artifact-smoke.result }}" = "success"
           test "${{ needs.sdist-smoke.result }}" = "success"
