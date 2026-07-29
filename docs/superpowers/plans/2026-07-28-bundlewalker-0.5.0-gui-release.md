@@ -135,7 +135,7 @@ remain until Task 3.
 - [ ] **Step 1: Create the dated `v0.5.0` changelog entry**
 
 Leave `Unreleased` empty, move all existing post-`0.4.0` bullets under
-`## [v0.5.0] - 2026-07-29`, remove “GUI remains unreleased,” and add the two
+`## [v0.5.0] - 2026-07-28`, remove “GUI remains unreleased,” and add the two
 new comparison links without altering historical entries.
 
 - [ ] **Step 2: Update active user installation and status copy**

@@ -56,7 +56,7 @@ not a public package or second version authority.
 
 The `Unreleased` changelog section becomes empty and the verified GUI,
 packaging, and post-`0.4.0` maintenance notes move together under
-`## [v0.5.0] - 2026-07-29`. Comparison links advance to:
+`## [v0.5.0] - 2026-07-28`. Comparison links advance to:
 
 - `v0.5.0...HEAD` for `Unreleased`; and
 - `v0.4.0...v0.5.0` for the new release.
