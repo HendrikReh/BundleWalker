@@ -78,21 +78,21 @@ uv run bundlewalker --help
 For the current public beta without a checkout, install the exact release as an isolated tool:
 
 ```bash
-uv tool install "bundlewalker==0.4.0"
+uv tool install "bundlewalker==0.5.0"
 bundlewalker --help
-```
-
-The local web cockpit is implemented on the current unreleased branch and ships in the standard
-Python package rather than a separate web install. For a published build containing it, use:
-
-```bash
-pip install bundlewalker
 bundlewalker-web --help
 ```
 
-The tagged `0.4.0` public beta predates this unreleased addition. In a current source checkout,
-`uv sync --locked` installs the Python web runtime with the rest of BundleWalker; installed users
-do not need Node.js.
+The local web cockpit ships in the standard Python package rather than a separate web install.
+The equivalent conventional installation is:
+
+```bash
+pip install bundlewalker==0.5.0
+bundlewalker-web --help
+```
+
+In a current source checkout, `uv sync --locked` installs the Python web runtime with the rest of
+BundleWalker; installed users do not need Node.js.
 
 Examples in this guide start from the checkout. After changing into a knowledge workspace, they
 pass the checkout through `uv --project "$PROJECT_ROOT"` so `uv` can still find BundleWalker.
@@ -885,9 +885,9 @@ content or provider credentials.
 
 ## Limits and compatibility
 
-BundleWalker is a public beta for technical solo users. The current public beta is `0.4.0`. macOS
-and Linux are supported; Windows is experimental. The local web cockpit is implemented on the
-current unreleased branch and is not part of the already-tagged `0.4.0` release.
+BundleWalker is a public beta for technical solo users. The current public beta is `0.5.0`. macOS
+and Linux are supported; Windows is experimental. The local web cockpit is included in the
+standard installation.
 
 The [workspace compatibility and portable-backup policy](workspace-compatibility.md) is
 authoritative for readable and writable formats, explicit upgrades, archive scope, restoration,

@@ -29,7 +29,7 @@ of every accepted source as immutable evidence.
 ## Project status
 
 BundleWalker is a public beta for technical solo users; it is not a claim of production stability
-or a service-level commitment. The current public beta is `0.4.0`. See the
+or a service-level commitment. The current public beta is `0.5.0`. See the
 [Changelog](CHANGELOG.md) for the immutable release history.
 
 macOS and Linux are supported; Windows is experimental.
@@ -41,26 +41,26 @@ BundleWalker requires Python 3.13 or 3.14 and [`uv`](https://docs.astral.sh/uv/)
 Install the exact public beta as an isolated command-line tool:
 
 ```bash
-uv tool install "bundlewalker==0.4.0"
+uv tool install "bundlewalker==0.5.0"
 bundlewalker --help
 bundlewalker-mcp --help
+bundlewalker-web --help
 ```
 
 Keep the exact version in the install command for reproducible setup. If you want to contribute or
 run from a source checkout, use the separate
 [development setup](CONTRIBUTING.md#development-setup).
 
-The local web cockpit is implemented on the current unreleased branch and is included in the
-standard Python package; there is no separate web install. For a published build that contains
-this feature, the conventional installation is:
+The local web cockpit is included in the standard Python package; there is no separate web
+install. The equivalent conventional installation is:
 
 ```bash
-pip install bundlewalker
+pip install bundlewalker==0.5.0
 bundlewalker-web --help
 ```
 
-The tagged `0.4.0` public beta predates this unreleased addition. From the current source checkout,
-`uv sync --locked` installs the same web runtime for development and testing.
+From a current source checkout, `uv sync --locked` installs the same web runtime for development
+and testing.
 
 ## Create your first workspace
 

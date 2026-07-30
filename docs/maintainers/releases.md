@@ -40,10 +40,11 @@ rebuilding them.
 - `pyproject.toml` is the only authoritative build/runtime package-version source.
 - `bundlewalker.__version__` reads installed distribution metadata.
 - Historical `v1`, `v2`, and `v3` tags remain unchanged.
-- New tags match package versions, for example `v0.4.0` and `v0.4.1`.
+- New tags match package versions, for example `v0.5.0` and `v0.5.1`.
 - Alpha versions are rehearsed on TestPyPI; release candidates are published to production PyPI
   only through the protected production workflow.
-- Production `0.4.0` is forbidden until every public-beta exit gate passes.
+- A production tag is forbidden until its release-preparation pull request and complete local and
+  required remote gates pass.
 
 ## Local release verification
 
@@ -100,7 +101,7 @@ The workflow's build and publish jobs run only from `master`.
 Dispatch it with the exact version already present on `master`:
 
 ```bash
-gh workflow run publish-testpypi.yml --ref master -f version=0.4.0a2
+gh workflow run publish-testpypi.yml --ref master -f version=0.5.0a1
 ```
 
 The build, publish, and TestPyPI installation jobs must all pass. TestPyPI versions are immutable;
@@ -116,7 +117,7 @@ only the failed verification job; do not dispatch a new build or publication for
 
 Production publishing uses `publish-pypi.yml`, GitHub environment `pypi`, and a matching PyPI
 trusted publisher. The workflow starts only from a pushed `v*` tag, validates that the tag is
-exactly `v${project.version}`, and accepts only `0.4.0rcN` or final `0.4.0`. It builds one wheel and
+exactly `v${project.version}`, and accepts only `0.5.0rcN` or final `0.5.0`. It builds one wheel and
 one source archive, publishes those exact files, verifies production filenames and SHA-256
 digests, and attaches the same files to the GitHub release.
 
@@ -124,7 +125,7 @@ Before the first production upload, configure GitHub environment `pypi` with exa
 required-reviewers rule naming only GitHub user `HendrikReh`, self-review permitted, no wait timer
 or custom protection rule, custom deployment policies enabled, and protected-branch policy
 disabled. The only other protection-rule type must be the branch-policy rule, and the separate
-policy endpoint must contain exactly one tag rule `v0.4.0*` and no branch rule. Register the PyPI
+policy endpoint must contain exactly one tag rule `v0.5.0*` and no branch rule. Register the PyPI
 pending trusted publisher while signed in as `hereh`:
 
 | Field | Value |
@@ -134,6 +135,36 @@ pending trusted publisher while signed in as `hereh`:
 | GitHub repository | `BundleWalker` |
 | Workflow | `publish-pypi.yml` |
 | Environment | `pypi` |
+
+### Prepared 0.5.0 GUI release
+
+Production `0.5.0` is the prepared public-beta GUI release identity. The release includes the
+loopback-only `bundlewalker-web` cockpit in the standard installation while retaining supported
+macOS/Linux and experimental Windows boundaries. It does not change the workspace format.
+
+Create annotated tag `v0.5.0` only at the exact reviewed release merge commit after:
+
+1. the release pull request's required CI and CodeQL checks pass on its exact head;
+2. the pull request is merged and local `master` equals fresh `origin/master`;
+3. `pyproject.toml`, installed metadata, `uv.lock`, changelog, and active user documentation all
+   identify exact `0.5.0`;
+4. production PyPI and GitHub do not already contain `0.5.0` or `v0.5.0`;
+5. the `pypi` environment permits only the `v0.5.0*` tag family and the trusted-publisher tuple
+   remains `bundlewalker/HendrikReh/BundleWalker/publish-pypi.yml/pypi`; and
+6. the merged tree passes the complete local release gate, including the production browser
+   journeys and exact `bundlewalker-0.5.0` wheel/source-archive validation.
+
+Push the annotated tag once. Inspect the retained build evidence, then approve only the exact
+protected `pypi` deployment for that tag and commit. Completion requires successful build,
+authoritative production-PyPI checksum/install verification, and a non-prerelease GitHub release
+using the same two artifacts. The installed smoke must cover `bundlewalker`, `bundlewalker-mcp`,
+`bundlewalker-web`, and the packaged browser assets.
+
+Never move, delete, reuse, or rebuild from a pushed `v0.5.0` tag. Apply the exact-set recovery
+matrix below to the original workflow run. If a package defect is discovered after the tag is
+consumed, yank an unsafe publication when necessary and prepare a reviewed `0.5.1` patch release.
+
+### Historical 0.4.0 release records
 
 `v0.4.0rc1` is consumed and immutable at commit
 `d3a18370e2fdc7cfe2f79728731c82ba63aa0cf1`. Production workflow run `29847165596` failed once in

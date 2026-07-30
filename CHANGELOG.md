@@ -4,6 +4,8 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-07-29
+
 - Added the local `bundlewalker-web` review cockpit for one workspace, with Browse, Ask, lint,
   pasted or single-file ingestion preparation, synthesis and refresh preparation, exact diff
   inspection, Apply, Discard, and MCP-to-web pending-review handoff.
@@ -15,7 +17,7 @@ All notable BundleWalker releases are recorded here.
   notices. Local verification and required CI passed across supported Ubuntu 24.04 and macOS 15
   on Python 3.13 and 3.14, including frontend/browser, dependency audit, distribution build and
   packaged-asset validation, and all eight clean wheel/sdist install smokes. The separate CodeQL
-  analysis also passed. The GUI remains unreleased and is not part of the tagged `0.4.0` beta.
+  analysis also passed.
 - Included all tracked historical `.bundlewalker` fixture data in source distributions while
   excluding untracked fixture files.
 - Separated current dependency-floor validation from the immutable `0.4.0rc3` lock-resolution
@@ -163,7 +165,8 @@ All notable BundleWalker releases are recorded here.
 - Added configurable conventions and presets for personal, agent, software, and research knowledge
   workspaces.
 
-[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/HendrikReh/BundleWalker/compare/v0.5.0...HEAD
+[v0.5.0]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0...v0.5.0
 [v0.4.0]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc3...v0.4.0
 [v0.4.0rc3]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc2...v0.4.0rc3
 [v0.4.0rc2]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0rc1...v0.4.0rc2

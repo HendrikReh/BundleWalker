@@ -374,6 +374,8 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     build = workflow["jobs"]["build"]
     assert build["if"] == "github.ref == 'refs/heads/master'"
     build_commands = _run_commands(workflow, "build")
+    assert "0.5.0a*|0.5.0rc*" in build_commands
+    assert "0.4.0a*|0.4.0rc*" not in build_commands
     assert "uv build --clear --no-sources" in build_commands
     assert "uv run twine check dist/*" in build_commands
     build_run_steps = [step["run"] for step in _steps(workflow, "build") if "run" in step]
@@ -595,7 +597,7 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
     for required in (
         'test "$GITHUB_REF_TYPE" = "tag"',
         'test "$GITHUB_REF_NAME" = "v${version}"',
-        r"0\.4\.0(?:rc[1-9][0-9]*)?",
+        r"0\.5\.0(?:rc[1-9][0-9]*)?",
         "uv sync --locked",
         "uv lock --check",
         "uv run pytest -m 'not eval' -q",
@@ -672,9 +674,9 @@ def test_pypi_workflow_uses_its_release_lane_and_prerelease_branches() -> None:
     assert pattern_match is not None
     version_pattern = pattern_match.group("pattern")
 
-    for version in ("0.4.0rc1", "0.4.0rc2", "0.4.0rc10", "0.4.0"):
+    for version in ("0.5.0rc1", "0.5.0rc2", "0.5.0rc10", "0.5.0"):
         assert re.fullmatch(version_pattern, version), version
-    for version in ("0.4.0rc0", "0.4.1rc1", "0.4.0a2", "1.0.0"):
+    for version in ("0.5.0rc0", "0.5.1rc1", "0.5.0a2", "0.4.0", "1.0.0"):
         assert re.fullmatch(version_pattern, version) is None, version
 
     release_script = _step(workflow, "github-release", "Create or complete the GitHub release")[
@@ -687,9 +689,10 @@ def test_pypi_workflow_uses_its_release_lane_and_prerelease_branches() -> None:
     )
     assert prerelease_match is not None
     prerelease_pattern = prerelease_match.group("pattern")
-    for version in ("0.4.0rc1", "0.4.0rc2", "0.4.0rc10"):
+    for version in ("0.5.0rc1", "0.5.0rc2", "0.5.0rc10"):
         assert fnmatchcase(version, prerelease_pattern), version
-    assert not fnmatchcase("0.4.0", prerelease_pattern)
+    assert not fnmatchcase("0.5.0", prerelease_pattern)
+    assert not fnmatchcase("0.4.0rc3", prerelease_pattern)
 
 
 def test_pypi_workflow_requires_exact_artifacts_in_every_downstream_job() -> None:
