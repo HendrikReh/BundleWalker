@@ -799,7 +799,7 @@ def test_active_documentation_publishes_the_standard_local_web_contract() -> Non
 
     gui_release = (
         active["CHANGELOG.md"]
-        .split("## [v0.5.0] - 2026-07-29", maxsplit=1)[1]
+        .split("## [v0.5.0] - 2026-07-30", maxsplit=1)[1]
         .split("\n## [", maxsplit=1)[0]
     )
     normalized_gui_release = " ".join(gui_release.split()).casefold()
@@ -959,7 +959,7 @@ def test_public_beta_documents_preserve_release_candidate_history() -> None:
         assert "release candidate" not in active_guide.casefold()
     assert "BundleWalker `0.5.0` installed as a tool" in vscode_setup
     assert "## [Unreleased]" in changelog
-    assert "## [v0.5.0] - 2026-07-29" in changelog
+    assert "## [v0.5.0] - 2026-07-30" in changelog
     assert "## [v0.4.0] - 2026-07-25" in changelog
     assert "## [v0.4.0rc3] - 2026-07-24" in changelog
     assert "## [v0.4.0rc2] - 2026-07-21" in changelog

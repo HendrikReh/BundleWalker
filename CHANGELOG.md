@@ -4,7 +4,7 @@ All notable BundleWalker releases are recorded here.
 
 ## [Unreleased]
 
-## [v0.5.0] - 2026-07-29
+## [v0.5.0] - 2026-07-30
 
 - Added the local `bundlewalker-web` review cockpit for one workspace, with Browse, Ask, lint,
   pasted or single-file ingestion preparation, synthesis and refresh preparation, exact diff
