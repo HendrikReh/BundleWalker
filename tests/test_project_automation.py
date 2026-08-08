@@ -396,7 +396,7 @@ def test_testpypi_workflow_is_manual_oidc_only_and_verifies_publication() -> Non
     assert publish["permissions"] == {"id-token": "write"}
     publish_steps = _steps(workflow, "publish")
     assert publish_steps[-1]["uses"].startswith(
-        "pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247"
+        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
     )
     assert publish_steps[-1]["with"]["repository-url"] == "https://test.pypi.org/legacy/"
     assert workflow["jobs"]["verify"]["needs"] == ["publish"]
@@ -420,7 +420,7 @@ def test_publishing_workflows_pin_approved_publisher_action() -> None:
     production_text = (PROJECT_ROOT / ".github/workflows/publish-pypi.yml").read_text(
         encoding="utf-8"
     )
-    publisher = "pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1"
+    publisher = "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2"
 
     assert publisher in testpypi_text
     assert publisher in production_text
