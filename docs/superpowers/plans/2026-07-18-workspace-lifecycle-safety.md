@@ -239,9 +239,7 @@ def open_workspace_directory(
         for descriptor in reversed(descriptors):
             with suppress(OSError):
                 os.close(descriptor)
-        raise TransactionError(
-            f"{label} contains a symlink or non-directory: {location}"
-        ) from exc
+        raise TransactionError(f"{label} contains a symlink or non-directory: {location}") from exc
     try:
         yield current
     finally:
@@ -714,7 +712,9 @@ def inspect_workspace(
         migrations=migrations,
     )
     if version < target_version:
-        status = CompatibilityStatus.UPGRADEABLE if path is not None else CompatibilityStatus.UNSUPPORTED
+        status = (
+            CompatibilityStatus.UPGRADEABLE if path is not None else CompatibilityStatus.UNSUPPORTED
+        )
         return WorkspaceCompatibility(
             root,
             config_path,
@@ -734,17 +734,13 @@ def read_workspace_format_version(config_path: Path) -> int:
     try:
         content = config_path.read_bytes()
     except OSError as exc:
-        raise ConfigurationError(
-            f"could not read workspace configuration: {config_path}"
-        ) from exc
+        raise ConfigurationError(f"could not read workspace configuration: {config_path}") from exc
     if len(content) > MAX_WORKSPACE_CONFIG_BYTES:
         raise ConfigurationError("workspace configuration exceeds the supported size")
     try:
         parsed = tomllib.loads(content.decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigurationError(
-            f"could not read workspace configuration: {config_path}"
-        ) from exc
+        raise ConfigurationError(f"could not read workspace configuration: {config_path}") from exc
     values = cast(dict[str, object], parsed)
     version = values.get("version")
     if type(version) is not int:
@@ -869,7 +865,9 @@ def test_static_provenance_pins_release_commits() -> None:
     assert provenance["v1"]["commit"] == "be165ac283ba7511592771fd876c89b12ef4ff1a"
     assert provenance["v2"]["commit"] == "12ef119ac3b2ba84cff7ca9aee0fbf14b239d975"
     assert provenance["v3"]["commit"] == "ab079a16a98cc31c46f77db73c941328c886075b"
-    assert {provenance[release]["expected_compatibility"] for release in ("v1", "v2", "v3")} == {"current"}
+    assert {provenance[release]["expected_compatibility"] for release in ("v1", "v2", "v3")} == {
+        "current"
+    }
     assert provenance["fixtures"]["v1-schema1-swapping"] == "recovers_base"
     assert provenance["fixtures"]["v3-schema2-pending"] == "pending_review"
 
@@ -1416,7 +1414,9 @@ def test_verify_rejects_digest_and_size_mismatch(tmp_path: Path) -> None:
         {
             "path": name,
             "size": len(content),
-            "sha256": ("0" * 64 if name == "wiki/index.md" else hashlib.sha256(content).hexdigest()),
+            "sha256": (
+                "0" * 64 if name == "wiki/index.md" else hashlib.sha256(content).hexdigest()
+            ),
         }
         for name, content in sorted(_valid_payload().items())
     ]
@@ -1620,8 +1620,7 @@ def verify_backup_archive(path: Path) -> VerifiedBackup:
             ):
                 raise BackupVerificationError("backup directory member has the wrong type")
             if any(
-                info_by_name[f"{PAYLOAD_PREFIX}{record.path}"].is_dir()
-                for record in manifest.files
+                info_by_name[f"{PAYLOAD_PREFIX}{record.path}"].is_dir() for record in manifest.files
             ):
                 raise BackupVerificationError("backup file member has the wrong type")
             records = {record.path: record for record in manifest.files}
@@ -1763,8 +1762,7 @@ def _validate_managed_payload(manifest: BackupManifest, config: WorkspaceConfig)
     for value in directories:
         path = PurePosixPath(value)
         if not any(
-            path == root or root in path.parents or path in root.parents
-            for root in managed_roots
+            path == root or root in path.parents or path in root.parents for root in managed_roots
         ):
             raise BackupVerificationError("backup contains an unmanaged directory")
 
@@ -1843,7 +1841,12 @@ from bundlewalker.domain import ChangeOperation, ChangeSet, Citation, ConceptTyp
 from bundlewalker.errors import BackupError, ReviewPendingError
 from bundlewalker.okf.repository import OkfRepository
 from bundlewalker.transactions import PreparedTransaction, ReviewKind, prepare_transaction
-from bundlewalker.workspace import Workspace, discover_workspace, initialize_workspace, load_raw_source
+from bundlewalker.workspace import (
+    Workspace,
+    discover_workspace,
+    initialize_workspace,
+    load_raw_source,
+)
 
 
 def _prepared_review(tmp_path: Path) -> PreparedTransaction:
@@ -1952,9 +1955,7 @@ def test_create_backup_preserves_custom_paths_and_empty_directories(tmp_path: Pa
     verified = create_workspace_backup(workspace, tmp_path / "custom.zip")
 
     assert "configured/raw" in verified.manifest.directories
-    assert "configured/conventions.md" in {
-        record.path for record in verified.manifest.files
-    }
+    assert "configured/conventions.md" in {record.path for record in verified.manifest.files}
 
 
 def test_create_backup_refuses_existing_or_internal_output(tmp_path: Path) -> None:
@@ -2394,9 +2395,7 @@ def restore_workspace_backup(archive: Path, target: Path) -> RestoredWorkspace:
     try:
         if shutil.disk_usage(target_path.parent).free < verified.byte_count:
             raise BackupError("restore destination has insufficient free space")
-        temporary = Path(
-            mkdtemp(prefix=f".{target_path.name}-restore-", dir=target_path.parent)
-        )
+        temporary = Path(mkdtemp(prefix=f".{target_path.name}-restore-", dir=target_path.parent))
         os.chmod(temporary, 0o700)
         _extract_verified_backup(verified, temporary)
         restored_workspace = discover_workspace(temporary)
@@ -2653,9 +2652,7 @@ def test_synthetic_migration_creates_verified_backup_before_apply(tmp_path: Path
 
     def verify(candidate: Workspace) -> None:
         events.append("verify")
-        assert "version = 2" in (
-            candidate.root / "bundlewalker.toml"
-        ).read_text(encoding="utf-8")
+        assert "version = 2" in (candidate.root / "bundlewalker.toml").read_text(encoding="utf-8")
 
     outcome = upgrade_workspace(
         workspace,
@@ -2832,9 +2829,7 @@ def upgrade_workspace(
         try:
             for step in path:
                 step.apply(quiescent)
-                declared = read_workspace_format_version(
-                    workspace.root / CONFIG_FILENAME
-                )
+                declared = read_workspace_format_version(workspace.root / CONFIG_FILENAME)
                 if declared != step.target_version:
                     raise ValueError("migration did not publish its target workspace version")
                 step.verify(workspace)
@@ -2974,9 +2969,7 @@ manifest = BackupManifest(
     files=(),
 )
 backup = VerifiedBackup(Path("pre-upgrade.zip"), "a" * 64, manifest)
-mapped = translate_error(
-    MigrationExecutionError("token=private-cause", backup=backup)
-)
+mapped = translate_error(MigrationExecutionError("token=private-cause", backup=backup))
 assert mapped.code is ApplicationErrorCode.MIGRATION_FAILED
 assert mapped.backup_archive_path == "pre-upgrade.zip"
 assert mapped.backup_archive_sha256 == "a" * 64
@@ -3249,11 +3242,7 @@ class LifecycleApplication:
                 workspace_path=str(inspected.root),
                 source_version=outcome.source_version,
                 target_version=outcome.target_version,
-                backup=(
-                    _backup_result(outcome.backup)
-                    if outcome.backup is not None
-                    else None
-                ),
+                backup=(_backup_result(outcome.backup) if outcome.backup is not None else None),
             )
         except ApplicationError:
             raise
