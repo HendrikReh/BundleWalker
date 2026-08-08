@@ -124,7 +124,7 @@ def test_web_distribution_contains_vite_entrypoint_and_manifest() -> None:
     assert static.joinpath("index.html").is_file()
     assert static.joinpath(".vite", "manifest.json").is_file()
     html = static.joinpath("index.html").read_text(encoding="utf-8")
-    assert "<script type=\"module\"" in html
+    assert '<script type="module"' in html
     assert "http://" not in html
     assert "https://" not in html
     assert all(not asset.name.endswith(".map") for asset in static.joinpath("assets").iterdir())
@@ -301,13 +301,16 @@ def test_bootstrap_is_single_use_and_redirects_to_clean_browse_url(client) -> No
 
 def test_mutation_requires_exact_origin_and_csrf(authenticated_client) -> None:
     assert authenticated_client.post("/api/v1/probe").status_code == 403
-    assert authenticated_client.post(
-        "/api/v1/probe",
-        headers={
-            "Origin": "http://127.0.0.1:43123",
-            "X-BundleWalker-CSRF": authenticated_client.csrf_token,
-        },
-    ).status_code == 204
+    assert (
+        authenticated_client.post(
+            "/api/v1/probe",
+            headers={
+                "Origin": "http://127.0.0.1:43123",
+                "X-BundleWalker-CSRF": authenticated_client.csrf_token,
+            },
+        ).status_code
+        == 204
+    )
 ```
 
 Also cover wrong Host, wrong port, missing session, wrong Origin, wrong CSRF, unsupported content
@@ -353,8 +356,7 @@ def create_web_app(
     expected_host: str,
     sessions: BrowserSessionStore,
     static_dir: Traversable | None = None,
-) -> Starlette:
-    ...
+) -> Starlette: ...
 ```
 
 The route order must be:
@@ -871,9 +873,7 @@ async def test_mcp_prepared_review_is_resolved_through_web(workspace, web_client
     )
     shown = web_client.get("/api/v1/review").json()
     assert shown["review_id"] == prepared.review.review_id
-    applied = web_client.post_json(
-        f"/api/v1/reviews/{prepared.review.review_id}/apply", {}
-    )
+    applied = web_client.post_json(f"/api/v1/reviews/{prepared.review.review_id}/apply", {})
     assert applied.json()["status"] == "applied"
     assert await mcp_application.get_pending_review() is None
 ```

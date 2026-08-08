@@ -147,6 +147,7 @@ Add a test that built artifacts exclude development benchmark code:
 ~~~python
 # Extend the existing pathlib import to: from pathlib import Path, PurePosixPath
 
+
 def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
     result = subprocess.run(
         ["uv", "build", "--clear", "--no-sources", "--out-dir", str(tmp_path)],
@@ -162,8 +163,7 @@ def test_benchmark_harness_is_not_packaged(tmp_path: Path) -> None:
     sdist = next(tmp_path.glob("*.tar.gz"))
     with tarfile.open(sdist, "r:gz") as archive:
         assert not any(
-            PurePosixPath(name).parts[1:2] == ("benchmarks",)
-            for name in archive.getnames()
+            PurePosixPath(name).parts[1:2] == ("benchmarks",) for name in archive.getnames()
         )
 ~~~
 
@@ -226,9 +226,7 @@ class WorkspaceProfile(BaseModel):
     seed: Literal[20260719]
 
 
-CheckpointName = Literal[
-    "initialized_workspace", "prepared", "interrupted", "committed", "cleaned"
-]
+CheckpointName = Literal["initialized_workspace", "prepared", "interrupted", "committed", "cleaned"]
 CheckpointBytes = Annotated[int, Field(ge=0)]
 
 
@@ -330,11 +328,41 @@ _MIB = 1024 * 1024
 
 PROFILES: Final[Mapping[str, WorkspaceProfile]] = MappingProxyType(
     {
-        "smoke": WorkspaceProfile(name="smoke", document_count=50, target_wiki_bytes=_MIB // 2, source_characters=10_000, seed=FIXTURE_SEED),
-        "small": WorkspaceProfile(name="small", document_count=250, target_wiki_bytes=5 * _MIB // 2, source_characters=25_000, seed=FIXTURE_SEED),
-        "medium": WorkspaceProfile(name="medium", document_count=1_000, target_wiki_bytes=10 * _MIB, source_characters=50_000, seed=FIXTURE_SEED),
-        "large": WorkspaceProfile(name="large", document_count=5_000, target_wiki_bytes=50 * _MIB, source_characters=100_000, seed=FIXTURE_SEED),
-        "probe": WorkspaceProfile(name="probe", document_count=10_000, target_wiki_bytes=100 * _MIB, source_characters=100_000, seed=FIXTURE_SEED),
+        "smoke": WorkspaceProfile(
+            name="smoke",
+            document_count=50,
+            target_wiki_bytes=_MIB // 2,
+            source_characters=10_000,
+            seed=FIXTURE_SEED,
+        ),
+        "small": WorkspaceProfile(
+            name="small",
+            document_count=250,
+            target_wiki_bytes=5 * _MIB // 2,
+            source_characters=25_000,
+            seed=FIXTURE_SEED,
+        ),
+        "medium": WorkspaceProfile(
+            name="medium",
+            document_count=1_000,
+            target_wiki_bytes=10 * _MIB,
+            source_characters=50_000,
+            seed=FIXTURE_SEED,
+        ),
+        "large": WorkspaceProfile(
+            name="large",
+            document_count=5_000,
+            target_wiki_bytes=50 * _MIB,
+            source_characters=100_000,
+            seed=FIXTURE_SEED,
+        ),
+        "probe": WorkspaceProfile(
+            name="probe",
+            document_count=10_000,
+            target_wiki_bytes=100 * _MIB,
+            source_characters=100_000,
+            seed=FIXTURE_SEED,
+        ),
     }
 )
 
@@ -560,9 +588,7 @@ git commit -m "feat: generate deterministic benchmark workspaces"
 Create tests/benchmarks/factories.py with a complete reusable evidence record:
 
 ~~~python
-def evidence_record(
-    *, os_name: str = "Linux", python_version: str = "3.13.0"
-) -> EvidenceRecord:
+def evidence_record(*, os_name: str = "Linux", python_version: str = "3.13.0") -> EvidenceRecord:
     profile = PROFILES["smoke"]
     return EvidenceRecord(
         run_id=f"{os_name.casefold()}-{python_version}",
@@ -908,9 +934,7 @@ def test_mutation_scenarios_reach_one_safe_end_state(
 
 
 def test_ingestion_uses_full_profile_source_without_network(tmp_path: Path) -> None:
-    source_limit_profile = PROFILES["smoke"].model_copy(
-        update={"source_characters": 100_000}
-    )
+    source_limit_profile = PROFILES["smoke"].model_copy(update={"source_characters": 100_000})
     fixture = generate_fixture(tmp_path / "source-limit", source_limit_profile)
     application = prepare_ingestion_application(fixture)
     result = asyncio.run(
@@ -1065,9 +1089,12 @@ def test_mcp_startup_discovers_stable_tools_and_cleans_process(tmp_path: Path) -
     observation = run_mcp_startup(fixture)
     assert observation.scenario is ScenarioName.MCP_STARTUP
     assert observation.duration_ns > 0
-    assert observation.output_sha256 == hashlib.sha256(
-        json.dumps(EXPECTED_TOOL_NAMES, separators=(",", ":")).encode("ascii")
-    ).hexdigest()
+    assert (
+        observation.output_sha256
+        == hashlib.sha256(
+            json.dumps(EXPECTED_TOOL_NAMES, separators=(",", ":")).encode("ascii")
+        ).hexdigest()
+    )
 
 
 def test_worker_writes_one_valid_observation_atomically(tmp_path: Path) -> None:
@@ -1587,9 +1614,7 @@ Add:
 
 ~~~python
 def test_performance_document_is_provisional_and_linked() -> None:
-    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(
-        encoding="utf-8"
-    )
+    performance = (PROJECT_ROOT / "docs/performance-and-capacity.md").read_text(encoding="utf-8")
     assert "Supported capacity is not yet published." in performance
     assert "candidate only" in performance
     assert "100,000 Unicode characters" in performance
