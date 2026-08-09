@@ -318,13 +318,11 @@ type RefreshQueryRunner = Callable[
     Awaitable[tuple[CitedAnswer, frozenset[str]]],
 ]
 
-
 @dataclass(frozen=True, slots=True)
 class AnsweredSynthesisRefresh:
     answer: CitedAnswer
     read_ids: frozenset[str]
     target: OkfDocument
-
 
 @dataclass(frozen=True, slots=True)
 class SynthesisAlreadyCurrent:
@@ -410,11 +408,9 @@ Expected: `--refresh` is unknown and refresh workflow hooks are absent.
 
 Add the option:
 
-<!-- fmt:off -->
 ```python
 refresh: str | None = typer.Option(None, "--refresh", metavar="SYNTHESIS_ID"),
 ```
-<!-- fmt:on -->
 
 At command entry, reject `save and refresh is not None` with `UsageError` before calling any agent.
 For refresh, call `answer_synthesis_refresh`; otherwise call `answer_question`. Render either cited

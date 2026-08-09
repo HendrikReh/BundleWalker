@@ -104,7 +104,9 @@ def test_source_distribution_contains_exact_tracked_historical_fixtures(
             if member.isfile()
         }
 
-    actual = {path for path in packaged if path.startswith("tests/fixtures/historical/")}
+    actual = {
+        path for path in packaged if path.startswith("tests/fixtures/historical/")
+    }
     assert actual == expected
 ```
 

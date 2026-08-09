@@ -500,9 +500,7 @@ def portable_tree_sha256(workspace: Path) -> str:
         relative = PurePosixPath(path.relative_to(workspace).as_posix()).as_posix()
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode):
-            raise RehearsalFailure(
-                "workspace_identity", f"portable surface contains symlink: {relative}"
-            )
+            raise RehearsalFailure("workspace_identity", f"portable surface contains symlink: {relative}")
         if stat.S_ISDIR(mode):
             kind = b"directory\0"
             content = b""
@@ -541,9 +539,7 @@ def require_environment_entrypoint(path: Path, environment_root: Path) -> Path:
 def require_exact_tools(actual: Sequence[str]) -> list[str]:
     normalized = sorted(actual)
     if set(normalized) != EXPECTED_TOOLS or len(normalized) != len(EXPECTED_TOOLS):
-        raise RehearsalFailure(
-            "mcp", "installed MCP tool inventory does not match ten-tool contract"
-        )
+        raise RehearsalFailure("mcp", "installed MCP tool inventory does not match ten-tool contract")
     return normalized
 ```
 
@@ -1069,7 +1065,9 @@ artifact name, source-isolation statement, and immutable-version policy:
 ```python
 def test_production_lifecycle_rehearsal_policy_is_published_without_premature_claims() -> None:
     releases = (PROJECT_ROOT / "docs/maintainers/releases.md").read_text(encoding="utf-8")
-    compatibility = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(encoding="utf-8")
+    compatibility = (PROJECT_ROOT / "docs/workspace-compatibility.md").read_text(
+        encoding="utf-8"
+    )
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     for required in (

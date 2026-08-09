@@ -243,7 +243,9 @@ def test_prepare_persists_exact_review_record_and_identity(tmp_path: Path) -> No
     prepared, _source = _prepare(tmp_path)
     review_path = prepared.transaction_dir / "review.json"
     review = json.loads(review_path.read_text(encoding="utf-8"))
-    identity = json.loads((prepared.transaction_dir / "identity.json").read_text(encoding="utf-8"))
+    identity = json.loads(
+        (prepared.transaction_dir / "identity.json").read_text(encoding="utf-8")
+    )
 
     assert review == {
         "changed_paths": [prepared.change_set.drafts[0].path],
@@ -255,6 +257,8 @@ def test_prepare_persists_exact_review_record_and_identity(tmp_path: Path) -> No
         "transaction_id": prepared.transaction_id,
     }
     assert identity["review_digest"] == hashlib.sha256(review_path.read_bytes()).hexdigest()
+
+
 ```
 
 - [ ] **Step 2: Run the focused tests and observe the signature/schema failures**
@@ -1222,7 +1226,9 @@ class WorkspaceApplication:
             matches = LexicalRetriever(repository).search(query, concept_type, limit)
             documents = repository.scan()
             return ConceptSearchResult(
-                items=tuple(_concept_summary(documents[item.concept_id]) for item in matches)
+                items=tuple(
+                    _concept_summary(documents[item.concept_id]) for item in matches
+                )
             )
         except BundleWalkerError as exc:
             raise translate_error(exc) from exc
@@ -1343,9 +1349,7 @@ async def test_inline_ingestion_returns_persisted_review_without_live_mutation(
     assert _live_tree_bytes(application.workspace.root) == _live_tree_bytes_from(before)
 
 
-async def test_review_resolves_exactly_once(
-    application_with_pending_review: WorkspaceApplication,
-) -> None:
+async def test_review_resolves_exactly_once(application_with_pending_review: WorkspaceApplication) -> None:
     pending = await application_with_pending_review.get_pending_review()
     assert pending is not None
 
@@ -1391,7 +1395,6 @@ async def prepare_file_ingestion(
     except BundleWalkerError as exc:
         raise translate_error(exc) from exc
 
-
 async def prepare_ingestion(
     self,
     source: InlineSource,
@@ -1412,7 +1415,6 @@ async def prepare_ingestion(
         return _ingestion_result(self.workspace, outcome)
     except BundleWalkerError as exc:
         raise translate_error(exc) from exc
-
 
 async def prepare_synthesis(
     self,
@@ -1445,7 +1447,6 @@ async def prepare_synthesis(
         )
     except BundleWalkerError as exc:
         raise translate_error(exc) from exc
-
 
 async def prepare_refresh(
     self,
@@ -1490,14 +1491,12 @@ async def prepare_refresh(
     except BundleWalkerError as exc:
         raise translate_error(exc) from exc
 
-
 async def apply_review(self, review_id: str) -> MutationResult:
     try:
         apply_pending_review(self.workspace, review_id)
         return MutationResult(review_id=review_id, status="applied")
     except BundleWalkerError as exc:
         raise translate_error(exc) from exc
-
 
 async def discard_review(self, review_id: str) -> MutationResult:
     try:
@@ -1676,7 +1675,8 @@ def test_mcp_tool_specs_have_unique_names_and_closed_schemas() -> None:
         "discard_review",
     ]
     assert all(
-        spec.input_model.model_json_schema()["additionalProperties"] is False for spec in TOOL_SPECS
+        spec.input_model.model_json_schema()["additionalProperties"] is False
+        for spec in TOOL_SPECS
     )
 
 
@@ -1830,9 +1830,7 @@ async def test_mcp_lists_and_reads_concept_resources(application: WorkspaceAppli
 
     async with create_connected_server_and_client_session(server) as session:
         listed = await session.list_resources()
-        uri = next(
-            resource.uri for resource in listed.resources if "topics/agents" in str(resource.uri)
-        )
+        uri = next(resource.uri for resource in listed.resources if "topics/agents" in str(resource.uri))
         read = await session.read_resource(uri)
 
     content = read.contents[0]

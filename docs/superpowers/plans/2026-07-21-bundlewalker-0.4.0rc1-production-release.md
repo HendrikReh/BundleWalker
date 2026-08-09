@@ -117,7 +117,8 @@ def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> No
     release = workflow["jobs"]["github-release"]
     assert release["needs"] == ["build", "verify"]
     assert release["if"] == (
-        "${{ always() && needs.build.result == 'success' && needs.verify.result == 'success' }}"
+        "${{ always() && needs.build.result == 'success' && "
+        "needs.verify.result == 'success' }}"
     )
     assert release["permissions"] == {"contents": "write"}
     release_commands = _run_commands(workflow, "github-release")
@@ -494,7 +495,8 @@ version-derived archive root assertion to:
 
 ```python
 assert (
-    "bundlewalker-0.4.0rc1/docs/superpowers/plans/2026-07-19-bundlewalker-0.4.0a2-release.md"
+    "bundlewalker-0.4.0rc1/docs/superpowers/plans/"
+    "2026-07-19-bundlewalker-0.4.0a2-release.md"
 ) in packaged_paths
 ```
 
@@ -508,11 +510,9 @@ In `tests/cli/test_workspace.py`, change the expected live command output to:
 
 In `tests/application/test_lifecycle.py`, change the default live dependency result to:
 
-<!-- fmt:off -->
 ```python
 installed_version="0.4.0rc1",
 ```
-<!-- fmt:on -->
 
 Do not mechanically replace `0.4.0a2` in synthetic diagnostic, contract, or benchmark fixtures;
 those values are fixture payloads rather than assertions about installed package identity.
@@ -532,7 +532,8 @@ def test_first_release_candidate_is_documented_without_final_beta_claim() -> Non
     assert "proof of concept" in readme
     assert "## [v0.4.0rc1] - 2026-07-21" in changelog
     assert (
-        "[v0.4.0rc1]: https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1"
+        "[v0.4.0rc1]: "
+        "https://github.com/HendrikReh/BundleWalker/compare/v0.4.0a2...v0.4.0rc1"
     ) in changelog
     for phrase in (
         "publish-pypi.yml",

@@ -608,9 +608,7 @@ def test_transaction_diagnostics_classifies_interrupted_phases_without_mutation(
     manifest_path = next((workspace.root / ".bundlewalker/transactions").glob("*/manifest.json"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["phase"] = phase
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     before = _tree_snapshot(workspace.root)
 
     assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.INTERRUPTED
@@ -645,9 +643,7 @@ def test_transaction_diagnostics_rejects_multiple_pending_reviews(
     manifest["transaction_id"] = "f" * 32
     manifest["prospective_path"] = f".bundlewalker/transactions/{'f' * 32}/prospective-wiki"
     manifest["backup_path"] = f".bundlewalker/transactions/{'f' * 32}/backup-wiki"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     before = _tree_snapshot(workspace.root)
 
     assert inspect_transaction_state(workspace) is TransactionDiagnosticStatus.MALFORMED
@@ -755,7 +751,9 @@ def _dependencies() -> DiagnosticsDependencies:
         clock=lambda: NOW,
         module_available=lambda name: name == "mcp",
         executable_lookup=(
-            lambda name: "/private/bin/bundlewalker-mcp" if name == "bundlewalker-mcp" else None
+            lambda name: "/private/bin/bundlewalker-mcp"
+            if name == "bundlewalker-mcp"
+            else None
         ),
         permission_check=lambda _path, _mode: True,
         disk_free=lambda _path: 2 * ONE_GIB,
@@ -773,7 +771,7 @@ def test_diagnostics_run_returns_full_catalog_and_redacts_environment_values(
     private_key = "secret-api-key"
     dependencies = replace(
         _dependencies(),
-        environment={"BUNDLEWALKER_MODEL": private_model, "OPENAI_API_KEY": private_key},
+        environment={"BUNDLEWALKER_MODEL": private_model, "OPENAI_API_KEY": private_key}
     )
 
     result = DiagnosticsApplication(dependencies).run(tmp_path)
@@ -835,7 +833,9 @@ def test_diagnostics_unexpected_defect_uses_bounded_application_error(tmp_path: 
         raise RuntimeError(marker)
 
     with pytest.raises(ApplicationError) as raised:
-        DiagnosticsApplication(replace(_dependencies(), module_available=fail_lookup)).run(tmp_path)
+        DiagnosticsApplication(
+            replace(_dependencies(), module_available=fail_lookup)
+        ).run(tmp_path)
 
     assert raised.value.code is ApplicationErrorCode.DIAGNOSTIC_FAILED
     assert raised.value.safe_message == "diagnostic operation failed"
@@ -912,9 +912,7 @@ class DiagnosticsDependencies:
     executable_lookup: Callable[[str], str | None] = shutil.which
     permission_check: Callable[[Path, int], bool] = os.access
     disk_free: Callable[[Path], int] = _disk_free
-    transaction_inspector: Callable[[Workspace], TransactionDiagnosticStatus] = (
-        inspect_transaction_state
-    )
+    transaction_inspector: Callable[[Workspace], TransactionDiagnosticStatus] = inspect_transaction_state
 ```
 
 Implement helpers that only accept fixed strings:
@@ -1138,11 +1136,7 @@ def test_diagnostics_maps_transaction_state_without_identifiers(
 
     check = _by_code(result)["transactions.state"]
     assert check.severity is severity
-    assert (
-        "<REVIEW_ID>" in " ".join(check.remediation)
-        if state is TransactionDiagnosticStatus.PENDING
-        else True
-    )
+    assert "<REVIEW_ID>" in " ".join(check.remediation) if state is TransactionDiagnosticStatus.PENDING else True
 
 
 def test_diagnostics_redacts_expected_inspector_failures(tmp_path: Path) -> None:
@@ -1203,18 +1197,10 @@ Use these fixed dependent-check semantics:
 
 ```python
 _SKIPPED_CONFIGURATION = "Workspace configuration was not checked because discovery failed."
-_SKIPPED_COMPATIBILITY = (
-    "Workspace compatibility was not checked because configuration is unavailable."
-)
-_SKIPPED_STRUCTURE = (
-    "Workspace structure was not checked because a usable workspace is unavailable."
-)
-_SKIPPED_PERMISSIONS = (
-    "Workspace permissions were not checked because a usable workspace is unavailable."
-)
-_SKIPPED_TRANSACTIONS = (
-    "Transaction state was not checked because a usable workspace is unavailable."
-)
+_SKIPPED_COMPATIBILITY = "Workspace compatibility was not checked because configuration is unavailable."
+_SKIPPED_STRUCTURE = "Workspace structure was not checked because a usable workspace is unavailable."
+_SKIPPED_PERMISSIONS = "Workspace permissions were not checked because a usable workspace is unavailable."
+_SKIPPED_TRANSACTIONS = "Transaction state was not checked because a usable workspace is unavailable."
 ```
 
 Catch only expected `BundleWalkerError`, `OSError`, and lookup failures at inspector boundaries. Map them to fixed summaries; never call `str(error)` in a diagnostic value. For future or unsupported formats, do not call current-format `discover_workspace`; emit a configuration prerequisite warning and a compatibility failure with the fixed `bundlewalker workspace status PATH` or `bundlewalker workspace upgrade PATH` remediation.
