@@ -165,7 +165,9 @@ async def test_ingestion_runner_retries_domain_invalid_output(
         citations=[citation],
     )
     if invalid_kind == "markdown-suffix":
-        invalid_draft = valid_draft.model_copy(update={"path": f"{source.concept_id}.md"})
+        invalid_draft = valid_draft.model_copy(
+            update={"path": f"{source.concept_id}.md"}
+        )
     else:
         invalid_draft = valid_draft.model_copy(update={"body": "# Notes\n\nEvidence.\n"})
     invalid_change_set = ChangeSet(
@@ -194,7 +196,9 @@ async def test_ingestion_runner_retries_domain_invalid_output(
             ]
         )
 
-    output, read_ids = await run_ingestion_agent(FunctionModel(respond), dependencies, source)
+    output, read_ids = await run_ingestion_agent(
+        FunctionModel(respond), dependencies, source
+    )
 
     assert calls == 2
     assert output == valid_change_set
@@ -272,7 +276,6 @@ from bundlewalker.workspace import RawSource
 Replace the final prompt/run block of `run_ingestion_agent`, starting with
 `prompt = frame_untrusted_data(payload)`, with:
 
-<!-- fmt:off -->
 ```python
     prompt = frame_untrusted_data(payload)
     agent = create_ingestion_agent(model)
@@ -302,7 +305,6 @@ Replace the final prompt/run block of `run_ingestion_agent`, starting with
         return result.output, frozenset(dependencies.read_ids)
     raise AgentRunError("ingestion agent could not produce a proposal") from None
 ```
-<!-- fmt:on -->
 
 Do not remove or alter the later `validate_change_set` call in
 `src/bundlewalker/workflows/ingest.py`.

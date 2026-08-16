@@ -117,6 +117,10 @@ markers = [
 ]
 
 [tool.ruff]
+extend-exclude = [
+    "docs/superpowers/plans",
+    "docs/superpowers/specs",
+]
 line-length = 100
 target-version = "py313"
 

@@ -106,7 +106,7 @@ async def test_search_concepts_scans_once_and_preserves_summary_contract(
             "description": "",
             "tags": ("tools",),
             "resource_uri": "bundlewalker://concept/entities/tools",
-        },
+        }
     ]
 ```
 

@@ -530,7 +530,10 @@ unstaged.
 In `tests/test_release_metadata.py`, add this constant below `CC0_PRESET_PATHS`:
 
 ```python
-PYTHON_HEADER = "# Copyright (C) 2026 Hendrik Reh\n# SPDX-License-Identifier: GPL-3.0-or-later\n"
+PYTHON_HEADER = (
+    "# Copyright (C) 2026 Hendrik Reh\n"
+    "# SPDX-License-Identifier: GPL-3.0-or-later\n"
+)
 ```
 
 Add this test after the CC0 scope test:

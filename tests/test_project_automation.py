@@ -581,6 +581,27 @@ def test_contributor_documentation_keeps_historical_records_immutable() -> None:
     assert "After every user-guide edit, update the embedded block" not in contributing
 
 
+@pytest.mark.parametrize("archive", ("plans", "specs"))
+def test_ruff_format_excludes_immutable_historical_records(archive: str) -> None:
+    archive_path = PROJECT_ROOT / "docs/superpowers" / archive
+    sentinel = archive_path / "_ruff-exclusion-contract.md"
+    unformatted = "# Ruff exclusion contract\n\n```python\nvalues=[1,2,3]\n```\n"
+    sentinel.write_text(unformatted, encoding="utf-8")
+
+    try:
+        completed = subprocess.run(
+            ["ruff", "format", "--check", "."],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        sentinel.unlink()
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 def test_pypi_workflow_is_tag_gated_oidc_only_and_reuses_exact_artifacts() -> None:
     path = PROJECT_ROOT / ".github/workflows/publish-pypi.yml"
     workflow_text = path.read_text(encoding="utf-8")

@@ -247,7 +247,10 @@ dependency-group key rather than weakening the contract.
 In `tests/test_project_automation.py`, require this exact token in both workflow texts:
 
 ```python
-publisher = "pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1"
+publisher = (
+    "pypa/gh-action-pypi-publish@"
+    "ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1"
+)
 assert publisher in testpypi_text
 assert publisher in production_text
 assert testpypi_text.count(publisher) == 1
