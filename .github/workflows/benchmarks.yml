@@ -43,7 +43,7 @@ jobs:
           --output "benchmark-results/suite-1-${{ github.sha }}-${{ runner.os }}-py${{ matrix.python-version }}-${{ github.run_id }}.json"
       - name: Upload complete evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: benchmark-evidence-${{ runner.os }}-py${{ matrix.python-version }}
           path: benchmark-results/*.json
@@ -81,7 +81,7 @@ jobs:
           --provisional
           --require-matrix
       - name: Upload matrix summary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: benchmark-matrix-summary
           path: benchmark-results/summary.md
